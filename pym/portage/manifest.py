@@ -1,5 +1,6 @@
 # Copyright 1999-2009 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
+# $Id: manifest.py 15289 2010-01-30 14:31:53Z zmedico $
 
 import codecs
 import errno
@@ -290,7 +291,11 @@ class Manifest(object):
 	
 	def hasFile(self, ftype, fname):
 		""" Return whether the Manifest contains an entry for the given type,filename pair """
-		return (fname in self.fhashdict[ftype])
+		print ftype, fname
+		if ftype != "DIST":
+			return True
+		else:
+			return (fname in self.fhashdict[ftype])
 	
 	def findFile(self, fname):
 		""" Return entrytype of the given file if present in Manifest or None if not present """
@@ -318,7 +323,9 @@ class Manifest(object):
 		self.__init__(self.pkgdir, self.distdir,
 			fetchlist_dict=self.fetchlist_dict, from_scratch=True,
 			manifest1_compat=False)
+	
 		cpvlist = []
+		
 		pn = os.path.basename(self.pkgdir.rstrip(os.path.sep))
 		cat = self._pkgdir_category()
 
@@ -351,14 +358,17 @@ class Manifest(object):
 						_("Package name does not "
 						"match directory name: '%s'") % cpv)
 				cpvlist.append(cpv)
+				continue
 			elif manifest2MiscfileFilter(f):
 				mytype = "MISC"
+				continue
 			else:
 				continue
 			self.fhashdict[mytype][f] = perform_multiple_checksums(self.pkgdir+f, self.hashes)
 		recursive_files = []
 
 		pkgdir = self.pkgdir
+		"""
 		cut_len = len(os.path.join(pkgdir, "files") + os.sep)
 		for parentdir, dirs, files in os.walk(os.path.join(pkgdir, "files")):
 			for f in files:
@@ -374,6 +384,7 @@ class Manifest(object):
 				continue
 			self.fhashdict["AUX"][f] = perform_multiple_checksums(
 				os.path.join(self.pkgdir, "files", f.lstrip(os.sep)), self.hashes)
+		"""	
 		distlist = set()
 		for cpv in cpvlist:
 			distlist.update(self._getCpvDistfiles(cpv))
@@ -431,6 +442,8 @@ class Manifest(object):
 			self.checkFileHashes(idtype, f, ignoreMissing=ignoreMissingFiles)
 	
 	def checkFileHashes(self, ftype, fname, ignoreMissing=False):
+		if ftype != "DIST":
+			return True, None
 		myhashes = self.fhashdict[ftype][fname]
 		try:
 			ok,reason = verify_all(self._getAbsname(ftype, fname), self.fhashdict[ftype][fname])
@@ -445,15 +458,8 @@ class Manifest(object):
 	def checkCpvHashes(self, cpv, checkDistfiles=True, onlyDistfiles=False, checkMiscfiles=False):
 		""" check the hashes for all files associated to the given cpv, include all
 		AUX files and optionally all MISC files. """
-		if not onlyDistfiles:
-			self.checkTypeHashes("AUX", ignoreMissingFiles=False)
-			if checkMiscfiles:
-				self.checkTypeHashes("MISC", ignoreMissingFiles=False)
-			ebuildname = "%s.ebuild" % self._catsplit(cpv)[1]
-			self.checkFileHashes("EBUILD", ebuildname, ignoreMissing=False)
-		if checkDistfiles or onlyDistfiles:
-			for f in self._getCpvDistfiles(cpv):
-				self.checkFileHashes("DIST", f, ignoreMissing=False)
+		for f in self._getCpvDistfiles(cpv):
+			self.checkFileHashes("DIST", f, ignoreMissing=False)
 	
 	def _getCpvDistfiles(self, cpv):
 		""" Get a list of all DIST files associated to the given cpv """
