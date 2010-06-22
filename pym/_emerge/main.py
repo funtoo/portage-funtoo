@@ -1211,7 +1211,7 @@ def check_procfs():
 
 def emerge_main():
 	global portage	# NFC why this is necessary now - genone
-	portage._disable_legacy_globals()
+	#portage._disable_legacy_globals()
 	# Disable color until we're sure that it should be enabled (after
 	# EMERGE_DEFAULT_OPTS has been parsed).
 	portage.output.havecolor = 0

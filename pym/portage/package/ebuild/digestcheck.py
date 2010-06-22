@@ -28,7 +28,7 @@ def digestcheck(myfiles, mysettings, strict=0, justmanifest=0):
 			return 0
 		else:
 			return 1
-	mf = Manifest(pkgdir, mysettings["DISTDIR"])
+	mf = Manifest(pkgdir, mysettings["DISTDIR"], mini_manifest = "mini-manifest" in mysettings.features)
 	manifest_empty = True
 	for d in mf.fhashdict.values():
 		if d:
@@ -126,7 +126,7 @@ def digestcheck(myfiles, mysettings, strict=0, justmanifest=0):
 				continue
 			if d.startswith(".") or d == "CVS":
 				dirs.remove(d_bytes)
-		if portage._mini_manifests:
+		if "mini-manifest" in mysettings.features:
 			return 1
 		for f in files:
 			try:

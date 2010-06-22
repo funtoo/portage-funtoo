@@ -314,7 +314,7 @@ class search(object):
 						pkgdir = os.path.dirname(myebuild)
 						from portage import manifest
 						mf = manifest.Manifest(
-							pkgdir, self.settings["DISTDIR"])
+							pkgdir, self.settings["DISTDIR"], mini_manifest = "mini-manifest" in self.settings.features)
 						try:
 							uri_map = self.portdb.getFetchMap(mycpv)
 						except portage.exception.InvalidDependString as e:

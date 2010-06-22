@@ -20,6 +20,7 @@ from portage.exception import DigestException, FileNotFound, \
 	PortageException, PortagePackageException
 from portage.localization import _
 
+
 class FileNotInManifestException(PortageException):
 	pass
 
@@ -98,12 +99,15 @@ class Manifest2Entry(ManifestEntry):
 class Manifest(object):
 	parsers = (parseManifest2,)
 	def __init__(self, pkgdir, distdir, fetchlist_dict=None,
-		manifest1_compat=False, from_scratch=False):
+		manifest1_compat=False, from_scratch=False, **args):
 		""" create new Manifest instance for package in pkgdir
 		    and add compability entries for old portage versions if manifest1_compat == True.
 		    Do not parse Manifest file if from_scratch == True (only for internal use)
 			The fetchlist_dict parameter is required only for generation of
 			a Manifest (not needed for parsing and checking sums)."""
+		self._mini_manifest = False
+		if "mini_manifest" in args:
+			self._mini_manifest = args["mini_manifest"]
 		self.pkgdir = _unicode_decode(pkgdir).rstrip(os.sep) + os.sep
 		self.fhashdict = {}
 		self.hashes = set()
@@ -291,7 +295,7 @@ class Manifest(object):
 	
 	def hasFile(self, ftype, fname):
 		""" Return whether the Manifest contains an entry for the given type,filename pair """
-		if portage._mini_manifests and ftype != "DIST":
+		if self._mini_manifest and ( ftype != "DIST" ):
 			return True
 		else:
 			return (fname in self.fhashdict[ftype])
@@ -357,11 +361,11 @@ class Manifest(object):
 						_("Package name does not "
 						"match directory name: '%s'") % cpv)
 				cpvlist.append(cpv)
-				if portage._mini_manifests:
+				if self._mini_manifest:
 					continue
 			elif manifest2MiscfileFilter(f):
 				mytype = "MISC"
-				if portage._mini_manifests:
+				if self._mini_manifest:
 					continue
 			else:
 				continue
@@ -369,7 +373,7 @@ class Manifest(object):
 		recursive_files = []
 
 		pkgdir = self.pkgdir
-		if portage._mini_manifests:
+		if self._mini_manifest:
 			cut_len = len(os.path.join(pkgdir, "files") + os.sep)
 			for parentdir, dirs, files in os.walk(os.path.join(pkgdir, "files")):
 				for f in files:
@@ -442,7 +446,7 @@ class Manifest(object):
 			self.checkFileHashes(idtype, f, ignoreMissing=ignoreMissingFiles)
 	
 	def checkFileHashes(self, ftype, fname, ignoreMissing=False):
-		if portage._mini_manifests and ftype != "DIST":
+		if self._mini_manifest and ftype != "DIST":
 			return True, None
 		myhashes = self.fhashdict[ftype][fname]
 		try:
@@ -458,7 +462,7 @@ class Manifest(object):
 	def checkCpvHashes(self, cpv, checkDistfiles=True, onlyDistfiles=False, checkMiscfiles=False):
 		""" check the hashes for all files associated to the given cpv, include all
 		AUX files and optionally all MISC files. """
-		if (not portage._mini_manifests) and (not onlyDistfiles):
+		if (not self._mini_manifest) and (not onlyDistfiles):
 			self.checkTypeHashes("AUX", ignoreMissingFiles=False)
 			if checkMiscfiles:
 				self.checkTypeHashes("MISC", ignoreMissingFiles=False)

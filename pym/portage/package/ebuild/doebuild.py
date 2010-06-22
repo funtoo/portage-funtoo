@@ -438,7 +438,7 @@ def doebuild(myebuild, mydo, myroot, mysettings, debug=0, listonly=0,
 				out.eerror(_("Manifest not found for '%s'") % (myebuild,))
 				_doebuild_broken_ebuilds.add(myebuild)
 				return 1
-			mf = Manifest(pkgdir, mysettings["DISTDIR"])
+			mf = Manifest(pkgdir, mysettings["DISTDIR"], mini_manifest = "mini-manifest" in mysettings.features)
 
 		else:
 			mf = _doebuild_manifest_cache
