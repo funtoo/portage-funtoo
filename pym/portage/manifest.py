@@ -291,7 +291,7 @@ class Manifest(object):
 	
 	def hasFile(self, ftype, fname):
 		""" Return whether the Manifest contains an entry for the given type,filename pair """
-		if ftype != "DIST":
+		if portage._mini_manifests and ftype != "DIST":
 			return True
 		else:
 			return (fname in self.fhashdict[ftype])
@@ -357,33 +357,34 @@ class Manifest(object):
 						_("Package name does not "
 						"match directory name: '%s'") % cpv)
 				cpvlist.append(cpv)
-				continue
+				if portage._mini_manifests:
+					continue
 			elif manifest2MiscfileFilter(f):
 				mytype = "MISC"
-				continue
+				if portage._mini_manifests:
+					continue
 			else:
 				continue
 			self.fhashdict[mytype][f] = perform_multiple_checksums(self.pkgdir+f, self.hashes)
 		recursive_files = []
 
 		pkgdir = self.pkgdir
-		"""
-		cut_len = len(os.path.join(pkgdir, "files") + os.sep)
-		for parentdir, dirs, files in os.walk(os.path.join(pkgdir, "files")):
-			for f in files:
-				try:
-					f = _unicode_decode(f,
-						encoding=_encodings['fs'], errors='strict')
-				except UnicodeDecodeError:
+		if portage._mini_manifests:
+			cut_len = len(os.path.join(pkgdir, "files") + os.sep)
+			for parentdir, dirs, files in os.walk(os.path.join(pkgdir, "files")):
+				for f in files:
+					try:
+						f = _unicode_decode(f,
+							encoding=_encodings['fs'], errors='strict')
+					except UnicodeDecodeError:
+						continue
+					full_path = os.path.join(parentdir, f)
+					recursive_files.append(full_path[cut_len:])
+			for f in recursive_files:
+				if not manifest2AuxfileFilter(f):
 					continue
-				full_path = os.path.join(parentdir, f)
-				recursive_files.append(full_path[cut_len:])
-		for f in recursive_files:
-			if not manifest2AuxfileFilter(f):
-				continue
-			self.fhashdict["AUX"][f] = perform_multiple_checksums(
-				os.path.join(self.pkgdir, "files", f.lstrip(os.sep)), self.hashes)
-		"""	
+				self.fhashdict["AUX"][f] = perform_multiple_checksums(
+					os.path.join(self.pkgdir, "files", f.lstrip(os.sep)), self.hashes)
 		distlist = set()
 		for cpv in cpvlist:
 			distlist.update(self._getCpvDistfiles(cpv))
@@ -441,7 +442,7 @@ class Manifest(object):
 			self.checkFileHashes(idtype, f, ignoreMissing=ignoreMissingFiles)
 	
 	def checkFileHashes(self, ftype, fname, ignoreMissing=False):
-		if ftype != "DIST":
+		if portage._mini_manifests and ftype != "DIST":
 			return True, None
 		myhashes = self.fhashdict[ftype][fname]
 		try:
@@ -457,8 +458,15 @@ class Manifest(object):
 	def checkCpvHashes(self, cpv, checkDistfiles=True, onlyDistfiles=False, checkMiscfiles=False):
 		""" check the hashes for all files associated to the given cpv, include all
 		AUX files and optionally all MISC files. """
-		for f in self._getCpvDistfiles(cpv):
-			self.checkFileHashes("DIST", f, ignoreMissing=False)
+		if (not self._mini_manifests) and (not onlyDistfiles):
+			self.checkTypeHashes("AUX", ignoreMissingFiles=False)
+			if checkMiscfiles:
+				self.checkTypeHashes("MISC", ignoreMissingFiles=False)
+			ebuildname = "%s.ebuild" % self._catsplit(cpv)[1]
+			self.checkFileHashes("EBUILD", ebuildname, ignoreMissing=False)
+		if checkDistfiles or onlyDistfiles:
+			for f in self._getCpvDistfiles(cpv):
+				self.checkFileHashes("DIST", f, ignoreMissing=False)
 	
 	def _getCpvDistfiles(self, cpv):
 		""" Get a list of all DIST files associated to the given cpv """

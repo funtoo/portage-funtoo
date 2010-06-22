@@ -126,7 +126,8 @@ def digestcheck(myfiles, mysettings, strict=0, justmanifest=0):
 				continue
 			if d.startswith(".") or d == "CVS":
 				dirs.remove(d_bytes)
-		"""
+		if portage._mini_manifests:
+			return 1
 		for f in files:
 			try:
 				f = _unicode_decode(f,
@@ -152,5 +153,4 @@ def digestcheck(myfiles, mysettings, strict=0, justmanifest=0):
 					os.path.join(filesdir, f), noiselevel=-1)
 				if strict:
 					return 0
-		"""
 	return 1

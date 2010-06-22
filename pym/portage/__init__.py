@@ -471,6 +471,7 @@ def _parse_eapi_ebuild_head(f):
 
 # True when FEATURES=parse-eapi-glep-55 is enabled.
 _glep_55_enabled = False
+_mini_manifests = False
 
 _split_ebuild_name_glep55_re = re.compile(r'^(.*)\.ebuild(-([^.]+))?$')
 
