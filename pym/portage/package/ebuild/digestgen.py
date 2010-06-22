@@ -162,7 +162,7 @@ def digestgen(myarchives=None, mysettings=None,
 		try:
 			mf.create(assumeDistHashesSometimes=True,
 				assumeDistHashesAlways=(
-				"assume-digests" in mysettings.features))
+				"assume-digests" in mysettings.features), mini_manifest = "mini-manifest" in mysettings.features)
 		except FileNotFound as e:
 			writemsg(_("!!! File %s doesn't exist, can't update "
 				"Manifest\n") % e, noiselevel=-1)

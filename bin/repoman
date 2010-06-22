@@ -1018,7 +1018,7 @@ for x in scanlist:
 				mf = portage.manifest.Manifest(checkdir, distdir,
 					fetchlist_dict=fetchlist_dict, mini_manifest = "mini-manifest" in repoman_settings.features )
 				mf.create(requiredDistfiles=None,
-					assumeDistHashesAlways=True)
+					assumeDistHashesAlways=True, mini_manifest = "mini-manifest" in repoman_settings.features)
 				for distfiles in fetchlist_dict.values():
 					for distfile in distfiles:
 						if os.path.isfile(os.path.join(distdir, distfile)):

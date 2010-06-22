@@ -200,7 +200,7 @@ def discard_digests(myebuild, mysettings, mydbapi):
 		mf = Manifest(pkgdir, mysettings["DISTDIR"],
 			fetchlist_dict=fetchlist_dict, manifest1_compat=False, mini_manifest = "mini-manifest" in mysettings.features)
 		mf.create(requiredDistfiles=None,
-			assumeDistHashesSometimes=True, assumeDistHashesAlways=True)
+			assumeDistHashesSometimes=True, assumeDistHashesAlways=True, mini_manifest = "mini-manifest" in mysettings.features)
 		distfiles = fetchlist_dict[cpv]
 		for myfile in distfiles:
 			try:

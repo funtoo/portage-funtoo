@@ -308,7 +308,7 @@ class Manifest(object):
 		return None
 	
 	def create(self, checkExisting=False, assumeDistHashesSometimes=False,
-		assumeDistHashesAlways=False, requiredDistfiles=[]):
+		assumeDistHashesAlways=False, requiredDistfiles=[], **args):
 		""" Recreate this Manifest from scratch.  This will not use any
 		existing checksums unless assumeDistHashesSometimes or
 		assumeDistHashesAlways is true (assumeDistHashesSometimes will only
@@ -317,6 +317,9 @@ class Manifest(object):
 		distfiles to raise a FileNotFound exception for (if no file or existing
 		checksums are available), and defaults to all distfiles when not
 		specified."""
+		mini_manifest = False
+		if args.has_key("mini_manifest"):
+			mini_manifest = args["mini_manifest"]
 		if checkExisting:
 			self.checkAllHashes()
 		if assumeDistHashesSometimes or assumeDistHashesAlways:
@@ -361,11 +364,11 @@ class Manifest(object):
 						_("Package name does not "
 						"match directory name: '%s'") % cpv)
 				cpvlist.append(cpv)
-				if self._mini_manifest:
+				if mini_manifest:
 					continue
 			elif manifest2MiscfileFilter(f):
 				mytype = "MISC"
-				if self._mini_manifest:
+				if mini_manifest:
 					continue
 			else:
 				continue
@@ -373,7 +376,7 @@ class Manifest(object):
 		recursive_files = []
 
 		pkgdir = self.pkgdir
-		if self._mini_manifest:
+		if not mini_manifest:
 			cut_len = len(os.path.join(pkgdir, "files") + os.sep)
 			for parentdir, dirs, files in os.walk(os.path.join(pkgdir, "files")):
 				for f in files:
