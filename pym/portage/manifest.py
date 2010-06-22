@@ -458,7 +458,7 @@ class Manifest(object):
 	def checkCpvHashes(self, cpv, checkDistfiles=True, onlyDistfiles=False, checkMiscfiles=False):
 		""" check the hashes for all files associated to the given cpv, include all
 		AUX files and optionally all MISC files. """
-		if (not self._mini_manifests) and (not onlyDistfiles):
+		if (not portage._mini_manifests) and (not onlyDistfiles):
 			self.checkTypeHashes("AUX", ignoreMissingFiles=False)
 			if checkMiscfiles:
 				self.checkTypeHashes("MISC", ignoreMissingFiles=False)
