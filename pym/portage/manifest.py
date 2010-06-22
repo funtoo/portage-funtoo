@@ -291,7 +291,6 @@ class Manifest(object):
 	
 	def hasFile(self, ftype, fname):
 		""" Return whether the Manifest contains an entry for the given type,filename pair """
-		print ftype, fname
 		if ftype != "DIST":
 			return True
 		else:
