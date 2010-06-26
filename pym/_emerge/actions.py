@@ -1835,7 +1835,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		msg = ">>> Starting git pull in %s..." % myportdir
 		emergelog(xterm_titles, msg )
 		writemsg_level(msg + "\n")
-		exitcode = portage.process.spawn_bash("cd %s ; git pull" % \
+		exitcode = portage.process.spawn_bash("cd %s ; git pull --no-stat" % \
 			(portage._shell_quote(myportdir),), **spawn_kwargs)
 		if exitcode != os.EX_OK:
 			msg = "!!! git pull error in %s." % myportdir
