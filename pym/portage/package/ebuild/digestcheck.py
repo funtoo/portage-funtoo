@@ -34,7 +34,7 @@ def digestcheck(myfiles, mysettings, strict=0, justmanifest=0):
 		if d:
 			manifest_empty = False
 			break
-	if manifest_empty:
+	if manifest_empty and "mini-manifest" not in mysettings.features:
 		writemsg(_("!!! Manifest is empty: '%s'\n") % manifest_path,
 			noiselevel=-1)
 		if strict:
