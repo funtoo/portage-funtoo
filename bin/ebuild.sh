@@ -2155,11 +2155,21 @@ ebuild_main() {
 		if [ -n "${dbkey}" ] ; then
 			> "${dbkey}"
 			for f in ${auxdbkeys} ; do
-				echo $(echo ${!f}) >> "${dbkey}" || exit $?
+				if [ "${dbkey_format}" == "extend-1" ]
+				then
+					echo $(echo ${f}:${!f}) >> "${dbkey}" || exit $?
+				else
+					echo $(echo ${!f}) >> "${dbkey}" || exit $?
+				fi
 			done
 		else
 			for f in ${auxdbkeys} ; do
-				echo $(echo ${!f}) 1>&9 || exit $?
+				if [ "${dbkey_format}" == "extend-1" ]
+				then
+					echo $(echo ${f}:${!f}) 1>&9 || exit $?
+				else
+					echo $(echo ${!f}) 1>&9 || exit $?
+				fi
 			done
 			exec 9>&-
 		fi
