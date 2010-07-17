@@ -314,7 +314,7 @@ class Manifest(object):
 		checksums are available), and defaults to all distfiles when not
 		specified."""
 		mini_manifest = False
-		if args.has_key("mini_manifest"):
+		if "mini_manifest" in args:
 			mini_manifest = args["mini_manifest"]
 		if checkExisting:
 			self.checkAllHashes()
