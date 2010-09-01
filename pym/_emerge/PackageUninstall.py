@@ -1,12 +1,9 @@
-# Copyright 1999-2009 Gentoo Foundation
+# Copyright 1999-2010 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
-import codecs
 import logging
 import portage
 from portage import os
-from portage import _encodings
-from portage import _unicode_encode
 from _emerge.AsynchronousTask import AsynchronousTask
 from _emerge.unmerge import unmerge
 from _emerge.UninstallFailure import UninstallFailure
@@ -27,8 +24,8 @@ class PackageUninstall(AsynchronousTask):
 		else:
 			self.returncode = os.EX_OK
 
-		if retval == 1:
-			self.world_atom(self.pkg)
+			if retval == 1:
+				self.world_atom(self.pkg)
 
 		self.wait()
 
@@ -42,15 +39,4 @@ class PackageUninstall(AsynchronousTask):
 				portage.util.writemsg_level(msg,
 					level=level, noiselevel=noiselevel)
 		else:
-			if not background:
-				portage.util.writemsg_level(msg,
-					level=level, noiselevel=noiselevel)
-
-			f = codecs.open(_unicode_encode(log_path,
-				encoding=_encodings['fs'], errors='strict'),
-				mode='a', encoding=_encodings['content'], errors='replace')
-			try:
-				f.write(msg)
-			finally:
-				f.close()
-
+			self.scheduler.output(msg, level=level, noiselevel=noiselevel)

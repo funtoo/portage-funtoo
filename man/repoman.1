@@ -1,4 +1,4 @@
-.TH "REPOMAN" "1" "Aug 2008" "Portage 2.2" "Portage"
+.TH "REPOMAN" "1" "Aug 2008" "Portage VERSION" "Portage"
 .SH NAME
 repoman \- Gentoo's program to enforce a minimal level of quality assurance in packages added to the portage tree
 .SH SYNOPSIS
@@ -11,6 +11,9 @@ checks the quality of ebuild repositories.
 
 Note: \fBrepoman commit\fR only works \fIinside local\fR cvs, git, or subversion repositories.
 .SH OPTIONS
+.TP
+\fB-a\fR, \fB--ask\fR
+Request a confirmation before commiting
 .TP
 \fB--force\fR
 Force commit to proceed, regardless of QA issues. For convenience, this option
@@ -131,6 +134,9 @@ Virtuals that have a non-empty HOMEPAGE variable
 .B IUSE.invalid
 This ebuild has a variable in IUSE that is not in the use.desc or its metadata.xml file
 .TP
+.B IUSE.missing
+This ebuild has a USE conditional which references a flag that is not listed in IUSE
+.TP
 .B IUSE.undefined
 This ebuild does not define IUSE (style guideline says to define IUSE even when empty)
 .TP
@@ -207,6 +213,10 @@ Masked ebuilds with RDEPEND settings (matched against *all* ebuilds) in developi
 .B RDEPEND.badtilde
 RDEPEND uses the ~ dep operator with a non-zero revision part, which is useless (the revision is ignored)
 .TP
+.B RDEPEND.implicit
+RDEPEND is unset in the ebuild which triggers implicit RDEPEND=$DEPEND
+assignment (prior to EAPI 4)
+.TP
 .B RDEPEND.suspect
 RDEPEND contains a package that usually only belongs in DEPEND
 .TP
@@ -279,6 +289,9 @@ PATCHES variable should be a bash array to ensure white space safety
 Error generating cache entry for ebuild; typically caused by ebuild syntax error
 or digest verification failure.
 .TP
+.B eprefixify.defined
+The ebuild uses eprefixify, but does not inherit the prefix eclass
+.TP
 .B file.UTF8
 File is not UTF8 compliant
 .TP
@@ -291,11 +304,11 @@ File/dir name must be composed of only the following chars: a-zA-Z0-9._-+:
 .B file.size
 Files in the files directory must be under 20k
 .TP
-.B filedir.missing
-Package lacks a files directory
-.TP
 .B inherit.autotools
 Ebuild inherits autotools but does not call eautomake, eautoconf or eautoreconf
+.TP
+.B inherit.deprecated
+Ebuild inherits a deprecated eclass
 .TP
 .B java.eclassesnotused
 With virtual/jdk in DEPEND you must inherit a java eclass. Refer to

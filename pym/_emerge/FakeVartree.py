@@ -7,11 +7,19 @@ import portage
 from portage import os
 from _emerge.Package import Package
 from _emerge.PackageVirtualDbapi import PackageVirtualDbapi
+from portage.const import VDB_PATH
 from portage.dbapi.vartree import vartree
 from portage.update import grab_updates, parse_updates, update_dbentries
 
 if sys.hexversion >= 0x3000000:
 	long = int
+
+class FakeVardbapi(PackageVirtualDbapi):
+	def getpath(self, cpv, filename=None):
+		path = os.path.join(self.settings['EROOT'], VDB_PATH, cpv)
+		if filename is not None:
+			path =os.path.join(path, filename)
+		return path
 
 class FakeVartree(vartree):
 	"""This is implements an in-memory copy of a vartree instance that provides
@@ -37,9 +45,9 @@ class FakeVartree(vartree):
 			mykeys.append("_mtime_")
 		self._db_keys = mykeys
 		self._pkg_cache = pkg_cache
-		self.dbapi = PackageVirtualDbapi(real_vartree.settings)
+		self.dbapi = FakeVardbapi(real_vartree.settings)
 
-		# Intialize variables needed for lazy cache pulls of the live ebuild
+		# Initialize variables needed for lazy cache pulls of the live ebuild
 		# metadata.  This ensures that the vardb lock is released ASAP, without
 		# being delayed in case cache generation is triggered.
 		self._aux_get = self.dbapi.aux_get
@@ -79,7 +87,7 @@ class FakeVartree(vartree):
 		except (KeyError, portage.exception.PortageException):
 			if self._global_updates is None:
 				self._global_updates = \
-					grab_global_updates(self._portdb.porttree_root)
+					grab_global_updates(self._portdb)
 			perform_global_updates(
 				pkg, self.dbapi, self._global_updates)
 		return self._aux_get(pkg, wants)
@@ -106,14 +114,13 @@ class FakeVartree(vartree):
 				portage.locks.unlockdir(vdb_lock)
 
 		# Populate the old-style virtuals using the cached values.
-		if not self.settings.treeVirtuals:
-			# Skip the aux_get wrapper here, to avoid unwanted
-			# cache generation.
-			try:
-				self.dbapi.aux_get = self._aux_get
-				self.settings._populate_treeVirtuals(self)
-			finally:
-				self.dbapi.aux_get = self._aux_get_wrapper
+		# Skip the aux_get wrapper here, to avoid unwanted
+		# cache generation.
+		try:
+			self.dbapi.aux_get = self._aux_get
+			self.settings._populate_treeVirtuals_if_needed(self)
+		finally:
+			self.dbapi.aux_get = self._aux_get_wrapper
 
 	def _sync(self):
 
@@ -179,21 +186,46 @@ class FakeVartree(vartree):
 
 		return pkg
 
-def grab_global_updates(portdir):
-	updpath = os.path.join(portdir, "profiles", "updates")
-	try:
-		rawupdates = grab_updates(updpath)
-	except portage.exception.DirectoryNotFound:
-		rawupdates = []
-	upd_commands = []
-	for mykey, mystat, mycontent in rawupdates:
-		commands, errors = parse_updates(mycontent)
-		upd_commands.extend(commands)
-	return upd_commands
+def grab_global_updates(portdb):
+	retupdates = {}
 
-def perform_global_updates(mycpv, mydb, mycommands):
-	aux_keys = ["DEPEND", "RDEPEND", "PDEPEND"]
+	for repo_name in portdb.getRepositories():
+		repo = portdb.getRepositoryPath(repo_name)
+		updpath = os.path.join(repo, "profiles", "updates")
+		if not os.path.isdir(updpath):
+			continue
+
+		try:
+			rawupdates = grab_updates(updpath)
+		except portage.exception.DirectoryNotFound:
+			rawupdates = []
+		upd_commands = []
+		for mykey, mystat, mycontent in rawupdates:
+			commands, errors = parse_updates(mycontent)
+			upd_commands.extend(commands)
+		retupdates[repo_name] = upd_commands
+
+	master_repo = portdb.getRepositoryName(portdb.porttree_root)
+	if master_repo in retupdates:
+		retupdates['DEFAULT'] = retupdates[master_repo]
+
+	return retupdates
+
+def perform_global_updates(mycpv, mydb, myupdates):
+	aux_keys = ["DEPEND", "RDEPEND", "PDEPEND", 'repository']
 	aux_dict = dict(zip(aux_keys, mydb.aux_get(mycpv, aux_keys)))
+	repository = aux_dict.pop('repository')
+	try:
+		mycommands = myupdates[repository]
+	except KeyError:
+		try:
+			mycommands = myupdates['DEFAULT']
+		except KeyError:
+			return
+
+	if not mycommands:
+		return
+
 	updates = update_dbentries(mycommands, aux_dict)
 	if updates:
 		mydb.aux_update(mycpv, updates)

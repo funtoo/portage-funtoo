@@ -1,4 +1,4 @@
-# Copyright 1999-2009 Gentoo Foundation
+# Copyright 1999-2010 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 from _emerge.EbuildExecuter import EbuildExecuter
@@ -13,10 +13,10 @@ from _emerge.MiscFunctionsProcess import MiscFunctionsProcess
 from portage.util import writemsg
 import portage
 from portage import os
-from portage import _encodings
-from portage import _unicode_encode
-import codecs
 from portage.output import colorize
+from portage.package.ebuild.digestcheck import digestcheck
+from portage.package.ebuild.doebuild import _check_temp_dir
+
 class EbuildBuild(CompositeTask):
 
 	__slots__ = ("args_set", "config_pool", "find_blockers",
@@ -26,11 +26,16 @@ class EbuildBuild(CompositeTask):
 
 	def _start(self):
 
-		logger = self.logger
-		opts = self.opts
 		pkg = self.pkg
 		settings = self.settings
-		world_atom = self.world_atom
+
+		rval = _check_temp_dir(settings)
+		if rval != os.EX_OK:
+			self.returncode = rval
+			self._current_task = None
+			self.wait()
+			return
+
 		root_config = pkg.root_config
 		tree = "porttree"
 		self._tree = tree
@@ -41,6 +46,14 @@ class EbuildBuild(CompositeTask):
 		if ebuild_path is None:
 			raise AssertionError("ebuild not found for '%s'" % pkg.cpv)
 		self._ebuild_path = ebuild_path
+
+		# Check the manifest here since with --keep-going mode it's
+		# currently possible to get this far with a broken manifest.
+		if not self._check_manifest():
+			self.returncode = 1
+			self._current_task = None
+			self.wait()
+			return
 
 		prefetcher = self.prefetcher
 		if prefetcher is None:
@@ -67,6 +80,24 @@ class EbuildBuild(CompositeTask):
 
 		self._prefetch_exit(prefetcher)
 
+	def _check_manifest(self):
+		success = True
+
+		settings = self.settings
+		if 'strict' in settings.features:
+			settings['O'] = os.path.dirname(self._ebuild_path)
+			quiet_setting = settings.get('PORTAGE_QUIET')
+			settings['PORTAGE_QUIET'] = '1'
+			try:
+				success = digestcheck([], settings, strict=True)
+			finally:
+				if quiet_setting:
+					settings['PORTAGE_QUIET'] = quiet_setting
+				else:
+					del settings['PORTAGE_QUIET']
+
+		return success
+
 	def _prefetch_exit(self, prefetcher):
 
 		opts = self.opts
@@ -83,32 +114,52 @@ class EbuildBuild(CompositeTask):
 				self.wait()
 				return
 
+		self._build_dir = EbuildBuildDir(pkg=pkg, settings=settings)
+		self._build_dir.lock()
+
+		# Cleaning needs to happen before fetch, since the build dir
+		# is used for log handling.
+		msg = " === (%s of %s) Cleaning (%s::%s)" % \
+			(self.pkg_count.curval, self.pkg_count.maxval,
+			self.pkg.cpv, self._ebuild_path)
+		short_msg = "emerge: (%s of %s) %s Clean" % \
+			(self.pkg_count.curval, self.pkg_count.maxval, self.pkg.cpv)
+		self.logger.log(msg, short_msg=short_msg)
+
+		pre_clean_phase = EbuildPhase(background=self.background,
+			phase='clean', scheduler=self.scheduler, settings=self.settings)
+		self._start_task(pre_clean_phase, self._pre_clean_exit)
+
+	def _pre_clean_exit(self, pre_clean_phase):
+		if self._final_exit(pre_clean_phase) != os.EX_OK:
+			self._unlock_builddir()
+			self.wait()
+			return
+
+		# for log handling
+		portage.prepare_build_dirs(self.pkg.root, self.settings, 1)
+
 		fetcher = EbuildFetcher(config_pool=self.config_pool,
-			fetchall=opts.fetch_all_uri,
-			fetchonly=opts.fetchonly,
+			fetchall=self.opts.fetch_all_uri,
+			fetchonly=self.opts.fetchonly,
 			background=self.background,
-			pkg=pkg, scheduler=self.scheduler)
+			logfile=self.settings.get('PORTAGE_LOG_FILE'),
+			pkg=self.pkg, scheduler=self.scheduler)
 
 		self._start_task(fetcher, self._fetch_exit)
 
 	def _fetch_exit(self, fetcher):
-		opts = self.opts
-		pkg = self.pkg
 
-		fetch_failed = False
-		if opts.fetchonly:
-			fetch_failed = self._final_exit(fetcher) != os.EX_OK
-		else:
-			fetch_failed = self._default_exit(fetcher) != os.EX_OK
+		portage.elog.elog_process(self.pkg.cpv, self.settings)
 
-		if fetch_failed and fetcher.logfile is not None and \
-			os.path.exists(fetcher.logfile):
-			self.settings["PORTAGE_LOG_FILE"] = fetcher.logfile
-
-		if fetch_failed or opts.fetchonly:
+		if self._default_exit(fetcher) != os.EX_OK:
+			self._unlock_builddir()
 			self.wait()
 			return
 
+		# discard successful fetch log
+		self._build_dir.clean_log()
+		pkg = self.pkg
 		logger = self.logger
 		opts = self.opts
 		pkg_count = self.pkg_count
@@ -117,17 +168,6 @@ class EbuildBuild(CompositeTask):
 		features = settings.features
 		ebuild_path = self._ebuild_path
 		system_set = pkg.root_config.sets["system"]
-
-		self._build_dir = EbuildBuildDir(pkg=pkg, settings=settings)
-		self._build_dir.lock()
-
-		# Cleaning is triggered before the setup
-		# phase, in portage.doebuild().
-		msg = " === (%s of %s) Cleaning (%s::%s)" % \
-			(pkg_count.curval, pkg_count.maxval, pkg.cpv, ebuild_path)
-		short_msg = "emerge: (%s of %s) %s Clean" % \
-			(pkg_count.curval, pkg_count.maxval, pkg.cpv)
-		logger.log(msg, short_msg=short_msg)
 
 		#buildsyspkg: Check if we need to _force_ binary package creation
 		self._issyspkg = "buildsyspkg" in features and \
@@ -165,7 +205,6 @@ class EbuildBuild(CompositeTask):
 			self.wait()
 			return
 
-		opts = self.opts
 		buildpkg = self._buildpkg
 
 		if not buildpkg:
@@ -176,19 +215,8 @@ class EbuildBuild(CompositeTask):
 		if self._issyspkg:
 			msg = ">>> This is a system package, " + \
 				"let's pack a rescue tarball.\n"
-
-			log_path = self.settings.get("PORTAGE_LOG_FILE")
-			if log_path is not None:
-				log_file = codecs.open(_unicode_encode(log_path,
-					encoding=_encodings['fs'], errors='strict'),
-					mode='a', encoding=_encodings['content'], errors='replace')
-				try:
-					log_file.write(msg)
-				finally:
-					log_file.close()
-
-			if not self.background:
-				portage.writemsg_stdout(msg, noiselevel=-1)
+			self.scheduler.output(msg,
+				log_path=self.settings.get("PORTAGE_LOG_FILE"))
 
 		packager = EbuildBinpkg(background=self.background, pkg=self.pkg,
 			scheduler=self.scheduler, settings=self.settings)
@@ -211,7 +239,7 @@ class EbuildBuild(CompositeTask):
 			phase = 'success_hooks'
 			success_hooks = MiscFunctionsProcess(
 				background=self.background,
-				commands=[phase], phase=phase, pkg=self.pkg,
+				commands=[phase], phase=phase,
 				scheduler=self.scheduler, settings=self.settings)
 			self._start_task(success_hooks,
 				self._buildpkgonly_success_hook_exit)
@@ -230,9 +258,7 @@ class EbuildBuild(CompositeTask):
 		portage.elog.elog_process(self.pkg.cpv, self.settings)
 		phase = 'clean'
 		clean_phase = EbuildPhase(background=self.background,
-			pkg=self.pkg, phase=phase,
-			scheduler=self.scheduler, settings=self.settings,
-			tree=self._tree)
+			phase=phase, scheduler=self.scheduler, settings=self.settings)
 		self._start_task(clean_phase, self._clean_exit)
 
 	def _clean_exit(self, clean_phase):
@@ -248,7 +274,6 @@ class EbuildBuild(CompositeTask):
 		and neither fetchonly nor buildpkgonly mode are enabled.
 		"""
 
-		find_blockers = self.find_blockers
 		ldpath_mtimes = self.ldpath_mtimes
 		logger = self.logger
 		pkg = self.pkg

@@ -26,6 +26,10 @@ def main():
 	basedir = os.path.dirname(os.path.realpath(__file__))
 	testDirs = []
 
+	if len(sys.argv) > 1:
+		suite.addTests(getTestFromCommandLine(sys.argv[1:], basedir))
+		return TextTestRunner(verbosity=2).run(suite)
+
   # the os.walk help mentions relative paths as being quirky
 	# I was tired of adding dirs to the list, so now we add __test__
 	# to each dir we want tested.
@@ -51,6 +55,29 @@ def my_import(name):
 	for comp in components[1:]:
 		mod = getattr(mod, comp)
 	return mod
+
+def getTestFromCommandLine(args, base_path):
+	ret = []
+	for arg in args:
+		realpath = os.path.realpath(arg)
+		path = os.path.dirname(realpath)
+		f = realpath[len(path)+1:]
+
+		if not f.startswith("test") or not f.endswith(".py"):
+			raise Exception("Invalid argument: '%s'" % arg)
+
+		mymodule = f[:-3]
+
+		parent_path = path[len(base_path)+1:]
+		parent_module = ".".join(("portage", "tests", parent_path))
+		parent_module = parent_module.replace('/', '.')
+		result = []
+
+		# Make the trailing / a . for module importing
+		modname = ".".join((parent_module, mymodule))
+		mod = my_import(modname)
+		ret.append(unittest.TestLoader().loadTestsFromModule(mod))
+	return ret
 
 def getTests(path, base_path):
 	"""
@@ -126,6 +153,8 @@ class TestCase(unittest.TestCase):
 		try:
 			try:
 				self.setUp()
+			except SystemExit:
+				raise
 			except KeyboardInterrupt:
 				raise
 			except:
@@ -146,6 +175,8 @@ class TestCase(unittest.TestCase):
 				result.addError(self, sys.exc_info())
 			try:
 				self.tearDown()
+			except SystemExit:
+				raise
 			except KeyboardInterrupt:
 				raise
 			except:
@@ -154,6 +185,23 @@ class TestCase(unittest.TestCase):
 			if ok: result.addSuccess(self)
 		finally:
 			result.stopTest(self)
+
+	def assertRaisesMsg(self, msg, excClass, callableObj, *args, **kwargs):
+		"""Fail unless an exception of class excClass is thrown
+		   by callableObj when invoked with arguments args and keyword
+		   arguments kwargs. If a different type of exception is
+		   thrown, it will not be caught, and the test case will be
+		   deemed to have suffered an error, exactly as for an
+		   unexpected exception.
+		"""
+		try:
+		    callableObj(*args, **kwargs)
+		except excClass:
+		    return
+		else:
+		    if hasattr(excClass,'__name__'): excName = excClass.__name__
+		    else: excName = str(excClass)
+		    raise self.failureException("%s not raised: %s" % (excName, msg))
 			
 class TextTestRunner(unittest.TextTestRunner):
 	"""

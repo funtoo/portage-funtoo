@@ -1,7 +1,5 @@
-# Copyright 1999-2009 Gentoo Foundation
+# Copyright 1999-2010 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
-
-from _emerge.PackageVirtualDbapi import PackageVirtualDbapi
 
 class RootConfig(object):
 	"""This is used internally by depgraph to track information about a
@@ -20,7 +18,6 @@ class RootConfig(object):
 	def __init__(self, settings, trees, setconfig):
 		self.trees = trees
 		self.settings = settings
-		self.iuse_implicit = tuple(sorted(settings._get_implicit_iuse()))
 		self.root = self.settings["ROOT"]
 		self.setconfig = setconfig
 		if setconfig is None:

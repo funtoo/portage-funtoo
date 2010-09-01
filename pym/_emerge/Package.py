@@ -1,13 +1,14 @@
-# Copyright 1999-2009 Gentoo Foundation
+# Copyright 1999-2010 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
-import re
 import sys
 from itertools import chain
 import portage
 from portage.cache.mappings import slot_dict_class
-from portage.dep import isvalidatom, paren_reduce, use_reduce, \
-	paren_normalize, paren_enclose, _slot_re
+from portage.dep import Atom, check_required_use, use_reduce, \
+	paren_enclose, _slot_re
+from portage.eapi import eapi_has_iuse_defaults, eapi_has_required_use
+from portage.exception import InvalidDependString
 from _emerge.Task import Task
 
 if sys.hexversion >= 0x3000000:
@@ -30,7 +31,10 @@ class Package(Task):
 		"INHERITED", "IUSE", "KEYWORDS",
 		"LICENSE", "PDEPEND", "PROVIDE", "RDEPEND",
 		"repository", "PROPERTIES", "RESTRICT", "SLOT", "USE",
-		"_mtime_", "DEFINED_PHASES"]
+		"_mtime_", "DEFINED_PHASES", "REQUIRED_USE"]
+
+	_dep_keys = ('DEPEND', 'PDEPEND', 'RDEPEND',)
+	_use_conditional_misc_keys = ('LICENSE', 'PROPERTIES', 'RESTRICT')
 
 	def __init__(self, **kwargs):
 		Task.__init__(self, **kwargs)
@@ -47,12 +51,88 @@ class Package(Task):
 			# Avoid an InvalidAtom exception when creating slot_atom.
 			# This package instance will be masked due to empty SLOT.
 			slot = '0'
+		if (self.iuse.enabled or self.iuse.disabled) and \
+			not eapi_has_iuse_defaults(self.metadata["EAPI"]):
+			if not self.installed:
+				self._invalid_metadata('EAPI.incompatible',
+					"IUSE contains defaults, but EAPI doesn't allow them")
 		self.slot_atom = portage.dep.Atom("%s:%s" % (self.cp, slot))
 		self.category, self.pf = portage.catsplit(self.cpv)
 		self.cpv_split = portage.catpkgsplit(self.cpv)
 		self.pv_split = self.cpv_split[1:]
+		self._validate_deps()
 		self.masks = self._masks()
 		self.visible = self._visible(self.masks)
+
+	def _validate_deps(self):
+		"""
+		Validate deps. This does not trigger USE calculation since that
+		is expensive for ebuilds and therefore we want to avoid doing
+		in unnecessarily (like for masked packages).
+		"""
+		eapi = self.metadata['EAPI']
+		dep_eapi = eapi
+		dep_valid_flag = self.iuse.is_valid_flag
+		if self.installed:
+			# Ignore EAPI.incompatible and conditionals missing
+			# from IUSE for installed packages since these issues
+			# aren't relevant now (re-evaluate when new EAPIs are
+			# deployed).
+			dep_eapi = None
+			dep_valid_flag = None
+
+		for k in self._dep_keys:
+			v = self.metadata.get(k)
+			if not v:
+				continue
+			try:
+				use_reduce(v, eapi=dep_eapi, matchall=True,
+					is_valid_flag=dep_valid_flag, token_class=Atom)
+			except InvalidDependString as e:
+				self._metadata_exception(k, e)
+
+		k = 'PROVIDE'
+		v = self.metadata.get(k)
+		if v:
+			try:
+				use_reduce(v, eapi=dep_eapi, matchall=True,
+					is_valid_flag=dep_valid_flag, token_class=Atom)
+			except InvalidDependString as e:
+				self._metadata_exception(k, e)
+
+		for k in self._use_conditional_misc_keys:
+			v = self.metadata.get(k)
+			if not v:
+				continue
+			try:
+				use_reduce(v, eapi=dep_eapi, matchall=True,
+					is_valid_flag=dep_valid_flag)
+			except InvalidDependString as e:
+				self._metadata_exception(k, e)
+
+		k = 'REQUIRED_USE'
+		v = self.metadata.get(k)
+		if v:
+			if not eapi_has_required_use(eapi):
+				self._invalid_metadata('EAPI.incompatible',
+					"REQUIRED_USE set, but EAPI='%s' doesn't allow it" % eapi)
+			else:
+				try:
+					check_required_use(v, (),
+						self.iuse.is_valid_flag)
+				except InvalidDependString as e:
+					self._invalid_metadata(k + ".syntax",
+						"%s: %s" % (k, e))
+
+		k = 'SRC_URI'
+		v = self.metadata.get(k)
+		if v:
+			try:
+				use_reduce(v, is_src_uri=True, eapi=eapi, matchall=True,
+					is_valid_flag=self.iuse.is_valid_flag)
+			except InvalidDependString as e:
+				if not self.installed:
+					self._metadata_exception(k, e)
 
 	def copy(self):
 		return Package(built=self.built, cpv=self.cpv, depth=self.depth,
@@ -86,7 +166,7 @@ class Package(Task):
 				self.cpv, self.metadata)
 			if missing_properties:
 				masks['PROPERTIES'] = missing_properties
-		except portage.exception.InvalidDependString:
+		except InvalidDependString:
 			# already recorded as 'invalid'
 			pass
 
@@ -104,7 +184,7 @@ class Package(Task):
 				self.cpv, self.metadata)
 			if missing_licenses:
 				masks['LICENSE'] = missing_licenses
-		except portage.exception.InvalidDependString:
+		except InvalidDependString:
 			# already recorded as 'invalid'
 			pass
 
@@ -120,8 +200,10 @@ class Package(Task):
 			if 'EAPI.unsupported' in masks:
 				return False
 
+			if 'invalid' in masks:
+				return False
+
 			if not self.installed and ( \
-				'invalid' in masks or \
 				'CHOST' in masks or \
 				'EAPI.deprecated' in masks or \
 				'KEYWORDS' in masks or \
@@ -134,6 +216,29 @@ class Package(Task):
 				return False
 
 		return True
+
+	def _metadata_exception(self, k, e):
+		if not self.installed:
+			categorized_error = False
+			if e.errors:
+				for error in e.errors:
+					if getattr(error, 'category', None) is None:
+						continue
+					categorized_error = True
+					self._invalid_metadata(error.category,
+						"%s: %s" % (k, error))
+
+			if not categorized_error:
+				self._invalid_metadata(k + ".syntax",
+					"%s: %s" % (k, e))
+		else:
+			# For installed packages, show the path of the file
+			# containing the invalid metadata, since the user may
+			# want to fix the deps by hand.
+			vardb = self.root_config.trees['vartree'].dbapi
+			path = vardb.getpath(self.cpv, filename=k)
+			self._invalid_metadata(k + ".syntax",
+				"%s: %s in '%s'" % (k, e, path))
 
 	def _invalid_metadata(self, msg_type, msg):
 		if self.invalid is None:
@@ -192,11 +297,11 @@ class Package(Task):
 	class _iuse(object):
 
 		__slots__ = ("__weakref__", "all", "enabled", "disabled",
-			"tokens") + ("_iuse_implicit_regex",)
+			"tokens") + ("_iuse_implicit_match",)
 
-		def __init__(self, tokens, iuse_implicit_regex):
+		def __init__(self, tokens, iuse_implicit_match):
 			self.tokens = tuple(tokens)
-			self._iuse_implicit_regex = iuse_implicit_regex
+			self._iuse_implicit_match = iuse_implicit_match
 			enabled = []
 			disabled = []
 			other = []
@@ -219,10 +324,10 @@ class Package(Task):
 			"""
 			if isinstance(flags, basestring):
 				flags = [flags]
-			missing_iuse = []
+
 			for flag in flags:
 				if not flag in self.all and \
-					self._iuse_implicit_regex.match(flag) is None:
+					not self._iuse_implicit_match(flag):
 					return False
 			return True
 		
@@ -235,7 +340,7 @@ class Package(Task):
 			missing_iuse = []
 			for flag in flags:
 				if not flag in self.all and \
-					self._iuse_implicit_regex.match(flag) is None:
+					not self._iuse_implicit_match(flag):
 					missing_iuse.append(flag)
 			return missing_iuse
 
@@ -310,9 +415,9 @@ class _PackageMetadataWrapper(_PackageMetadataWrapperBase):
 		if k in self._use_conditional_keys:
 			if self._pkg.root_config.settings.local_config and '?' in v:
 				try:
-					v = paren_enclose(paren_normalize(use_reduce(
-						paren_reduce(v), uselist=self._pkg.use.enabled)))
-				except portage.exception.InvalidDependString:
+					v = paren_enclose(use_reduce(v, uselist=self._pkg.use.enabled, \
+						is_valid_flag=self._pkg.iuse.is_valid_flag))
+				except InvalidDependString:
 					# This error should already have been registered via
 					# self._pkg._invalid_metadata().
 					pass
@@ -334,17 +439,6 @@ class _PackageMetadataWrapper(_PackageMetadataWrapperBase):
 		_PackageMetadataWrapperBase.__setitem__(self, k, v)
 		if k in self._wrapped_keys:
 			getattr(self, "_set_" + k.lower())(k, v)
-		elif k in self._use_conditional_keys:
-			try:
-				reduced = use_reduce(paren_reduce(v), matchall=1)
-			except portage.exception.InvalidDependString as e:
-				self._pkg._invalid_metadata(k + ".syntax", "%s: %s" % (k, e))
-			else:
-				if reduced and k == 'PROVIDE':
-					for x in portage.flatten(reduced):
-						if not isvalidatom(x):
-							self._pkg._invalid_metadata(k + ".syntax",
-								"%s: %s" % (k, x))
 
 	def _set_inherited(self, k, v):
 		if isinstance(v, basestring):
@@ -353,7 +447,7 @@ class _PackageMetadataWrapper(_PackageMetadataWrapperBase):
 
 	def _set_iuse(self, k, v):
 		self._pkg.iuse = self._pkg._iuse(
-			v.split(), self._pkg.root_config.settings._iuse_implicit_re)
+			v.split(), self._pkg.root_config.settings._iuse_implicit_match)
 
 	def _set_slot(self, k, v):
 		self._pkg.slot = v

@@ -20,7 +20,7 @@ import portage
 portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.package.ebuild.config:check_config_instance,config',
 	'portage.package.ebuild.doebuild:doebuild_environment,' + \
-		'spawn@doebuild_spawn',
+		'_doebuild_spawn',
 	'portage.package.ebuild.prepare_build_dirs:prepare_build_dirs',
 )
 
@@ -28,7 +28,7 @@ from portage import OrderedDict, os, selinux, _encodings, \
 	_shell_quote, _unicode_encode
 from portage.checksum import perform_md5, verify_all
 from portage.const import BASH_BINARY, CUSTOM_MIRRORS_FILE, \
-	EBUILD_SH_BINARY, GLOBAL_CONFIG_PATH
+	GLOBAL_CONFIG_PATH
 from portage.data import portage_gid, portage_uid, secpass, userpriv_groups
 from portage.exception import FileNotFound, OperationNotPermitted, \
 	PermissionDenied, PortageException, TryAgain
@@ -456,8 +456,6 @@ def fetch(myuris, mysettings, listonly=0, fetchonly=0, locks_in_subdir=".locks",
 			# when inside fakeroot.
 			dir_gid = 0
 		distdir_dirs = [""]
-		if "distlocks" in features:
-			distdir_dirs.append(".locks")
 		try:
 			
 			for x in distdir_dirs:
@@ -503,14 +501,6 @@ def fetch(myuris, mysettings, listonly=0, fetchonly=0, locks_in_subdir=".locks",
 		writemsg(_("!!! No write access to '%s'\n") % mysettings["DISTDIR"],
 			noiselevel=-1)
 		can_fetch = False
-
-	if can_fetch and use_locks and locks_in_subdir:
-			distlocks_subdir = os.path.join(mysettings["DISTDIR"], locks_in_subdir)
-			if not os.access(distlocks_subdir, os.W_OK):
-				writemsg(_("!!! No write access to write to %s.  Aborting.\n") % distlocks_subdir,
-					noiselevel=-1)
-				return 0
-			del distlocks_subdir
 
 	distdir_writable = can_fetch and not fetch_to_ro
 	failed_files = set()
@@ -1043,6 +1033,7 @@ def fetch(myuris, mysettings, listonly=0, fetchonly=0, locks_in_subdir=".locks",
 		finally:
 			if use_locks and file_lock:
 				unlockfile(file_lock)
+				file_lock = None
 
 		if listonly:
 			writemsg_stdout("\n", noiselevel=-1)
@@ -1100,18 +1091,12 @@ def fetch(myuris, mysettings, listonly=0, fetchonly=0, locks_in_subdir=".locks",
 						2 : sys.stderr.fileno(),
 					}
 
-					ebuild_phase = mysettings.get("EBUILD_PHASE")
 					try:
-						mysettings["EBUILD_PHASE"] = "nofetch"
-						doebuild_spawn(_shell_quote(EBUILD_SH_BINARY) + \
-							" nofetch", mysettings, fd_pipes=fd_pipes)
+						_doebuild_spawn("nofetch", mysettings, fd_pipes=fd_pipes)
 					finally:
-						if ebuild_phase is None:
-							mysettings.pop("EBUILD_PHASE", None)
-						else:
-							mysettings["EBUILD_PHASE"] = ebuild_phase
 						if private_tmpdir is not None:
 							shutil.rmtree(private_tmpdir)
+							private_tmpdir = None
 
 			elif restrict_fetch:
 				pass

@@ -1,5 +1,5 @@
 # repoman: Error Messages
-# Copyright 2007 Gentoo Foundation
+# Copyright 2007-2010 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 COPYRIGHT_ERROR = 'Invalid Gentoo Copyright on line: %d'
@@ -17,4 +17,7 @@ EMAKE_PARALLEL_DISABLED_VIA_MAKEOPTS = 'Upstream parallel compilation bug (MAKEO
 DEPRECATED_BINDNOW_FLAGS = 'Deprecated bindnow-flags call on line: %d'
 EAPI_DEFINED_AFTER_INHERIT = 'EAPI defined after inherit on line: %d'
 NO_AS_NEEDED = 'Upstream asneeded linking bug (no-as-needed on line: %d)'
+PRESERVE_OLD_LIB = 'Upstream ABI change workaround on line: %d'
 BUILT_WITH_USE = 'built_with_use on line: %d'
+EPREFIXIFY_MISSING_INHERIT = "prefix.eclass is not inherited, but eprefixify is used on line: %d"
+SANDBOX_ADDPREDICT = 'Ebuild calls addpredict on line: %d'

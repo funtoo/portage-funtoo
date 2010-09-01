@@ -1,10 +1,11 @@
 #!/bin/bash
-# Copyright 1999-2007 Gentoo Foundation
+# Copyright 1999-2010 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
+source "${PORTAGE_BIN_PATH:-/usr/lib/portage/bin}"/isolated-functions.sh
+
 if [ $# -lt 1 ] ; then
-	source "${PORTAGE_BIN_PATH:-/usr/lib/portage/bin}"/isolated-functions.sh
-	vecho "${0##*/}: at least one argument needed" 1>&2
+	helpers_die "${0##*/}: at least one argument needed"
 	exit 1 	
 fi
 
@@ -17,11 +18,12 @@ ret=0
 for x in "$@" ; do
 	if [ -s "${x}" ] ; then
 		install -m0644 "${x}" "${dir}"
-		ecompress --queue "${dir}/${x##*/}"
+		hasq "${EAPI}" 0 1 2 3 && ecompress --queue "${dir}/${x##*/}"
 	elif [ ! -e "${x}" ] ; then
 		echo "!!! ${0##*/}: $x does not exist" 1>&2
 		((ret|=1))
 	fi
 done
 
+[[ $ret -ne 0 ]] && helpers_die "${0##*/} failed"
 exit ${ret}

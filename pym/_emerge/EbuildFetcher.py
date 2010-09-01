@@ -1,21 +1,20 @@
-# Copyright 1999-2009 Gentoo Foundation
+# Copyright 1999-2010 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 from _emerge.SpawnProcess import SpawnProcess
-from _emerge.EbuildBuildDir import EbuildBuildDir
 import sys
 import portage
 from portage import os
 from portage import _encodings
 from portage import _unicode_encode
+from portage import _unicode_decode
 import codecs
 from portage.elog.messages import eerror
 from portage.util._pty import _create_pty_or_pipe
 
 class EbuildFetcher(SpawnProcess):
 
-	__slots__ = ("config_pool", "fetchonly", "fetchall", "pkg", "prefetch") + \
-		("_build_dir",)
+	__slots__ = ("config_pool", "fetchonly", "fetchall", "pkg", "prefetch")
 
 	def _start(self):
 
@@ -24,29 +23,34 @@ class EbuildFetcher(SpawnProcess):
 		ebuild_path = portdb.findname(self.pkg.cpv)
 		if ebuild_path is None:
 			raise AssertionError("ebuild not found for '%s'" % self.pkg.cpv)
-		settings = self.config_pool.allocate()
-		settings.setcpv(self.pkg)
-		if self.prefetch and \
-			self._prefetch_size_ok(portdb, settings, ebuild_path):
-			self.config_pool.deallocate(settings)
-			self.returncode = os.EX_OK
+
+		try:
+			uri_map = self._get_uri_map(portdb, ebuild_path)
+		except portage.exception.InvalidDependString as e:
+			msg_lines = []
+			msg = "Fetch failed for '%s' due to invalid SRC_URI: %s" % \
+				(self.pkg.cpv, e)
+			msg_lines.append(msg)
+			self._eerror(msg_lines)
+			self._set_returncode((self.pid, 1))
 			self.wait()
 			return
 
-		# In prefetch mode, logging goes to emerge-fetch.log and the builddir
-		# should not be touched since otherwise it could interfere with
-		# another instance of the same cpv concurrently being built for a
-		# different $ROOT (currently, builds only cooperate with prefetchers
-		# that are spawned for the same $ROOT).
-		if not self.prefetch:
-			self._build_dir = EbuildBuildDir(pkg=self.pkg, settings=settings)
-			self._build_dir.lock()
-			self._build_dir.clean_log()
-			cleanup=1
-			# This initializes PORTAGE_LOG_FILE.
-			portage.prepare_build_dirs(self.pkg.root, self._build_dir.settings, cleanup)
-			if self.logfile is None:
-				self.logfile = settings.get("PORTAGE_LOG_FILE")
+		if not uri_map:
+			# Nothing to fetch.
+			self._set_returncode((self.pid, os.EX_OK))
+			self.wait()
+			return
+
+		settings = self.config_pool.allocate()
+		settings.setcpv(self.pkg)
+
+		if self.prefetch and \
+			self._prefetch_size_ok(uri_map, settings, ebuild_path):
+			self.config_pool.deallocate(settings)
+			self._set_returncode((self.pid, os.EX_OK))
+			self.wait()
+			return
 
 		phase = "fetch"
 		if self.fetchall:
@@ -75,6 +79,10 @@ class EbuildFetcher(SpawnProcess):
 		if debug:
 			fetch_args.append("--debug")
 
+		# Free settings now since we only have a local reference.
+		self.config_pool.deallocate(settings)
+		settings = None
+
 		if not self.background and nocolor not in ('yes', 'true'):
 			# Force consistent color output, in case we are capturing fetch
 			# output through a normal pipe due to unavailability of ptys.
@@ -82,24 +90,22 @@ class EbuildFetcher(SpawnProcess):
 
 		self.args = fetch_args
 		self.env = fetch_env
-		if self._build_dir is None:
-			# Free settings now since we only have a local reference.
-			self.config_pool.deallocate(settings)
 		SpawnProcess._start(self)
 
-	def _prefetch_size_ok(self, portdb, settings, ebuild_path):
+	def _get_uri_map(self, portdb, ebuild_path):
+		"""
+		This can raise InvalidDependString from portdbapi.getFetchMap().
+		"""
 		pkgdir = os.path.dirname(ebuild_path)
 		mytree = os.path.dirname(os.path.dirname(pkgdir))
-		distdir = settings["DISTDIR"]
 		use = None
 		if not self.fetchall:
 			use = self.pkg.use.enabled
+		return portdb.getFetchMap(self.pkg.cpv, useflags=use, mytree=mytree)
 
-		try:
-			uri_map = portdb.getFetchMap(self.pkg.cpv,
-				useflags=use, mytree=mytree)
-		except portage.exception.InvalidDependString as e:
-			return False
+	def _prefetch_size_ok(self, uri_map, settings, ebuild_path):
+		pkgdir = os.path.dirname(ebuild_path)
+		distdir = settings["DISTDIR"]
 
 		sizes = {}
 		for filename in uri_map:
@@ -147,34 +153,26 @@ class EbuildFetcher(SpawnProcess):
 			_create_pty_or_pipe(copy_term_size=stdout_pipe)
 		return (master_fd, slave_fd)
 
+	def _eerror(self, lines):
+		out = portage.StringIO()
+		for line in lines:
+			eerror(line, phase="unpack", key=self.pkg.cpv, out=out)
+		msg = _unicode_decode(out.getvalue(),
+			encoding=_encodings['content'], errors='replace')
+		if msg:
+			self.scheduler.output(msg, log_path=self.logfile)
+
 	def _set_returncode(self, wait_retval):
 		SpawnProcess._set_returncode(self, wait_retval)
 		# Collect elog messages that might have been
 		# created by the pkg_nofetch phase.
-		if self._build_dir is not None:
-			# Skip elog messages for prefetch, in order to avoid duplicates.
-			if not self.prefetch and self.returncode != os.EX_OK:
-				elog_out = None
-				if self.logfile is not None:
-					if self.background:
-						elog_out = codecs.open(_unicode_encode(self.logfile,
-							encoding=_encodings['fs'], errors='strict'),
-							mode='a', encoding=_encodings['content'], errors='replace')
-				msg = "Fetch failed for '%s'" % (self.pkg.cpv,)
-				if self.logfile is not None:
-					msg += ", Log file:"
-				eerror(msg, phase="unpack", key=self.pkg.cpv, out=elog_out)
-				if self.logfile is not None:
-					eerror(" '%s'" % (self.logfile,),
-						phase="unpack", key=self.pkg.cpv, out=elog_out)
-				if elog_out is not None:
-					elog_out.close()
-			if not self.prefetch:
-				portage.elog.elog_process(self.pkg.cpv, self._build_dir.settings)
-			features = self._build_dir.settings.features
-			if self.returncode == os.EX_OK:
-				self._build_dir.clean_log()
-			self._build_dir.unlock()
-			self.config_pool.deallocate(self._build_dir.settings)
-			self._build_dir = None
-
+		# Skip elog messages for prefetch, in order to avoid duplicates.
+		if not self.prefetch and self.returncode != os.EX_OK:
+			msg_lines = []
+			msg = "Fetch failed for '%s'" % (self.pkg.cpv,)
+			if self.logfile is not None:
+				msg += ", Log file:"
+			msg_lines.append(msg)
+			if self.logfile is not None:
+				msg_lines.append(" '%s'" % (self.logfile,))
+			self._eerror(msg_lines)

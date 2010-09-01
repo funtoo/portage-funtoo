@@ -1,4 +1,4 @@
-# Copyright 1999-2009 Gentoo Foundation
+# Copyright 1999-2010 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 from __future__ import print_function
@@ -25,16 +25,14 @@ good = create_color_func("GOOD")
 bad = create_color_func("BAD")
 
 import portage.elog
-import portage.dep
-portage.dep._dep_check_strict = True
 import portage.util
 import portage.locks
 import portage.exception
 from portage.data import secpass
 from portage.dbapi.dep_expand import dep_expand
 from portage.util import normalize_path as normpath
-from portage.util import writemsg, writemsg_level, writemsg_stdout
-from portage.sets import SETPREFIX
+from portage.util import shlex_split, writemsg_level, writemsg_stdout
+from portage._sets import SETPREFIX
 from portage._global_updates import _global_updates
 
 from _emerge.actions import action_config, action_sync, action_metadata, \
@@ -213,10 +211,15 @@ def chk_updated_info_files(root, infodirs, prev_mtimes, retval):
 def display_preserved_libs(vardbapi, myopts):
 	MAX_DISPLAY = 3
 
-	# Ensure the registry is consistent with existing files.
-	vardbapi.plib_registry.pruneNonExisting()
+	if vardbapi._linkmap is None or \
+		vardbapi._plib_registry is None:
+		# preserve-libs is entirely disabled
+		return
 
-	if vardbapi.plib_registry.hasEntries():
+	# Ensure the registry is consistent with existing files.
+	vardbapi._plib_registry.pruneNonExisting()
+
+	if vardbapi._plib_registry.hasEntries():
 		if "--quiet" in myopts:
 			print()
 			print(colorize("WARN", "!!!") + " existing preserved libs found")
@@ -225,8 +228,8 @@ def display_preserved_libs(vardbapi, myopts):
 			print()
 			print(colorize("WARN", "!!!") + " existing preserved libs:")
 
-		plibdata = vardbapi.plib_registry.getPreservedLibs()
-		linkmap = vardbapi.linkmap
+		plibdata = vardbapi._plib_registry.getPreservedLibs()
+		linkmap = vardbapi._linkmap
 		consumer_map = {}
 		owners = {}
 		linkmap_broken = False
@@ -320,7 +323,7 @@ def post_emerge(root_config, myopts, mtimedb, retval):
 	settings.regenerate()
 	settings.lock()
 
-	config_protect = settings.get("CONFIG_PROTECT","").split()
+	config_protect = shlex_split(settings.get("CONFIG_PROTECT", ""))
 	infodirs = settings.get("INFOPATH","").split(":") + \
 		settings.get("INFODIR","").split(":")
 
@@ -388,8 +391,10 @@ def insert_optional_args(args):
 	new_args = []
 
 	default_arg_opts = {
+		'--autounmask'           : ('n',),
 		'--complete-graph' : ('n',),
 		'--deep'       : valid_integers,
+		'--depclean-lib-check'   : ('n',),
 		'--deselect'   : ('n',),
 		'--binpkg-respect-use'   : ('n', 'y',),
 		'--fail-clean'           : ('n',),
@@ -397,6 +402,7 @@ def insert_optional_args(args):
 		'--getbinpkgonly'        : ('n',),
 		'--jobs'       : valid_integers,
 		'--keep-going'           : ('n',),
+		'--package-moves'        : ('n',),
 		'--rebuilt-binaries'     : ('n',),
 		'--root-deps'  : ('rdeps',),
 		'--select'               : ('n',),
@@ -513,6 +519,13 @@ def parse_opts(tmpcmdline, silent=False):
 
 	longopt_aliases = {"--cols":"--columns", "--skip-first":"--skipfirst"}
 	argument_options = {
+
+		"--autounmask": {
+			"help"    : "automatically unmask packages",
+			"type"    : "choice",
+			"choices" : ("True", "n")
+		},
+
 		"--accept-properties": {
 			"help":"temporarily override ACCEPT_PROPERTIES",
 			"action":"store"
@@ -552,6 +565,12 @@ def parse_opts(tmpcmdline, silent=False):
 				"dependencies of installed packages.",
 
 			"action" : "store"
+		},
+
+		"--depclean-lib-check": {
+			"help"    : "check for consumers of libraries before removing them",
+			"type"    : "choice",
+			"choices" : ("True", "n")
 		},
 
 		"--deselect": {
@@ -627,6 +646,12 @@ def parse_opts(tmpcmdline, silent=False):
 		"--getbinpkgonly": {
 			"shortopt" : "-G",
 			"help"     : "fetch binary packages only",
+			"type"     : "choice",
+			"choices"  : ("True", "n")
+		},
+
+		"--package-moves": {
+			"help"     : "perform package moves when necessary",
 			"type"     : "choice",
 			"choices"  : ("True", "n")
 		},
@@ -721,6 +746,9 @@ def parse_opts(tmpcmdline, silent=False):
 
 	myoptions, myargs = parser.parse_args(args=tmpcmdline)
 
+	if myoptions.autounmask in ("True",):
+		myoptions.autounmask = True
+
 	if myoptions.changed_use is not False:
 		myoptions.reinstall = "changed-use"
 		myoptions.changed_use = False
@@ -738,16 +766,19 @@ def parse_opts(tmpcmdline, silent=False):
 	else:
 		myoptions.complete_graph = None
 
+	if myoptions.depclean_lib_check in ("True",):
+		myoptions.depclean_lib_check = True
+
 	if myoptions.exclude:
 		exclude = []
 		bad_atoms = []
 		for x in ' '.join(myoptions.exclude).split():
 			bad_atom = False
 			try:
-				atom = portage.dep.Atom(x)
+				atom = portage.dep.Atom(x, allow_wildcard=True)
 			except portage.exception.InvalidAtom:
 				try:
-					atom = portage.dep.Atom("null/"+x)
+					atom = portage.dep.Atom("*/"+x, allow_wildcard=True)
 				except portage.exception.InvalidAtom:
 					bad_atom = True
 			
@@ -760,7 +791,7 @@ def parse_opts(tmpcmdline, silent=False):
 					exclude.append(atom)
 
 		if bad_atoms and not silent:
-			parser.error("Invalid Atom(s) in --exclude parameter: '%s' (only package names and slot atoms allowed)\n" % \
+			parser.error("Invalid Atom(s) in --exclude parameter: '%s' (only package names and slot atoms (with widlcards) allowed)\n" % \
 				(",".join(bad_atoms),))
 
 	if myoptions.fail_clean == "True":
@@ -780,6 +811,9 @@ def parse_opts(tmpcmdline, silent=False):
 		myoptions.keep_going = True
 	else:
 		myoptions.keep_going = None
+
+	if myoptions.package_moves in ("True",):
+		myoptions.package_moves = True
 
 	if myoptions.rebuilt_binaries in ("True",):
 		myoptions.rebuilt_binaries = True
@@ -967,12 +1001,12 @@ def ionice(settings):
 		out.eerror("See the make.conf(5) man page for PORTAGE_IONICE_COMMAND usage instructions.")
 
 def setconfig_fallback(root_config):
-	from portage.sets.base import DummyPackageSet
-	from portage.sets.files import WorldSelectedSet
-	from portage.sets.profiles import PackagesSystemSet
+	from portage._sets.base import DummyPackageSet
+	from portage._sets.files import WorldSelectedSet
+	from portage._sets.profiles import PackagesSystemSet
 	setconfig = root_config.setconfig
 	setconfig.psets['world'] = DummyPackageSet(atoms=['@selected', '@system'])
-	setconfig.psets['selected'] = WorldSelectedSet(root_config.root)
+	setconfig.psets['selected'] = WorldSelectedSet(root_config.settings['EROOT'])
 	setconfig.psets['system'] = \
 		PackagesSystemSet(root_config.settings.profiles)
 	root_config.sets = setconfig.getSets()
@@ -1000,7 +1034,7 @@ def missing_sets_warning(root_config, missing_sets):
 	if root_config.sets:
 		msg.append("        sets defined: %s" % ", ".join(root_config.sets))
 	msg.append("        This usually means that '%s'" % \
-		(os.path.join(portage.const.GLOBAL_CONFIG_PATH, "sets.conf"),))
+		(os.path.join(portage.const.GLOBAL_CONFIG_PATH, "sets/portage.conf"),))
 	msg.append("        is missing or corrupt.")
 	msg.append("        Falling back to default world and system set configuration!!!")
 	for line in msg:
@@ -1211,7 +1245,10 @@ def check_procfs():
 
 def emerge_main():
 	global portage	# NFC why this is necessary now - genone
+	#disabled by drobbins:
 	#portage._disable_legacy_globals()
+	portage._disable_legacy_globals()
+	portage.dep._internal_warnings = True
 	# Disable color until we're sure that it should be enabled (after
 	# EMERGE_DEFAULT_OPTS has been parsed).
 	portage.output.havecolor = 0
@@ -1237,7 +1274,14 @@ def emerge_main():
 	if rval != os.EX_OK:
 		return rval
 
+	tmpcmdline = []
+	if "--ignore-default-opts" not in myopts:
+		tmpcmdline.extend(settings["EMERGE_DEFAULT_OPTS"].split())
+	tmpcmdline.extend(sys.argv[1:])
+	myaction, myopts, myfiles = parse_opts(tmpcmdline)
+
 	if myaction not in ('help', 'info', 'version') and \
+		myopts.get('--package-moves') != 'n' and \
 		_global_updates(trees, mtimedb["updates"]):
 		mtimedb.commit()
 		# Reload the whole config from scratch.
@@ -1247,12 +1291,6 @@ def emerge_main():
 	xterm_titles = "notitles" not in settings.features
 	if xterm_titles:
 		xtermTitle("emerge")
-
-	tmpcmdline = []
-	if "--ignore-default-opts" not in myopts:
-		tmpcmdline.extend(settings["EMERGE_DEFAULT_OPTS"].split())
-	tmpcmdline.extend(sys.argv[1:])
-	myaction, myopts, myfiles = parse_opts(tmpcmdline)
 
 	if "--digest" in myopts:
 		os.environ["FEATURES"] = os.environ.get("FEATURES","") + " digest"
@@ -1315,7 +1353,8 @@ def emerge_main():
 		# Freeze the portdbapi for performance (memoize all xmatch results).
 		mydb.freeze()
 
-		if "--usepkg" in myopts:
+		if myaction in ('search', None) and \
+			"--usepkg" in myopts:
 			# Populate the bintree with current --getbinpkg setting.
 			# This needs to happen before expand_set_arguments(), in case
 			# any sets use the bintree.
@@ -1574,7 +1613,7 @@ def emerge_main():
 					for line in textwrap.wrap(msg, 70):
 						writemsg_level("!!! %s\n" % (line,),
 							level=logging.ERROR, noiselevel=-1)
-					for i in e[0]:
+					for i in e.args[0]:
 						writemsg_level("    %s\n" % colorize("INFORM", i),
 							level=logging.ERROR, noiselevel=-1)
 					writemsg_level("\n", level=logging.ERROR, noiselevel=-1)

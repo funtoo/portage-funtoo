@@ -1,4 +1,4 @@
-# Copyright 2004-2009 Gentoo Foundation
+# Copyright 2004-2010 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 __all__ = ['apply_permissions', 'apply_recursive_permissions',
@@ -23,6 +23,9 @@ import sys
 import traceback
 
 import portage
+portage.proxy.lazyimport.lazyimport(globals(),
+	'portage.util.listdir:_ignorecvs_dirs'
+)
 from portage import StringIO
 from portage import os
 from portage import pickle
@@ -56,10 +59,14 @@ def writemsg(mystr,noiselevel=0,fd=None):
 		fd = sys.stderr
 	if noiselevel <= noiselimit:
 		# avoid potential UnicodeEncodeError
-		mystr = _unicode_encode(mystr,
-			encoding=_encodings['stdio'], errors='backslashreplace')
-		if sys.hexversion >= 0x3000000:
-			fd = fd.buffer
+		if isinstance(fd, StringIO):
+			mystr = _unicode_decode(mystr,
+				encoding=_encodings['content'], errors='replace')
+		else:
+			mystr = _unicode_encode(mystr,
+				encoding=_encodings['stdio'], errors='backslashreplace')
+			if sys.hexversion >= 0x3000000 and fd in (sys.stdout, sys.stderr):
+				fd = fd.buffer
 		fd.write(mystr)
 		fd.flush()
 
@@ -278,7 +285,7 @@ def grabdict(myfilename, juststrings=0, empty=0, recursive=0, incremental=1):
 			newdict[k] = " ".join(v)
 	return newdict
 
-def grabdict_package(myfilename, juststrings=0, recursive=0):
+def grabdict_package(myfilename, juststrings=0, recursive=0, allow_wildcard=False):
 	""" Does the same thing as grabdict except it validates keys
 	    with isvalidatom()"""
 	pkgs=grabdict(myfilename, juststrings, empty=1, recursive=recursive)
@@ -288,7 +295,7 @@ def grabdict_package(myfilename, juststrings=0, recursive=0):
 	atoms = {}
 	for k, v in pkgs.items():
 		try:
-			k = Atom(k)
+			k = Atom(k, allow_wildcard=allow_wildcard)
 		except InvalidAtom:
 			writemsg(_("--- Invalid atom in %s: %s\n") % (myfilename, k),
 				noiselevel=-1)
@@ -296,7 +303,7 @@ def grabdict_package(myfilename, juststrings=0, recursive=0):
 			atoms[k] = v
 	return atoms
 
-def grabfile_package(myfilename, compatlevel=0, recursive=0):
+def grabfile_package(myfilename, compatlevel=0, recursive=0, allow_wildcard=False):
 	pkgs=grabfile(myfilename, compatlevel, recursive=recursive)
 	mybasename = os.path.basename(myfilename)
 	atoms = []
@@ -308,7 +315,7 @@ def grabfile_package(myfilename, compatlevel=0, recursive=0):
 		if pkg[:1] == '*' and mybasename == 'packages':
 			pkg = pkg[1:]
 		try:
-			pkg = Atom(pkg)
+			pkg = Atom(pkg, allow_wildcard=allow_wildcard)
 		except InvalidAtom:
 			writemsg(_("--- Invalid atom in %s: %s\n") % (myfilename, pkg),
 				noiselevel=-1)
@@ -324,7 +331,7 @@ def grabfile_package(myfilename, compatlevel=0, recursive=0):
 def grablines(myfilename,recursive=0):
 	mylines=[]
 	if recursive and os.path.isdir(myfilename):
-		if os.path.basename(myfilename) in ["RCS", "CVS", "SCCS"]:
+		if os.path.basename(myfilename) in _ignorecvs_dirs:
 			return mylines
 		dirlist = os.listdir(myfilename)
 		dirlist.sort()
@@ -417,7 +424,8 @@ def getconfig(mycfg, tolerant=0, allow_sourcing=False, expand=True):
 			raise PermissionDenied(mycfg)
 		if e.errno != errno.ENOENT:
 			writemsg("open('%s', 'r'): %s\n" % (mycfg, e), noiselevel=-1)
-			raise
+			if e.errno not in (errno.EISDIR,):
+				raise
 		return None
 	try:
 		if tolerant:
@@ -494,7 +502,9 @@ def getconfig(mycfg, tolerant=0, allow_sourcing=False, expand=True):
 	
 #cache expansions of constant strings
 cexpand={}
-def varexpand(mystring, mydict={}):
+def varexpand(mystring, mydict=None):
+	if mydict is None:
+		mydict = {}
 	newstring = cexpand.get(" "+mystring, None)
 	if newstring is not None:
 		return newstring

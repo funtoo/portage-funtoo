@@ -1,36 +1,39 @@
-# Copyright 1998-2009 Gentoo Foundation
+# Copyright 1998-2010 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
-__all__ = ["PreservedLibsRegistry", "LinkageMap",
+__all__ = [
 	"vardbapi", "vartree", "dblink"] + \
 	["write_contents", "tar_contents"]
 
 import portage
 portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.checksum:_perform_md5_merge@perform_md5',
+	'portage.data:portage_gid,portage_uid,secpass',
 	'portage.dbapi.dep_expand:dep_expand',
-	'portage.dep:dep_getkey,isjustname,flatten,match_from_list,' + \
-	 	'use_reduce,paren_reduce,_slot_re',
+	'portage.dep:dep_getkey,isjustname,match_from_list,' + \
+	 	'use_reduce,_slot_re',
 	'portage.elog:elog_process',
 	'portage.locks:lockdir,unlockdir',
 	'portage.output:bold,colorize',
-	'portage.package.ebuild.doebuild:doebuild,doebuild_environment,' + \
-	 	'_spawn_misc_sh',
+	'portage.package.ebuild.doebuild:doebuild_environment,' + \
+		'_spawn_phase',
 	'portage.package.ebuild.prepare_build_dirs:prepare_build_dirs',
 	'portage.update:fixdbentries',
 	'portage.util:apply_secpass_permissions,ConfigProtect,ensure_dirs,' + \
 		'writemsg,writemsg_level,write_atomic,atomic_ofstream,writedict,' + \
-		'grabfile,grabdict,normalize_path,new_protect_filename,getlibpaths',
+		'grabdict,normalize_path,new_protect_filename',
 	'portage.util.digraph:digraph',
 	'portage.util.env_update:env_update',
 	'portage.util.listdir:dircache,listdir',
+	'portage.util._dyn_libs.PreservedLibsRegistry:PreservedLibsRegistry',
+	'portage.util._dyn_libs.LinkageMapELF:LinkageMapELF@LinkageMap',
 	'portage.versions:best,catpkgsplit,catsplit,cpv_getkey,pkgcmp,' + \
 		'_pkgsplit@pkgsplit',
 )
 
 from portage.const import CACHE_PATH, CONFIG_MEMORY_FILE, \
 	PORTAGE_PACKAGE_ATOM, PRIVATE_PATH, VDB_PATH
-from portage.data import portage_gid, portage_uid, secpass
+from portage.const import _ENABLE_DYN_LINK_MAP, _ENABLE_PRESERVE_LIBS
 from portage.dbapi import dbapi
 from portage.exception import CommandNotFound, \
 	InvalidData, InvalidPackageName, \
@@ -48,11 +51,12 @@ from portage import _selinux_merge
 from portage import _unicode_decode
 from portage import _unicode_encode
 
-from portage.cache.mappings import slot_dict_class
+from _emerge.TaskScheduler import TaskScheduler
+from _emerge.MiscFunctionsProcess import MiscFunctionsProcess
 
 import codecs
-from collections import deque
-import re, shutil, stat, errno, copy, subprocess
+import gc
+import re, shutil, stat, errno, subprocess
 import logging
 import os as _os
 import stat
@@ -69,733 +73,6 @@ except ImportError:
 if sys.hexversion >= 0x3000000:
 	basestring = str
 	long = int
-
-class PreservedLibsRegistry(object):
-	""" This class handles the tracking of preserved library objects """
-	def __init__(self, root, filename, autocommit=True):
-		""" 
-			@param root: root used to check existence of paths in pruneNonExisting
-		    @type root: String
-			@param filename: absolute path for saving the preserved libs records
-		    @type filename: String
-			@param autocommit: determines if the file is written after every update
-			@type autocommit: Boolean
-		"""
-		self._root = root
-		self._filename = filename
-		self._autocommit = autocommit
-		self.load()
-		self.pruneNonExisting()
-
-	def load(self):
-		""" Reload the registry data from file """
-		self._data = None
-		try:
-			self._data = pickle.load(
-				open(_unicode_encode(self._filename,
-					encoding=_encodings['fs'], errors='strict'), 'rb'))
-		except (ValueError, pickle.UnpicklingError) as e:
-			writemsg_level(_("!!! Error loading '%s': %s\n") % \
-				(self._filename, e), level=logging.ERROR, noiselevel=-1)
-		except (EOFError, IOError) as e:
-			if isinstance(e, EOFError) or e.errno == errno.ENOENT:
-				pass
-			elif e.errno == PermissionDenied.errno:
-				raise PermissionDenied(self._filename)
-			else:
-				raise
-		if self._data is None:
-			self._data = {}
-		self._data_orig = self._data.copy()
-	def store(self):
-		""" Store the registry data to file. No need to call this if autocommit
-		    was enabled.
-		"""
-		if os.environ.get("SANDBOX_ON") == "1" or \
-			self._data == self._data_orig:
-			return
-		try:
-			f = atomic_ofstream(self._filename, 'wb')
-			pickle.dump(self._data, f, protocol=2)
-			f.close()
-		except EnvironmentError as e:
-			if e.errno != PermissionDenied.errno:
-				writemsg("!!! %s %s\n" % (e, self._filename), noiselevel=-1)
-		else:
-			self._data_orig = self._data.copy()
-
-	def register(self, cpv, slot, counter, paths):
-		""" Register new objects in the registry. If there is a record with the
-			same packagename (internally derived from cpv) and slot it is 
-			overwritten with the new data.
-			@param cpv: package instance that owns the objects
-			@type cpv: CPV (as String)
-			@param slot: the value of SLOT of the given package instance
-			@type slot: String
-			@param counter: vdb counter value for the package instace
-			@type counter: Integer
-			@param paths: absolute paths of objects that got preserved during an update
-			@type paths: List
-		"""
-		cp = "/".join(catpkgsplit(cpv)[:2])
-		cps = cp+":"+slot
-		if len(paths) == 0 and cps in self._data \
-				and self._data[cps][0] == cpv and int(self._data[cps][1]) == int(counter):
-			del self._data[cps]
-		elif len(paths) > 0:
-			self._data[cps] = (cpv, counter, paths)
-		if self._autocommit:
-			self.store()
-	
-	def unregister(self, cpv, slot, counter):
-		""" Remove a previous registration of preserved objects for the given package.
-			@param cpv: package instance whose records should be removed
-			@type cpv: CPV (as String)
-			@param slot: the value of SLOT of the given package instance
-			@type slot: String
-		"""
-		self.register(cpv, slot, counter, [])
-	
-	def pruneNonExisting(self):
-		""" Remove all records for objects that no longer exist on the filesystem. """
-
-		os = _os_merge
-
-		for cps in list(self._data):
-			cpv, counter, paths = self._data[cps]
-			paths = [f for f in paths \
-				if os.path.exists(os.path.join(self._root, f.lstrip(os.sep)))]
-			if len(paths) > 0:
-				self._data[cps] = (cpv, counter, paths)
-			else:
-				del self._data[cps]
-		if self._autocommit:
-			self.store()
-	
-	def hasEntries(self):
-		""" Check if this registry contains any records. """
-		return len(self._data) > 0
-	
-	def getPreservedLibs(self):
-		""" Return a mapping of packages->preserved objects.
-			@returns mapping of package instances to preserved objects
-			@rtype Dict cpv->list-of-paths
-		"""
-		rValue = {}
-		for cps in self._data:
-			rValue[self._data[cps][0]] = self._data[cps][2]
-		return rValue
-
-class LinkageMap(object):
-
-	"""Models dynamic linker dependencies."""
-
-	_needed_aux_key = "NEEDED.ELF.2"
-	_soname_map_class = slot_dict_class(
-		("consumers", "providers"), prefix="")
-
-	def __init__(self, vardbapi):
-		self._dbapi = vardbapi
-		self._root = self._dbapi.root
-		self._libs = {}
-		self._obj_properties = {}
-		self._obj_key_cache = {}
-		self._defpath = set()
-		self._path_key_cache = {}
-
-	def _clear_cache(self):
-		self._libs.clear()
-		self._obj_properties.clear()
-		self._obj_key_cache.clear()
-		self._defpath.clear()
-		self._path_key_cache.clear()
-
-	def _path_key(self, path):
-		key = self._path_key_cache.get(path)
-		if key is None:
-			key = self._ObjectKey(path, self._root)
-			self._path_key_cache[path] = key
-		return key
-
-	def _obj_key(self, path):
-		key = self._obj_key_cache.get(path)
-		if key is None:
-			key = self._ObjectKey(path, self._root)
-			self._obj_key_cache[path] = key
-		return key
-
-	class _ObjectKey(object):
-
-		"""Helper class used as _obj_properties keys for objects."""
-
-		__slots__ = ("__weakref__", "_key")
-
-		def __init__(self, obj, root):
-			"""
-			This takes a path to an object.
-
-			@param object: path to a file
-			@type object: string (example: '/usr/bin/bar')
-
-			"""
-			self._key = self._generate_object_key(obj, root)
-
-		def __hash__(self):
-			return hash(self._key)
-
-		def __eq__(self, other):
-			return self._key == other._key
-
-		def _generate_object_key(self, obj, root):
-			"""
-			Generate object key for a given object.
-
-			@param object: path to a file
-			@type object: string (example: '/usr/bin/bar')
-			@rtype: 2-tuple of types (long, int) if object exists. string if
-				object does not exist.
-			@return:
-				1. 2-tuple of object's inode and device from a stat call, if object
-					exists.
-				2. realpath of object if object does not exist.
-
-			"""
-
-			os = _os_merge
-
-			try:
-				_unicode_encode(obj,
-					encoding=_encodings['merge'], errors='strict')
-			except UnicodeEncodeError:
-				# The package appears to have been merged with a 
-				# different value of sys.getfilesystemencoding(),
-				# so fall back to utf_8 if appropriate.
-				try:
-					_unicode_encode(obj,
-						encoding=_encodings['fs'], errors='strict')
-				except UnicodeEncodeError:
-					pass
-				else:
-					os = portage.os
-
-			abs_path = os.path.join(root, obj.lstrip(os.sep))
-			try:
-				object_stat = os.stat(abs_path)
-			except OSError:
-				# Use the realpath as the key if the file does not exists on the
-				# filesystem.
-				return os.path.realpath(abs_path)
-			# Return a tuple of the device and inode.
-			return (object_stat.st_dev, object_stat.st_ino)
-
-		def file_exists(self):
-			"""
-			Determine if the file for this key exists on the filesystem.
-
-			@rtype: Boolean
-			@return:
-				1. True if the file exists.
-				2. False if the file does not exist or is a broken symlink.
-
-			"""
-			return isinstance(self._key, tuple)
-
-	class _LibGraphNode(_ObjectKey):
-		__slots__ = ("alt_paths",)
-
-		def __init__(self, obj, root):
-			LinkageMap._ObjectKey.__init__(self, obj, root)
-			self.alt_paths = set()
-
-		def __str__(self):
-			return str(sorted(self.alt_paths))
-
-	def rebuild(self, exclude_pkgs=None, include_file=None):
-		"""
-		Raises CommandNotFound if there are preserved libs
-		and the scanelf binary is not available.
-		"""
-
-		os = _os_merge
-		root = self._root
-		root_len = len(root) - 1
-		self._clear_cache()
-		self._defpath.update(getlibpaths(self._root))
-		libs = self._libs
-		obj_key_cache = self._obj_key_cache
-		obj_properties = self._obj_properties
-
-		lines = []
-
-		# Data from include_file is processed first so that it
-		# overrides any data from previously installed files.
-		if include_file is not None:
-			lines += grabfile(include_file)
-
-		aux_keys = [self._needed_aux_key]
-		for cpv in self._dbapi.cpv_all():
-			if exclude_pkgs is not None and cpv in exclude_pkgs:
-				continue
-			lines += self._dbapi.aux_get(cpv, aux_keys)[0].split('\n')
-		# Cache NEEDED.* files avoid doing excessive IO for every rebuild.
-		self._dbapi.flush_cache()
-
-		# have to call scanelf for preserved libs here as they aren't 
-		# registered in NEEDED.ELF.2 files
-		plibs = set()
-		if self._dbapi.plib_registry and self._dbapi.plib_registry.getPreservedLibs():
-			args = ["/usr/bin/scanelf", "-qF", "%a;%F;%S;%r;%n"]
-			for items in self._dbapi.plib_registry.getPreservedLibs().values():
-				plibs.update(items)
-				args.extend(os.path.join(root, x.lstrip("." + os.sep)) \
-					for x in items)
-			try:
-				proc = subprocess.Popen(args, stdout=subprocess.PIPE)
-			except EnvironmentError as e:
-				if e.errno != errno.ENOENT:
-					raise
-				raise CommandNotFound(args[0])
-			else:
-				for l in proc.stdout:
-					try:
-						l = _unicode_decode(l,
-							encoding=_encodings['content'], errors='strict')
-					except UnicodeDecodeError:
-						l = _unicode_decode(l,
-							encoding=_encodings['content'], errors='replace')
-						writemsg_level(_("\nError decoding characters " \
-							"returned from scanelf: %s\n\n") % (l,),
-							level=logging.ERROR, noiselevel=-1)
-					l = l[3:].rstrip("\n")
-					if not l:
-						continue
-					fields = l.split(";")
-					if len(fields) < 5:
-						writemsg_level(_("\nWrong number of fields " \
-							"returned from scanelf: %s\n\n") % (l,),
-							level=logging.ERROR, noiselevel=-1)
-						continue
-					fields[1] = fields[1][root_len:]
-					plibs.discard(fields[1])
-					lines.append(";".join(fields))
-				proc.wait()
-
-		if plibs:
-			# Preserved libraries that did not appear in the scanelf output.
-			# This is known to happen with statically linked libraries.
-			# Generate dummy lines for these, so we can assume that every
-			# preserved library has an entry in self._obj_properties. This
-			# is important in order to prevent findConsumers from raising
-			# an unwanted KeyError.
-			for x in plibs:
-				lines.append(";".join(['', x, '', '', '']))
-
-		for l in lines:
-			l = l.rstrip("\n")
-			if not l:
-				continue
-			fields = l.split(";")
-			if len(fields) < 5:
-				writemsg_level(_("\nWrong number of fields " \
-					"in %s: %s\n\n") % (self._needed_aux_key, l),
-					level=logging.ERROR, noiselevel=-1)
-				continue
-			arch = fields[0]
-			obj = fields[1]
-			soname = fields[2]
-			path = set([normalize_path(x) \
-				for x in filter(None, fields[3].replace(
-				"${ORIGIN}", os.path.dirname(obj)).replace(
-				"$ORIGIN", os.path.dirname(obj)).split(":"))])
-			needed = [x for x in fields[4].split(",") if x]
-
-			obj_key = self._obj_key(obj)
-			indexed = True
-			myprops = obj_properties.get(obj_key)
-			if myprops is None:
-				indexed = False
-				myprops = (arch, needed, path, soname, set())
-				obj_properties[obj_key] = myprops
-			# All object paths are added into the obj_properties tuple.
-			myprops[4].add(obj)
-
-			# Don't index the same file more that once since only one
-			# set of data can be correct and therefore mixing data
-			# may corrupt the index (include_file overrides previously
-			# installed).
-			if indexed:
-				continue
-
-			arch_map = libs.get(arch)
-			if arch_map is None:
-				arch_map = {}
-				libs[arch] = arch_map
-			if soname:
-				soname_map = arch_map.get(soname)
-				if soname_map is None:
-					soname_map = self._soname_map_class(
-						providers=set(), consumers=set())
-					arch_map[soname] = soname_map
-				soname_map.providers.add(obj_key)
-			for needed_soname in needed:
-				soname_map = arch_map.get(needed_soname)
-				if soname_map is None:
-					soname_map = self._soname_map_class(
-						providers=set(), consumers=set())
-					arch_map[needed_soname] = soname_map
-				soname_map.consumers.add(obj_key)
-
-	def listBrokenBinaries(self, debug=False):
-		"""
-		Find binaries and their needed sonames, which have no providers.
-
-		@param debug: Boolean to enable debug output
-		@type debug: Boolean
-		@rtype: dict (example: {'/usr/bin/foo': set(['libbar.so'])})
-		@return: The return value is an object -> set-of-sonames mapping, where
-			object is a broken binary and the set consists of sonames needed by
-			object that have no corresponding libraries to fulfill the dependency.
-
-		"""
-
-		os = _os_merge
-
-		class _LibraryCache(object):
-
-			"""
-			Caches properties associated with paths.
-
-			The purpose of this class is to prevent multiple instances of
-			_ObjectKey for the same paths.
-
-			"""
-
-			def __init__(cache_self):
-				cache_self.cache = {}
-
-			def get(cache_self, obj):
-				"""
-				Caches and returns properties associated with an object.
-
-				@param obj: absolute path (can be symlink)
-				@type obj: string (example: '/usr/lib/libfoo.so')
-				@rtype: 4-tuple with types
-					(string or None, string or None, 2-tuple, Boolean)
-				@return: 4-tuple with the following components:
-					1. arch as a string or None if it does not exist,
-					2. soname as a string or None if it does not exist,
-					3. obj_key as 2-tuple,
-					4. Boolean representing whether the object exists.
-					(example: ('libfoo.so.1', (123L, 456L), True))
-
-				"""
-				if obj in cache_self.cache:
-					return cache_self.cache[obj]
-				else:
-					obj_key = self._obj_key(obj)
-					# Check that the library exists on the filesystem.
-					if obj_key.file_exists():
-						# Get the arch and soname from LinkageMap._obj_properties if
-						# it exists. Otherwise, None.
-						arch, _needed, _path, soname, _objs = \
-								self._obj_properties.get(obj_key, (None,)*5)
-						return cache_self.cache.setdefault(obj, \
-								(arch, soname, obj_key, True))
-					else:
-						return cache_self.cache.setdefault(obj, \
-								(None, None, obj_key, False))
-
-		rValue = {}
-		cache = _LibraryCache()
-		providers = self.listProviders()
-
-		# Iterate over all obj_keys and their providers.
-		for obj_key, sonames in providers.items():
-			arch, _needed, path, _soname, objs = self._obj_properties[obj_key]
-			path = path.union(self._defpath)
-			# Iterate over each needed soname and the set of library paths that
-			# fulfill the soname to determine if the dependency is broken.
-			for soname, libraries in sonames.items():
-				# validLibraries is used to store libraries, which satisfy soname,
-				# so if no valid libraries are found, the soname is not satisfied
-				# for obj_key.  If unsatisfied, objects associated with obj_key
-				# must be emerged.
-				validLibraries = set()
-				# It could be the case that the library to satisfy the soname is
-				# not in the obj's runpath, but a symlink to the library is (eg
-				# libnvidia-tls.so.1 in nvidia-drivers).  Also, since LinkageMap
-				# does not catalog symlinks, broken or missing symlinks may go
-				# unnoticed.  As a result of these cases, check that a file with
-				# the same name as the soname exists in obj's runpath.
-				# XXX If we catalog symlinks in LinkageMap, this could be improved.
-				for directory in path:
-					cachedArch, cachedSoname, cachedKey, cachedExists = \
-							cache.get(os.path.join(directory, soname))
-					# Check that this library provides the needed soname.  Doing
-					# this, however, will cause consumers of libraries missing
-					# sonames to be unnecessarily emerged. (eg libmix.so)
-					if cachedSoname == soname and cachedArch == arch:
-						validLibraries.add(cachedKey)
-						if debug and cachedKey not in \
-								set(map(self._obj_key_cache.get, libraries)):
-							# XXX This is most often due to soname symlinks not in
-							# a library's directory.  We could catalog symlinks in
-							# LinkageMap to avoid checking for this edge case here.
-							writemsg(
-								_("Found provider outside of findProviders:") + \
-								(" %s -> %s %s\n" % (os.path.join(directory, soname),
-								self._obj_properties[cachedKey][4], libraries)),
-								noiselevel=-1)
-						# A valid library has been found, so there is no need to
-						# continue.
-						break
-					if debug and cachedArch == arch and \
-							cachedKey in self._obj_properties:
-						writemsg((_("Broken symlink or missing/bad soname: " + \
-							"%(dir_soname)s -> %(cachedKey)s " + \
-							"with soname %(cachedSoname)s but expecting %(soname)s") % \
-							{"dir_soname":os.path.join(directory, soname),
-							"cachedKey": self._obj_properties[cachedKey],
-							"cachedSoname": cachedSoname, "soname":soname}) + "\n",
-							noiselevel=-1)
-				# This conditional checks if there are no libraries to satisfy the
-				# soname (empty set).
-				if not validLibraries:
-					for obj in objs:
-						rValue.setdefault(obj, set()).add(soname)
-					# If no valid libraries have been found by this point, then
-					# there are no files named with the soname within obj's runpath,
-					# but if there are libraries (from the providers mapping), it is
-					# likely that soname symlinks or the actual libraries are
-					# missing or broken.  Thus those libraries are added to rValue
-					# in order to emerge corrupt library packages.
-					for lib in libraries:
-						rValue.setdefault(lib, set()).add(soname)
-						if debug:
-							if not os.path.isfile(lib):
-								writemsg(_("Missing library:") + " %s\n" % (lib,),
-									noiselevel=-1)
-							else:
-								writemsg(_("Possibly missing symlink:") + \
-									"%s\n" % (os.path.join(os.path.dirname(lib), soname)),
-									noiselevel=-1)
-		return rValue
-
-	def listProviders(self):
-		"""
-		Find the providers for all object keys in LinkageMap.
-
-		@rtype: dict (example:
-			{(123L, 456L): {'libbar.so': set(['/lib/libbar.so.1.5'])}})
-		@return: The return value is an object key -> providers mapping, where
-			providers is a mapping of soname -> set-of-library-paths returned
-			from the findProviders method.
-
-		"""
-		rValue = {}
-		if not self._libs:
-			self.rebuild()
-		# Iterate over all object keys within LinkageMap.
-		for obj_key in self._obj_properties:
-			rValue.setdefault(obj_key, self.findProviders(obj_key))
-		return rValue
-
-	def isMasterLink(self, obj):
-		"""
-		Determine whether an object is a master link.
-
-		@param obj: absolute path to an object
-		@type obj: string (example: '/usr/bin/foo')
-		@rtype: Boolean
-		@return:
-			1. True if obj is a master link
-			2. False if obj is not a master link
-
-		"""
-		os = _os_merge
-		basename = os.path.basename(obj)
-		obj_key = self._obj_key(obj)
-		if obj_key not in self._obj_properties:
-			raise KeyError("%s (%s) not in object list" % (obj_key, obj))
-		soname = self._obj_properties[obj_key][3]
-		return (len(basename) < len(soname))
-
-	def listLibraryObjects(self):
-		"""
-		Return a list of library objects.
-
-		Known limitation: library objects lacking an soname are not included.
-
-		@rtype: list of strings
-		@return: list of paths to all providers
-
-		"""
-		rValue = []
-		if not self._libs:
-			self.rebuild()
-		for arch_map in self._libs.values():
-			for soname_map in arch_map.values():
-				for obj_key in soname_map.providers:
-					rValue.extend(self._obj_properties[obj_key][4])
-		return rValue
-
-	def getSoname(self, obj):
-		"""
-		Return the soname associated with an object.
-
-		@param obj: absolute path to an object
-		@type obj: string (example: '/usr/bin/bar')
-		@rtype: string
-		@return: soname as a string
-
-		"""
-		if not self._libs:
-			self.rebuild()
-		if isinstance(obj, self._ObjectKey):
-			obj_key = obj
-			if obj_key not in self._obj_properties:
-				raise KeyError("%s not in object list" % obj_key)
-			return self._obj_properties[obj_key][3]
-		if obj not in self._obj_key_cache:
-			raise KeyError("%s not in object list" % obj)
-		return self._obj_properties[self._obj_key_cache[obj]][3]
-
-	def findProviders(self, obj):
-		"""
-		Find providers for an object or object key.
-
-		This method may be called with a key from _obj_properties.
-
-		In some cases, not all valid libraries are returned.  This may occur when
-		an soname symlink referencing a library is in an object's runpath while
-		the actual library is not.  We should consider cataloging symlinks within
-		LinkageMap as this would avoid those cases and would be a better model of
-		library dependencies (since the dynamic linker actually searches for
-		files named with the soname in the runpaths).
-
-		@param obj: absolute path to an object or a key from _obj_properties
-		@type obj: string (example: '/usr/bin/bar') or _ObjectKey
-		@rtype: dict (example: {'libbar.so': set(['/lib/libbar.so.1.5'])})
-		@return: The return value is a soname -> set-of-library-paths, where
-		set-of-library-paths satisfy soname.
-
-		"""
-
-		os = _os_merge
-
-		rValue = {}
-
-		if not self._libs:
-			self.rebuild()
-
-		# Determine the obj_key from the arguments.
-		if isinstance(obj, self._ObjectKey):
-			obj_key = obj
-			if obj_key not in self._obj_properties:
-				raise KeyError("%s not in object list" % obj_key)
-		else:
-			obj_key = self._obj_key(obj)
-			if obj_key not in self._obj_properties:
-				raise KeyError("%s (%s) not in object list" % (obj_key, obj))
-
-		arch, needed, path, _soname, _objs = self._obj_properties[obj_key]
-		path_keys = set(self._path_key(x) for x in path.union(self._defpath))
-		for soname in needed:
-			rValue[soname] = set()
-			if arch not in self._libs or soname not in self._libs[arch]:
-				continue
-			# For each potential provider of the soname, add it to rValue if it
-			# resides in the obj's runpath.
-			for provider_key in self._libs[arch][soname].providers:
-				providers = self._obj_properties[provider_key][4]
-				for provider in providers:
-					if self._path_key(os.path.dirname(provider)) in path_keys:
-						rValue[soname].add(provider)
-		return rValue
-
-	def findConsumers(self, obj):
-		"""
-		Find consumers of an object or object key.
-
-		This method may be called with a key from _obj_properties.  If this
-		method is going to be called with an object key, to avoid not catching
-		shadowed libraries, do not pass new _ObjectKey instances to this method.
-		Instead pass the obj as a string.
-
-		In some cases, not all consumers are returned.  This may occur when
-		an soname symlink referencing a library is in an object's runpath while
-		the actual library is not. For example, this problem is noticeable for
-		binutils since it's libraries are added to the path via symlinks that
-		are gemerated in the /usr/$CHOST/lib/ directory by binutils-config.
-		Failure to recognize consumers of these symlinks makes preserve-libs
-		fail to preserve binutils libs that are needed by these unrecognized
-		consumers.
-
-		Note that library consumption via dlopen (common for kde plugins) is
-		currently undetected. However, it is possible to use the
-		corresponding libtool archive (*.la) files to detect such consumers
-		(revdep-rebuild is able to detect them).
-
-		@param obj: absolute path to an object or a key from _obj_properties
-		@type obj: string (example: '/usr/bin/bar') or _ObjectKey
-		@rtype: set of strings (example: set(['/bin/foo', '/usr/bin/bar']))
-		@return: The return value is a soname -> set-of-library-paths, where
-		set-of-library-paths satisfy soname.
-
-		"""
-
-		os = _os_merge
-
-		rValue = set()
-
-		if not self._libs:
-			self.rebuild()
-
-		# Determine the obj_key and the set of objects matching the arguments.
-		if isinstance(obj, self._ObjectKey):
-			obj_key = obj
-			if obj_key not in self._obj_properties:
-				raise KeyError("%s not in object list" % obj_key)
-			objs = self._obj_properties[obj_key][4]
-		else:
-			objs = set([obj])
-			obj_key = self._obj_key(obj)
-			if obj_key not in self._obj_properties:
-				raise KeyError("%s (%s) not in object list" % (obj_key, obj))
-
-		# If there is another version of this lib with the
-		# same soname and the master link points to that
-		# other version, this lib will be shadowed and won't
-		# have any consumers.
-		if not isinstance(obj, self._ObjectKey):
-			soname = self._obj_properties[obj_key][3]
-			master_link = os.path.join(self._root,
-				os.path.dirname(obj).lstrip(os.path.sep), soname)
-			try:
-				master_st = os.stat(master_link)
-				obj_st = os.stat(obj)
-			except OSError:
-				pass
-			else:
-				if (obj_st.st_dev, obj_st.st_ino) != \
-					(master_st.st_dev, master_st.st_ino):
-					return set()
-
-		# Determine the directory(ies) from the set of objects.
-		objs_dir_keys = set(self._path_key(os.path.dirname(x)) for x in objs)
-		defpath_keys = set(self._path_key(x) for x in self._defpath)
-
-		arch, _needed, _path, soname, _objs = self._obj_properties[obj_key]
-		if arch in self._libs and soname in self._libs[arch]:
-			# For each potential consumer, add it to rValue if an object from the
-			# arguments resides in the consumer's runpath.
-			for consumer_key in self._libs[arch][soname].consumers:
-				_arch, _needed, path, _soname, consumer_objs = \
-						self._obj_properties[consumer_key]
-				path_keys = defpath_keys.union(self._path_key(x) for x in path)
-				if objs_dir_keys.intersection(path_keys):
-					rValue.update(consumer_objs)
-		return rValue
 
 class vardbapi(dbapi):
 
@@ -814,16 +91,12 @@ class vardbapi(dbapi):
 	_aux_cache_keys_re = re.compile(r'^NEEDED\..*$')
 	_aux_multi_line_re = re.compile(r'^(CONTENTS|NEEDED\..*)$')
 
-	def __init__(self, root, categories=None, settings=None, vartree=None):
+	def __init__(self, _unused_param=None, categories=None, settings=None, vartree=None):
 		"""
 		The categories parameter is unused since the dbapi class
 		now has a categories property that is generated from the
 		available packages.
 		"""
-		self.root = _unicode_decode(root,
-			encoding=_encodings['content'], errors='strict')
-		if self.root[-1] != '/':
-			self.root += '/'
 
 		# Used by emerge to check whether any packages
 		# have been added or removed.
@@ -840,37 +113,52 @@ class vardbapi(dbapi):
 
 		self.blockers = None
 		if settings is None:
-			from portage import settings
+			settings = portage.settings
 		self.settings = settings
+		self.root = settings['ROOT']
+
+		if _unused_param is not None and _unused_param != self.root:
+			warnings.warn("The first parameter of the " + \
+				"portage.dbapi.vartree.vardbapi" + \
+				" constructor is now unused. Use " + \
+				"settings['ROOT'] instead.",
+				DeprecationWarning, stacklevel=2)
+
+		self._eroot = settings['EROOT']
 		if vartree is None:
-			from portage import db
-			vartree = db[root]["vartree"]
+			vartree = portage.db[self.root]["vartree"]
 		self.vartree = vartree
 		self._aux_cache_keys = set(
 			["BUILD_TIME", "CHOST", "COUNTER", "DEPEND", "DESCRIPTION",
 			"EAPI", "HOMEPAGE", "IUSE", "KEYWORDS",
 			"LICENSE", "PDEPEND", "PROPERTIES", "PROVIDE", "RDEPEND",
-			"repository", "RESTRICT" , "SLOT", "USE", "DEFINED_PHASES"])
+			"repository", "RESTRICT" , "SLOT", "USE", "DEFINED_PHASES",
+			"REQUIRED_USE"])
 		self._aux_cache_obj = None
-		self._aux_cache_filename = os.path.join(self.root,
+		self._aux_cache_filename = os.path.join(self._eroot,
 			CACHE_PATH, "vdb_metadata.pickle")
-		self._counter_path = os.path.join(root,
+		self._counter_path = os.path.join(self._eroot,
 			CACHE_PATH, "counter")
 
-		try:
-			self.plib_registry = PreservedLibsRegistry(self.root,
-				os.path.join(self.root, PRIVATE_PATH, "preserved_libs_registry"))
-		except PermissionDenied:
-			# apparently this user isn't allowed to access PRIVATE_PATH
-			self.plib_registry = None
+		self._plib_registry = None
+		if _ENABLE_PRESERVE_LIBS:
+			try:
+				self._plib_registry = PreservedLibsRegistry(self._eroot,
+					os.path.join(self._eroot, PRIVATE_PATH,
+					"preserved_libs_registry"))
+			except PermissionDenied:
+				# apparently this user isn't allowed to access PRIVATE_PATH
+				pass
 
-		self.linkmap = LinkageMap(self)
+		self._linkmap = None
+		if _ENABLE_DYN_LINK_MAP:
+			self._linkmap = LinkageMap(self)
 		self._owners = self._owners_db(self)
 
 	def getpath(self, mykey, filename=None):
 		# This is an optimized hotspot, so don't use unicode-wrapped
 		# os module and don't use os.path.join().
-		rValue = self.root + VDB_PATH + _os.sep + mykey
+		rValue = self._eroot + VDB_PATH + _os.sep + mykey
 		if filename is not None:
 			# If filename is always relative, we can do just
 			# rValue += _os.sep + filename
@@ -882,7 +170,7 @@ class vardbapi(dbapi):
 		This is called before an after any modifications, so that consumers
 		can use directory mtimes to validate caches. See bug #290428.
 		"""
-		base = self.root + VDB_PATH
+		base = self._eroot + VDB_PATH
 		cat = catsplit(cpv)[0]
 		catdir = base + _os.sep + cat
 		t = time.time()
@@ -911,7 +199,7 @@ class vardbapi(dbapi):
 	def cpv_inject(self, mycpv):
 		"injects a real package into our on-disk database; assumes mycpv is valid and doesn't already exist"
 		os.makedirs(self.getpath(mycpv))
-		counter = self.counter_tick(self.root, mycpv=mycpv)
+		counter = self.counter_tick(mycpv=mycpv)
 		# write local package counter so that emerge clean does the right thing
 		write_atomic(self.getpath(mycpv, filename="COUNTER"), str(counter))
 
@@ -923,7 +211,7 @@ class vardbapi(dbapi):
 				return True
 		return False
 
-	def move_ent(self, mylist):
+	def move_ent(self, mylist, repo_match=None):
 		origcp = mylist[1]
 		newcp = mylist[2]
 
@@ -939,6 +227,9 @@ class vardbapi(dbapi):
 			mycpv_cp = cpv_getkey(mycpv)
 			if mycpv_cp != origcp:
 				# Ignore PROVIDE virtual match.
+				continue
+			if repo_match is not None \
+				and not repo_match(self.aux_get(mycpv, ['repository'])[0]):
 				continue
 			mynewcpv = mycpv.replace(mycpv_cp, str(newcp), 1)
 			mynewcat = catsplit(newcp)[0]
@@ -1020,7 +311,7 @@ class vardbapi(dbapi):
 		involve merge or unmerge of packages).
 		"""
 		returnme = []
-		basepath = os.path.join(self.root, VDB_PATH) + os.path.sep
+		basepath = os.path.join(self._eroot, VDB_PATH) + os.path.sep
 
 		if use_cache:
 			from portage import listdir
@@ -1112,7 +403,7 @@ class vardbapi(dbapi):
 			return list(self._iter_match(mydep,
 				self.cp_list(mydep.cp, use_cache=use_cache)))
 		try:
-			curmtime = os.stat(os.path.join(self.root, VDB_PATH, mycat)).st_mtime
+			curmtime = os.stat(os.path.join(self._eroot, VDB_PATH, mycat)).st_mtime
 		except (IOError, OSError):
 			curmtime=0
 
@@ -1346,12 +637,10 @@ class vardbapi(dbapi):
 		return results
 
 	def aux_update(self, cpv, values):
-		self._bump_mtime(cpv)
-		cat, pkg = catsplit(cpv)
-		mylink = dblink(cat, pkg, self.root, self.settings,
-		treetype="vartree", vartree=self.vartree)
+		mylink = self._dblink(cpv)
 		if not mylink.exists():
 			raise KeyError(cpv)
+		self._bump_mtime(cpv)
 		self._clear_pkg_cache(mylink)
 		for k, v in values.items():
 			if v:
@@ -1363,10 +652,13 @@ class vardbapi(dbapi):
 					pass
 		self._bump_mtime(cpv)
 
-	def counter_tick(self, myroot, mycpv=None):
-		return self.counter_tick_core(myroot, incrementing=1, mycpv=mycpv)
+	def counter_tick(self, myroot=None, mycpv=None):
+		"""
+		@param myroot: ignored, self._eroot is used instead
+		"""
+		return self.counter_tick_core(incrementing=1, mycpv=mycpv)
 
-	def get_counter_tick_core(self, myroot, mycpv=None):
+	def get_counter_tick_core(self, myroot=None, mycpv=None):
 		"""
 		Use this method to retrieve the counter instead
 		of having to trust the value of a global counter
@@ -1384,7 +676,10 @@ class vardbapi(dbapi):
 		it also corresponds to the total number of
 		installation actions that have occurred in
 		the history of this package database.
+
+		@param myroot: ignored, self._eroot is used instead
 		"""
+		myroot = None
 		cp_list = self.cp_list
 		max_counter = 0
 		for cp in self.cp_all():
@@ -1440,9 +735,15 @@ class vardbapi(dbapi):
 
 		return max_counter + 1
 
-	def counter_tick_core(self, myroot, incrementing=1, mycpv=None):
-		"This method will grab the next COUNTER value and record it back to the global file.  Returns new counter value."
-		counter = self.get_counter_tick_core(myroot, mycpv=mycpv) - 1
+	def counter_tick_core(self, myroot=None, incrementing=1, mycpv=None):
+		"""
+		This method will grab the next COUNTER value and record it back
+		to the global file.  Returns new counter value.
+
+		@param myroot: ignored, self._eroot is used instead
+		"""
+		myroot = None
+		counter = self.get_counter_tick_core(mycpv=mycpv) - 1
 		if incrementing:
 			#increment counter
 			counter += 1
@@ -1455,8 +756,8 @@ class vardbapi(dbapi):
 
 	def _dblink(self, cpv):
 		category, pf = catsplit(cpv)
-		return dblink(category, pf, self.root,
-			self.settings, vartree=self.vartree, treetype="vartree")
+		return dblink(category, pf, settings=self.settings,
+			vartree=self.vartree, treetype="vartree")
 
 	def removeFromContents(self, pkg, paths, relative_paths=True):
 		"""
@@ -1467,7 +768,7 @@ class vardbapi(dbapi):
 		"""
 		if not hasattr(pkg, "getcontents"):
 			pkg = self._dblink(pkg)
-		root = self.root
+		root = self._eroot
 		root_len = len(root) - 1
 		new_contents = pkg.getcontents().copy()
 		removed = 0
@@ -1480,7 +781,7 @@ class vardbapi(dbapi):
 				relative_filename = filename
 			else:
 				relative_filename = filename[root_len:]
-			contents_key = pkg._match_contents(relative_filename, root)
+			contents_key = pkg._match_contents(relative_filename)
 			if contents_key:
 				del new_contents[contents_key]
 				removed += 1
@@ -1512,7 +813,7 @@ class vardbapi(dbapi):
 			self._vardb = vardb
 
 		def add(self, cpv):
-			root_len = len(self._vardb.root)
+			root_len = len(self._vardb._eroot)
 			contents = self._vardb._dblink(cpv).getcontents()
 			pkg_hash = self._hash_pkg(cpv)
 			if not contents:
@@ -1641,29 +942,37 @@ class vardbapi(dbapi):
 			call.
 			"""
 
+			if not isinstance(path_iter, list):
+				path_iter = list(path_iter)
+
+			if len(path_iter) > 10:
+				for x in self._iter_owners_low_mem(path_iter):
+					yield x
+				return
+
 			owners_cache = self._populate()
 
 			vardb = self._vardb
-			root = vardb.root
+			root = vardb._eroot
 			hash_pkg = owners_cache._hash_pkg
 			hash_str = owners_cache._hash_str
 			base_names = self._vardb._aux_cache["owners"]["base_names"]
 
 			dblink_cache = {}
-			dblink_fifo = deque()
 
 			def dblink(cpv):
 				x = dblink_cache.get(cpv)
 				if x is None:
-					if len(dblink_fifo) >= 100:
+					if len(dblink_cache) > 20:
 						# Ensure that we don't run out of memory.
-						del dblink_cache[dblink_fifo.popleft().mycpv]
+						raise StopIteration()
 					x = self._vardb._dblink(cpv)
 					dblink_cache[cpv] = x
-					dblink_fifo.append(x)
 				return x
 
-			for path in path_iter:
+			while path_iter:
+
+				path = path_iter.pop()
 				is_basename = os.sep != path[:1]
 				if is_basename:
 					name = path
@@ -1675,52 +984,95 @@ class vardbapi(dbapi):
 
 				name_hash = hash_str(name)
 				pkgs = base_names.get(name_hash)
+				owners = []
 				if pkgs is not None:
-					for hash_value in pkgs:
-						if not isinstance(hash_value, tuple) or \
-							len(hash_value) != 3:
-							continue
-						cpv, counter, mtime = hash_value
-						if not isinstance(cpv, basestring):
-							continue
-						try:
-							current_hash = hash_pkg(cpv)
-						except KeyError:
-							continue
+					try:
+						for hash_value in pkgs:
+							if not isinstance(hash_value, tuple) or \
+								len(hash_value) != 3:
+								continue
+							cpv, counter, mtime = hash_value
+							if not isinstance(cpv, basestring):
+								continue
+							try:
+								current_hash = hash_pkg(cpv)
+							except KeyError:
+								continue
 
-						if current_hash != hash_value:
-							continue
+							if current_hash != hash_value:
+								continue
 
-						if is_basename:
-							for p in dblink(cpv).getcontents():
-								if os.path.basename(p) == name:
-									yield dblink(cpv), p[len(root):]
-						else:
-							if dblink(cpv).isowner(path, root):
-								yield dblink(cpv), path
+							if is_basename:
+								for p in dblink(cpv).getcontents():
+									if os.path.basename(p) == name:
+										owners.append((cpv, p[len(root):]))
+							else:
+								if dblink(cpv).isowner(path):
+									owners.append((cpv, path))
+					except StopIteration:
+						path_iter.append(path)
+						del owners[:]
+						dblink_cache.clear()
+						gc.collect()
+						for x in self._iter_owners_low_mem(path_iter):
+							yield x
+						return
+					else:
+						for cpv, p in owners:
+							yield (dblink(cpv), p)
+
+		def _iter_owners_low_mem(self, path_list):
+			"""
+			This implemention will make a short-lived dblink instance (and
+			parse CONTENTS) for every single installed package. This is
+			slower and but uses less memory than the method which uses the
+			basename cache.
+			"""
+
+			if not path_list:
+				return
+
+			path_info_list = []
+			for path in path_list:
+				is_basename = os.sep != path[:1]
+				if is_basename:
+					name = path
+				else:
+					name = os.path.basename(path.rstrip(os.path.sep))
+				path_info_list.append((path, name, is_basename))
+
+			root = self._vardb._eroot
+			for cpv in self._vardb.cpv_all():
+				dblnk =  self._vardb._dblink(cpv)
+
+				for path, name, is_basename in path_info_list:
+					if is_basename:
+						for p in dblnk.getcontents():
+							if os.path.basename(p) == name:
+								yield dblnk, p[len(root):]
+					else:
+						if dblnk.isowner(path):
+							yield dblnk, path
 
 class vartree(object):
 	"this tree will scan a var/db/pkg database located at root (passed to init)"
-	def __init__(self, root="/", virtual=None, clone=None, categories=None,
+	def __init__(self, root=None, virtual=None, categories=None,
 		settings=None):
-		if clone:
-			writemsg("vartree.__init__(): deprecated " + \
-				"use of clone parameter\n", noiselevel=-1)
-			self.root = clone.root[:]
-			self.dbapi = copy.deepcopy(clone.dbapi)
-			self.populated = 1
-			from portage import config
-			self.settings = config(clone=clone.settings)
-		else:
-			self.root = root[:]
-			if settings is None:
-				from portage import settings
-			self.settings = settings
-			if categories is None:
-				categories = settings.categories
-			self.dbapi = vardbapi(self.root, categories=categories,
-				settings=settings, vartree=self)
-			self.populated = 1
+
+		if settings is None:
+			settings = portage.settings
+		self.root = settings['ROOT']
+
+		if root is not None and root != self.root:
+			warnings.warn("The 'root' parameter of the " + \
+				"portage.dbapi.vartree.vartree" + \
+				" constructor is now unused. Use " + \
+				"settings['ROOT'] instead.",
+				DeprecationWarning, stacklevel=2)
+
+		self.settings = settings
+		self.dbapi = vardbapi(settings=settings, vartree=self)
+		self.populated = 1
 
 	def getpath(self, mykey, filename=None):
 		return self.dbapi.getpath(mykey, filename=filename)
@@ -1738,7 +1090,7 @@ class vartree(object):
 			mylines, myuse = self.dbapi.aux_get(mycpv, ["PROVIDE", "USE"])
 			if mylines:
 				myuse = myuse.split()
-				mylines = flatten(use_reduce(paren_reduce(mylines), uselist=myuse))
+				mylines = use_reduce(mylines, uselist=myuse, flat=True)
 				for myprovide in mylines:
 					mys = catpkgsplit(myprovide)
 					if not mys:
@@ -1748,7 +1100,7 @@ class vartree(object):
 		except SystemExit as e:
 			raise
 		except Exception as e:
-			mydir = os.path.join(self.root, VDB_PATH, mycpv)
+			mydir = os.path.join(self.dbapi._eroot, VDB_PATH, mycpv)
 			writemsg(_("\nParse Error reading PROVIDE and USE in '%s'\n") % mydir,
 				noiselevel=-1)
 			if mylines:
@@ -1821,20 +1173,20 @@ class dblink(object):
 	"""
 
 	import re
-	_normalize_needed = re.compile(r'.*//.*|^[^/]|.+/$|(^|.*/)\.\.?(/.*|$)')
-	_contents_split_counts = {
-		"dev": 2,
-		"dir": 2,
-		"fif": 2,
-		"obj": 4,
-		"sym": 5
-	}
+	_normalize_needed = re.compile(r'//|^[^/]|./$|(^|/)\.\.?(/|$)')
+
+	_contents_re = re.compile(r'^(' + \
+		r'(?P<dir>(dev|dir|fif) (.+))|' + \
+		r'(?P<obj>(obj) (.+) (\S+) (\d+))|' + \
+		r'(?P<sym>(sym) (.+) -> (.+) (\d+))' + \
+		r')$'
+	)
 
 	# When looping over files for merge/unmerge, temporarily yield to the
 	# scheduler each time this many files are processed.
 	_file_merge_yield_interval = 20
 
-	def __init__(self, cat, pkg, myroot, mysettings, treetype=None,
+	def __init__(self, cat, pkg, myroot=None, settings=None, treetype=None,
 		vartree=None, blockers=None, scheduler=None):
 		"""
 		Creates a DBlink object for a given CPV.
@@ -1844,16 +1196,21 @@ class dblink(object):
 		@type cat: String
 		@param pkg: Package (PV)
 		@type pkg: String
-		@param myroot: Typically ${ROOT}
+		@param myroot: ignored, settings['ROOT'] is used instead
 		@type myroot: String (Path)
-		@param mysettings: Typically portage.config
-		@type mysettings: An instance of portage.config
+		@param settings: Typically portage.settings
+		@type settings: portage.config
 		@param treetype: one of ['porttree','bintree','vartree']
 		@type treetype: String
 		@param vartree: an instance of vartree corresponding to myroot.
 		@type vartree: vartree
 		"""
-		
+
+		if settings is None:
+			raise TypeError("settings argument is required")
+
+		mysettings = settings
+		myroot = settings['ROOT']
 		self.cat = cat
 		self.pkg = pkg
 		self.mycpv = self.cat + "/" + self.pkg
@@ -1861,13 +1218,15 @@ class dblink(object):
 		self.mysplit[0] = "%s/%s" % (self.cat, self.mysplit[0])
 		self.treetype = treetype
 		if vartree is None:
-			from portage import db
-			vartree = db[myroot]["vartree"]
+			vartree = portage.db[myroot]["vartree"]
 		self.vartree = vartree
 		self._blockers = blockers
 		self._scheduler = scheduler
 
-		self.dbroot = normalize_path(os.path.join(myroot, VDB_PATH))
+		# WARNING: EROOT support is experimental and may be incomplete
+		# for cases in which EPREFIX is non-empty.
+		self._eroot = mysettings['EROOT']
+		self.dbroot = normalize_path(os.path.join(self._eroot, VDB_PATH))
 		self.dbcatdir = self.dbroot+"/"+cat
 		self.dbpkgdir = self.dbcatdir+"/"+pkg
 		self.dbtmpdir = self.dbcatdir+"/-MERGING-"+pkg
@@ -1879,12 +1238,6 @@ class dblink(object):
 		self._verbose = self.settings.get("PORTAGE_VERBOSE") == "1"
 
 		self.myroot=myroot
-		protect_obj = ConfigProtect(myroot,
-			portage.util.shlex_split(mysettings.get("CONFIG_PROTECT", "")),
-			portage.util.shlex_split(
-			mysettings.get("CONFIG_PROTECT_MASK", "")))
-		self.updateprotect = protect_obj.updateprotect
-		self.isprotected = protect_obj.isprotected
 		self._installed_instance = None
 		self.contentscache = None
 		self._contents_inodes = None
@@ -1892,6 +1245,7 @@ class dblink(object):
 		self._linkmap_broken = False
 		self._md5_merge_map = {}
 		self._hash_key = (self.myroot, self.mycpv)
+		self._protect_obj = None
 
 	def __hash__(self):
 		return hash(self._hash_key)
@@ -1899,6 +1253,23 @@ class dblink(object):
 	def __eq__(self, other):
 		return isinstance(other, dblink) and \
 			self._hash_key == other._hash_key
+
+	def _get_protect_obj(self):
+
+		if self._protect_obj is None:
+			self._protect_obj = ConfigProtect(self._eroot,
+			portage.util.shlex_split(
+				self.settings.get("CONFIG_PROTECT", "")),
+			portage.util.shlex_split(
+				self.settings.get("CONFIG_PROTECT_MASK", "")))
+
+		return self._protect_obj
+
+	def isprotected(self, obj):
+		return self._get_protect_obj().isprotected(obj)
+
+	def updateprotect(self):
+		self._get_protect_obj().updateprotect()
 
 	def lockdb(self):
 		if self._lock_vdb:
@@ -1976,8 +1347,11 @@ class dblink(object):
 		myc.close()
 		null_byte = "\0"
 		normalize_needed = self._normalize_needed
-		contents_split_counts = self._contents_split_counts
-		myroot = self.myroot
+		contents_re = self._contents_re
+		obj_index = contents_re.groupindex['obj']
+		dir_index = contents_re.groupindex['dir']
+		sym_index = contents_re.groupindex['sym']
+		myroot = self._eroot
 		if myroot == os.path.sep:
 			myroot = None
 		pos = 0
@@ -1988,63 +1362,40 @@ class dblink(object):
 				errors.append((pos + 1, _("Null byte found in CONTENTS entry")))
 				continue
 			line = line.rstrip("\n")
-			# Split on " " so that even file paths that
-			# end with spaces can be handled.
-			mydat = line.split(" ")
-			entry_type = mydat[0] # empty string if line is empty
-			correct_split_count = contents_split_counts.get(entry_type)
-			if correct_split_count and len(mydat) > correct_split_count:
-				# Apparently file paths contain spaces, so reassemble
-				# the split have the correct_split_count.
-				newsplit = [entry_type]
-				spaces_total = len(mydat) - correct_split_count
-				if entry_type == "sym":
-					try:
-						splitter = mydat.index("->", 2, len(mydat) - 2)
-					except ValueError:
-						errors.append((pos + 1, _("Unrecognized CONTENTS entry")))
-						continue
-					spaces_in_path = splitter - 2
-					spaces_in_target = spaces_total - spaces_in_path
-					newsplit.append(" ".join(mydat[1:splitter]))
-					newsplit.append("->")
-					target_end = splitter + spaces_in_target + 2
-					newsplit.append(" ".join(mydat[splitter + 1:target_end]))
-					newsplit.extend(mydat[target_end:])
-				else:
-					path_end = spaces_total + 2
-					newsplit.append(" ".join(mydat[1:path_end]))
-					newsplit.extend(mydat[path_end:])
-				mydat = newsplit
-
-			# we do this so we can remove from non-root filesystems
-			# (use the ROOT var to allow maintenance on other partitions)
-			try:
-				if normalize_needed.match(mydat[1]):
-					mydat[1] = normalize_path(mydat[1])
-					if not mydat[1].startswith(os.path.sep):
-						mydat[1] = os.path.sep + mydat[1]
-				if myroot:
-					mydat[1] = os.path.join(myroot, mydat[1].lstrip(os.path.sep))
-				if mydat[0] == "obj":
-					#format: type, mtime, md5sum
-					pkgfiles[mydat[1]] = [mydat[0], mydat[3], mydat[2]]
-				elif mydat[0] == "dir":
-					#format: type
-					pkgfiles[mydat[1]] = [mydat[0]]
-				elif mydat[0] == "sym":
-					#format: type, mtime, dest
-					pkgfiles[mydat[1]] = [mydat[0], mydat[4], mydat[3]]
-				elif mydat[0] == "dev":
-					#format: type
-					pkgfiles[mydat[1]] = [mydat[0]]
-				elif mydat[0]=="fif":
-					#format: type
-					pkgfiles[mydat[1]] = [mydat[0]]
-				else:
-					errors.append((pos + 1, _("Unrecognized CONTENTS entry")))
-			except (KeyError, IndexError):
+			m = contents_re.match(line)
+			if m is None:
 				errors.append((pos + 1, _("Unrecognized CONTENTS entry")))
+				continue
+
+			if m.group(obj_index) is not None:
+				base = obj_index
+				#format: type, mtime, md5sum
+				data = (m.group(base+1), m.group(base+4), m.group(base+3))
+			elif m.group(dir_index) is not None:
+				base = dir_index
+				#format: type
+				data = (m.group(base+1),)
+			elif m.group(sym_index) is not None:
+				base = sym_index
+				#format: type, mtime, dest
+				data = (m.group(base+1), m.group(base+4), m.group(base+3))
+			else:
+				# This won't happen as long the regular expression
+				# is written to only match valid entries.
+				raise AssertionError(_("required group not found " + \
+					"in CONTENTS entry: '%s'") % line)
+
+			path = m.group(base+2)
+			if normalize_needed.search(path) is not None:
+				path = normalize_path(path)
+				if not path.startswith(os.path.sep):
+					path = os.path.sep + path
+
+			if myroot is not None:
+				path = os.path.join(myroot, path.lstrip(os.path.sep))
+
+			pkgfiles[path] = data
+
 		if errors:
 			writemsg(_("!!! Parse error in '%s'\n") % contents_file, noiselevel=-1)
 			for pos, e in errors:
@@ -2052,7 +1403,7 @@ class dblink(object):
 		self.contentscache = pkgfiles
 		return pkgfiles
 
-	def unmerge(self, pkgfiles=None, trimworld=1, cleanup=1,
+	def unmerge(self, pkgfiles=None, trimworld=None, cleanup=True,
 		ldpath_mtimes=None, others_in_slot=None):
 		"""
 		Calls prerm
@@ -2063,7 +1414,7 @@ class dblink(object):
 		
 		@param pkgfiles: files to unmerge (generally self.getcontents() )
 		@type pkgfiles: Dictionary
-		@param trimworld: Remove CPV from world file if True, not if False
+		@param trimworld: Unused
 		@type trimworld: Boolean
 		@param cleanup: cleanup to pass to doebuild (see doebuild)
 		@type cleanup: Boolean
@@ -2080,6 +1431,13 @@ class dblink(object):
 		The caller must ensure that lockdb() and unlockdb() are called
 		before and after this method.
 		"""
+
+		if trimworld is not None:
+			warnings.warn("The trimworld parameter of the " + \
+				"portage.dbapi.vartree.dblink.unmerge()" + \
+				" method is now unused.",
+				DeprecationWarning, stacklevel=2)
+
 		self.vartree.dbapi._bump_mtime(self.mycpv)
 		showMessage = self._display_merge
 		if self.vartree.dbapi._categories is not None:
@@ -2096,7 +1454,7 @@ class dblink(object):
 				if cur_cpv == self.mycpv:
 					continue
 				others_in_slot.append(dblink(self.cat, catsplit(cur_cpv)[1],
-					self.vartree.root, self.settings, vartree=self.vartree,
+					settings=self.settings, vartree=self.vartree,
 					treetype="vartree"))
 
 			retval = self._security_check([self] + others_in_slot)
@@ -2109,6 +1467,7 @@ class dblink(object):
 		myebuildpath = None
 		ebuild_phase = "prerm"
 		log_path = None
+		catdir = None
 		mystuff = os.listdir(self.dbdir)
 		for x in mystuff:
 			if x.endswith(".ebuild"):
@@ -2123,8 +1482,8 @@ class dblink(object):
 		self.settings.setcpv(self.mycpv, mydb=self.vartree.dbapi)
 		if myebuildpath:
 			try:
-				doebuild_environment(myebuildpath, "prerm", self.myroot,
-					self.settings, 0, 0, self.vartree.dbapi)
+				doebuild_environment(myebuildpath, "prerm",
+					settings=self.settings, db=self.vartree.dbapi)
 			except UnsupportedAPIException as e:
 				# Sometimes this happens due to corruption of the EAPI file.
 				writemsg(_("!!! FAILED prerm: %s\n") % \
@@ -2139,7 +1498,7 @@ class dblink(object):
 		builddir_lock = None
 		catdir_lock = None
 		scheduler = self._scheduler
-		retval = -1
+		retval = os.EX_OK
 		failures = 0
 		try:
 			if myebuildpath:
@@ -2154,14 +1513,11 @@ class dblink(object):
 				finally:
 					catdir_lock = None
 
-				prepare_build_dirs(self.myroot, self.settings, 1)
+				prepare_build_dirs(settings=self.settings, cleanup=True)
 				log_path = self.settings.get("PORTAGE_LOG_FILE")
 
 				if scheduler is None:
-					retval = doebuild(myebuildpath, ebuild_phase, self.myroot,
-						self.settings, cleanup=cleanup, use_cache=0,
-						mydbapi=self.vartree.dbapi, tree=self.treetype,
-						vartree=self.vartree)
+					retval = _spawn_phase('prerm', self.settings)
 				else:
 					retval = scheduler.dblinkEbuildPhase(
 						self, self.vartree.dbapi, myebuildpath, ebuild_phase)
@@ -2175,16 +1531,18 @@ class dblink(object):
 			self._clear_contents_cache()
 
 			# Remove the registration of preserved libs for this pkg instance
-			plib_registry = self.vartree.dbapi.plib_registry
-			plib_registry.unregister(self.mycpv, self.settings["SLOT"],
-				self.vartree.dbapi.cpv_counter(self.mycpv))
+			plib_registry = self.vartree.dbapi._plib_registry
+			if plib_registry is None:
+				# preserve-libs is entirely disabled
+				pass
+			else:
+				plib_registry.unregister(self.mycpv, self.settings["SLOT"],
+					self.vartree.dbapi.cpv_counter(self.mycpv))
 
 			if myebuildpath:
 				ebuild_phase = "postrm"
 				if scheduler is None:
-					retval = doebuild(myebuildpath, ebuild_phase, self.myroot,
-						self.settings, use_cache=0, tree=self.treetype,
-						mydbapi=self.vartree.dbapi, vartree=self.vartree)
+					retval = _spawn_phase(ebuild_phase, self.settings)
 				else:
 					retval = scheduler.dblinkEbuildPhase(
 						self, self.vartree.dbapi, myebuildpath, ebuild_phase)
@@ -2219,7 +1577,11 @@ class dblink(object):
 			else:
 				# Prune any preserved libs that may have
 				# been unmerged with this package.
-				self.vartree.dbapi.plib_registry.pruneNonExisting()
+				if plib_registry is None:
+					# preserve-libs is entirely disabled
+					pass
+				else:
+					plib_registry.pruneNonExisting()
 
 		finally:
 			self.vartree.dbapi._bump_mtime(self.mycpv)
@@ -2266,20 +1628,25 @@ class dblink(object):
 
 						# process logs created during pre/postrm
 						elog_process(self.mycpv, self.settings)
-						if retval == os.EX_OK:
-							if scheduler is None:
-								doebuild(myebuildpath, "cleanrm", self.myroot,
-									self.settings, tree="vartree",
-									mydbapi=self.vartree.dbapi,
-									vartree=self.vartree)
-							else:
-								scheduler.dblinkEbuildPhase(
-									self, self.vartree.dbapi,
-									myebuildpath, "cleanrm")
+
+					if retval == os.EX_OK:
+						# myebuildpath might be None, so ensure
+						# it has a sane value for the clean phase,
+						# even though it won't really be sourced.
+						myebuildpath = os.path.join(self.dbdir,
+							self.pkg + ".ebuild")
+						doebuild_environment(myebuildpath, "cleanrm",
+							settings=self.settings, db=self.vartree.dbapi)
+						if scheduler is None:
+							_spawn_phase("cleanrm", self.settings)
+						else:
+							scheduler.dblinkEbuildPhase(
+								self, self.vartree.dbapi,
+								myebuildpath, "cleanrm")
 				finally:
 					unlockdir(builddir_lock)
 			try:
-				if myebuildpath and not catdir_lock:
+				if catdir and not catdir_lock:
 					# Lock catdir for removal if empty.
 					catdir_lock = lockdir(catdir)
 			finally:
@@ -2322,7 +1689,8 @@ class dblink(object):
 		else:
 			self.settings.pop("PORTAGE_LOG_FILE", None)
 
-		env_update(target_root=self.myroot, prev_mtimes=ldpath_mtimes,
+		env_update(target_root=self.settings['ROOT'],
+			prev_mtimes=ldpath_mtimes,
 			contents=contents, env=self.settings.environ(),
 			writemsg_level=self._display_merge)
 		return os.EX_OK
@@ -2367,11 +1735,10 @@ class dblink(object):
 				if cur_cpv == self.mycpv:
 					continue
 				others_in_slot.append(dblink(self.cat, catsplit(cur_cpv)[1],
-					self.vartree.root, self.settings,
+					settings=self.settings,
 					vartree=self.vartree, treetype="vartree"))
 
-		dest_root = normalize_path(self.vartree.root).rstrip(os.path.sep) + \
-			os.path.sep
+		dest_root = self._eroot
 		dest_root_len = len(dest_root) - 1
 
 		conf_mem_file = os.path.join(dest_root, CONFIG_MEMORY_FILE)
@@ -2379,6 +1746,7 @@ class dblink(object):
 		stale_confmem = []
 
 		unmerge_orphans = "unmerge-orphans" in self.settings.features
+		calc_prelink = "prelink-checksums" in self.settings.features
 
 		if pkgfiles:
 			self.updateprotect()
@@ -2395,7 +1763,7 @@ class dblink(object):
 				errno.EEXIST, errno.ENOTEMPTY,
 				errno.EBUSY, errno.ENOENT,
 				errno.ENOTDIR, errno.EISDIR)
-			modprotect = os.path.join(self.vartree.root, "lib/modules/")
+			modprotect = os.path.join(self._eroot, "lib/modules/")
 
 			def unlink(file_name, lstatobj):
 				if bsd_chflags:
@@ -2490,7 +1858,7 @@ class dblink(object):
 					relative_path = obj[dest_root_len:]
 					is_owned = False
 					for dblnk in others_in_slot:
-						if dblnk.isowner(relative_path, dest_root):
+						if dblnk.isowner(relative_path):
 							is_owned = True
 							break
 					if is_owned:
@@ -2563,7 +1931,7 @@ class dblink(object):
 						continue
 					mymd5 = None
 					try:
-						mymd5 = perf_md5(obj, calc_prelink=1)
+						mymd5 = perf_md5(obj, calc_prelink=calc_prelink)
 					except FileNotFound as e:
 						# the file has disappeared between now and our stat call
 						show_unmerge("---", unmerge_desc["!obj"], file_type, obj)
@@ -2627,7 +1995,7 @@ class dblink(object):
 		#remove self from vartree database so that our own virtual gets zapped if we're the last node
 		self.vartree.zap(self.mycpv)
 
-	def isowner(self, filename, destroot):
+	def isowner(self, filename, destroot=None):
 		""" 
 		Check if a file belongs to this package. This may
 		result in a stat call for the parent directory of
@@ -2646,9 +2014,17 @@ class dblink(object):
 		1. True if this package owns the file.
 		2. False if this package does not own the file.
 		"""
-		return bool(self._match_contents(filename, destroot))
 
-	def _match_contents(self, filename, destroot):
+		if destroot is not None and destroot != self._eroot:
+			warnings.warn("The second parameter of the " + \
+				"portage.dbapi.vartree.dblink.isowner()" + \
+				" is now unused. Instead " + \
+				"self.settings['EROOT'] will be used.",
+				DeprecationWarning, stacklevel=2)
+
+		return bool(self._match_contents(filename))
+
+	def _match_contents(self, filename, destroot=None):
 		"""
 		The matching contents entry is returned, which is useful
 		since the path may differ from the one given by the caller,
@@ -2662,8 +2038,14 @@ class dblink(object):
 		filename = _unicode_decode(filename,
 			encoding=_encodings['content'], errors='strict')
 
-		destroot = _unicode_decode(destroot,
-			encoding=_encodings['content'], errors='strict')
+		if destroot is not None and destroot != self._eroot:
+			warnings.warn("The second parameter of the " + \
+				"portage.dbapi.vartree.dblink._match_contents()" + \
+				" is now unused. Instead " + \
+				"self.settings['EROOT'] will be used.",
+				DeprecationWarning, stacklevel=2)
+
+		destroot = self._eroot
 
 		# The given filename argument might have a different encoding than the
 		# the filenames contained in the contents, so use separate wrapped os
@@ -2791,10 +2173,19 @@ class dblink(object):
 		return False
 
 	def _linkmap_rebuild(self, **kwargs):
-		if self._linkmap_broken:
+		"""
+		Rebuild the self._linkmap if it's not broken due to missing
+		scanelf binary. Also, return early if preserve-libs is disabled
+		and the preserve-libs registry is empty.
+		"""
+		if self._linkmap_broken or \
+			self.vartree.dbapi._linkmap is None or \
+			self.vartree.dbapi._plib_registry is None or \
+			("preserve-libs" not in self.settings.features and \
+			not self.vartree.dbapi._plib_registry.hasEntries()):
 			return
 		try:
-			self.vartree.dbapi.linkmap.rebuild(**kwargs)
+			self.vartree.dbapi._linkmap.rebuild(**kwargs)
 		except CommandNotFound as e:
 			self._linkmap_broken = True
 			self._display_merge(_("!!! Disabling preserve-libs " \
@@ -2806,16 +2197,18 @@ class dblink(object):
 		Get set of relative paths for libraries to be preserved. The file
 		paths are selected from self._installed_instance.getcontents().
 		"""
-		if self._linkmap_broken or not \
-			(self._installed_instance is not None and \
-			"preserve-libs" in self.settings.features):
+		if self._linkmap_broken or \
+			self.vartree.dbapi._linkmap is None or \
+			self.vartree.dbapi._plib_registry is None or \
+			self._installed_instance is None or \
+			"preserve-libs" not in self.settings.features:
 			return None
 
 		os = _os_merge
-		linkmap = self.vartree.dbapi.linkmap
+		linkmap = self.vartree.dbapi._linkmap
 		installed_instance = self._installed_instance
 		old_contents = installed_instance.getcontents()
-		root = self.myroot
+		root = self._eroot
 		root_len = len(root) - 1
 		lib_graph = digraph()
 		path_node_map = {}
@@ -2853,7 +2246,7 @@ class dblink(object):
 						os = portage.os
 
 			f = f_abs[root_len:]
-			if self.isowner(f, root):
+			if self.isowner(f):
 				continue
 			try:
 				consumers = linkmap.findConsumers(f)
@@ -2870,10 +2263,10 @@ class dblink(object):
 		# Note that consumers can also be providers.
 		for provider_node, consumers in consumer_map.items():
 			for c in consumers:
-				if self.isowner(c, root):
+				if self.isowner(c):
 					continue
 				consumer_node = path_to_node(c)
-				if installed_instance.isowner(c, root) and \
+				if installed_instance.isowner(c) and \
 					consumer_node not in provider_nodes:
 					# This is not a provider, so it will be uninstalled.
 					continue
@@ -2926,7 +2319,7 @@ class dblink(object):
 
 		os = _os_merge
 		showMessage = self._display_merge
-		root = self.myroot
+		root = self._eroot
 
 		# Copy contents entries from the old package to the new one.
 		new_contents = self.getcontents().copy()
@@ -2969,18 +2362,21 @@ class dblink(object):
 		Find preserved libraries that don't have any consumers left.
 		"""
 
-		if self._linkmap_broken:
+		if self._linkmap_broken or \
+			self.vartree.dbapi._linkmap is None or \
+			self.vartree.dbapi._plib_registry is None or \
+			not self.vartree.dbapi._plib_registry.hasEntries():
 			return {}
 
 		# Since preserved libraries can be consumers of other preserved
 		# libraries, use a graph to track consumer relationships.
-		plib_dict = self.vartree.dbapi.plib_registry.getPreservedLibs()
+		plib_dict = self.vartree.dbapi._plib_registry.getPreservedLibs()
 		lib_graph = digraph()
 		preserved_nodes = set()
 		preserved_paths = set()
 		path_cpv_map = {}
 		path_node_map = {}
-		root = self.myroot
+		root = self._eroot
 
 		def path_to_node(path):
 			node = path_node_map.get(path)
@@ -2993,7 +2389,7 @@ class dblink(object):
 				path_node_map[path] = node
 			return node
 
-		linkmap = self.vartree.dbapi.linkmap
+		linkmap = self.vartree.dbapi._linkmap
 		for cpv, plibs in plib_dict.items():
 			for f in plibs:
 				path_cpv_map[f] = cpv
@@ -3003,7 +2399,7 @@ class dblink(object):
 				lib_graph.add(preserved_node, None)
 				preserved_paths.add(f)
 				preserved_nodes.add(preserved_node)
-				for c in self.vartree.dbapi.linkmap.findConsumers(f):
+				for c in self.vartree.dbapi._linkmap.findConsumers(f):
 					consumer_node = path_to_node(c)
 					if not consumer_node.file_exists():
 						continue
@@ -3079,7 +2475,7 @@ class dblink(object):
 			files_to_remove.update(files)
 		files_to_remove = sorted(files_to_remove)
 		showMessage = self._display_merge
-		root = self.myroot
+		root = self._eroot
 
 		parent_dirs = set()
 		for obj in files_to_remove:
@@ -3112,7 +2508,7 @@ class dblink(object):
 				if x == prev:
 					break
 
-		self.vartree.dbapi.plib_registry.pruneNonExisting()
+		self.vartree.dbapi._plib_registry.pruneNonExisting()
 
 	def _collision_protect(self, srcroot, destroot, mypkglist, mycontents):
 
@@ -3124,22 +2520,28 @@ class dblink(object):
 
 			# For collisions with preserved libraries, the current package
 			# will assume ownership and the libraries will be unregistered.
-			plib_dict = self.vartree.dbapi.plib_registry.getPreservedLibs()
-			plib_cpv_map = {}
-			plib_paths = set()
-			for cpv, paths in plib_dict.items():
-				plib_paths.update(paths)
-				for f in paths:
-					plib_cpv_map[f] = cpv
-			plib_inodes = self._lstat_inode_map(plib_paths)
+			if self.vartree.dbapi._plib_registry is None:
+				# preserve-libs is entirely disabled
+				plib_cpv_map = None
+				plib_paths = None
+				plib_inodes = {}
+			else:
+				plib_dict = self.vartree.dbapi._plib_registry.getPreservedLibs()
+				plib_cpv_map = {}
+				plib_paths = set()
+				for cpv, paths in plib_dict.items():
+					plib_paths.update(paths)
+					for f in paths:
+						plib_cpv_map[f] = cpv
+				plib_inodes = self._lstat_inode_map(plib_paths)
+
 			plib_collisions = {}
 
 			showMessage = self._display_merge
 			scheduler = self._scheduler
 			stopmerge = False
 			collisions = []
-			destroot = normalize_path(destroot).rstrip(os.path.sep) + \
-				os.path.sep
+			destroot = self._eroot
 			showMessage(_(" %s checking %d files for package collisions\n") % \
 				(colorize("GOOD", "*"), len(mycontents)))
 			for i, f in enumerate(mycontents):
@@ -3203,7 +2605,7 @@ class dblink(object):
 				isowned = False
 				full_path = os.path.join(destroot, f.lstrip(os.path.sep))
 				for ver in mypkglist:
-					if ver.isowner(f, destroot):
+					if ver.isowner(f):
 						isowned = True
 						break
 				if not isowned and self.isprotected(full_path):
@@ -3232,7 +2634,7 @@ class dblink(object):
 
 		os = _os_merge
 
-		root = self.myroot
+		root = self._eroot
 		inode_map = {}
 		for f in path_iter:
 			path = os.path.join(root, f.lstrip(os.sep))
@@ -3364,7 +2766,7 @@ class dblink(object):
 		
 		@param srcroot: Typically this is ${D}
 		@type srcroot: String (Path)
-		@param destroot: Path to merge to (usually ${ROOT})
+		@param destroot: ignored, self._eroot is used instead
 		@type destroot: String (Path)
 		@param inforoot: root of the vardb entry ?
 		@type inforoot: String (Path)
@@ -3387,8 +2789,7 @@ class dblink(object):
 
 		srcroot = _unicode_decode(srcroot,
 			encoding=_encodings['content'], errors='strict')
-		destroot = _unicode_decode(destroot,
-			encoding=_encodings['content'], errors='strict')
+		destroot = self._eroot
 		inforoot = _unicode_decode(inforoot,
 			encoding=_encodings['content'], errors='strict')
 		myebuild = _unicode_decode(myebuild,
@@ -3398,7 +2799,6 @@ class dblink(object):
 		scheduler = self._scheduler
 
 		srcroot = normalize_path(srcroot).rstrip(os.path.sep) + os.path.sep
-		destroot = normalize_path(destroot).rstrip(os.path.sep) + os.path.sep
 
 		if not os.path.isdir(srcroot):
 			showMessage(_("!!! Directory Not Found: D='%s'\n") % srcroot,
@@ -3470,7 +2870,7 @@ class dblink(object):
 			# Clone the config in case one of these has to be unmerged since
 			# we need it to have private ${T} etc... for things like elog.
 			others_in_slot.append(dblink(self.cat, catsplit(cur_cpv)[1],
-				self.vartree.root, config(clone=self.settings),
+				settings=config(clone=self.settings),
 				vartree=self.vartree, treetype="vartree",
 				scheduler=self._scheduler))
 
@@ -3633,9 +3033,9 @@ class dblink(object):
 		# exists for logging of collision-protect eerror messages.
 		if myebuild is None:
 			myebuild = os.path.join(inforoot, self.pkg + ".ebuild")
-		doebuild_environment(myebuild, "preinst", destroot,
-			self.settings, 0, 0, mydbapi)
-		prepare_build_dirs(destroot, self.settings, cleanup)
+		doebuild_environment(myebuild, "preinst",
+			settings=self.settings, db=mydbapi)
+		prepare_build_dirs(settings=self.settings, cleanup=cleanup)
 
 		if collisions:
 			collision_protect = "collision-protect" in self.settings.features
@@ -3682,31 +3082,37 @@ class dblink(object):
 
 			eerror(msg)
 
-			msg = []
-			msg.append("")
-			msg.append(_("Searching all installed"
-				" packages for file collisions..."))
-			msg.append("")
-			msg.append(_("Press Ctrl-C to Stop"))
-			msg.append("")
-			eerror(msg)
-
-			owners = self.vartree.dbapi._owners.get_owners(collisions)
-			self.vartree.dbapi.flush_cache()
-
-			for pkg, owned_files in owners.items():
-				cpv = pkg.mycpv
+			owners = None
+			if collision_protect or protect_owned:
 				msg = []
-				msg.append("%s" % cpv)
-				for f in sorted(owned_files):
-					msg.append("\t%s" % os.path.join(destroot,
-						f.lstrip(os.path.sep)))
+				msg.append("")
+				msg.append(_("Searching all installed"
+					" packages for file collisions..."))
+				msg.append("")
+				msg.append(_("Press Ctrl-C to Stop"))
 				msg.append("")
 				eerror(msg)
 
-			if not owners:
-				eerror([_("None of the installed"
-					" packages claim the file(s)."), ""])
+				if len(collisions) > 20:
+					# get_owners is slow for large numbers of files, so
+					# don't look them all up.
+					collisions = collisions[:20]
+				owners = self.vartree.dbapi._owners.get_owners(collisions)
+				self.vartree.dbapi.flush_cache()
+
+				for pkg, owned_files in owners.items():
+					cpv = pkg.mycpv
+					msg = []
+					msg.append("%s" % cpv)
+					for f in sorted(owned_files):
+						msg.append("\t%s" % os.path.join(destroot,
+							f.lstrip(os.path.sep)))
+					msg.append("")
+					eerror(msg)
+
+				if not owners:
+					eerror([_("None of the installed"
+						" packages claim the file(s)."), ""])
 
 			# The explanation about the collision and how to solve
 			# it may not be visible via a scrollback buffer, especially
@@ -3745,9 +3151,7 @@ class dblink(object):
 		# run preinst script
 		if scheduler is None:
 			showMessage(_(">>> Merging %(cpv)s to %(destroot)s\n") % {"cpv":self.mycpv, "destroot":destroot})
-			a = doebuild(myebuild, "preinst", destroot, self.settings,
-				use_cache=0, tree=self.treetype, mydbapi=mydbapi,
-				vartree=self.vartree)
+			a = _spawn_phase("preinst", self.settings)
 		else:
 			a = scheduler.dblinkEbuildPhase(
 				self, mydbapi, myebuild, "preinst")
@@ -3763,7 +3167,7 @@ class dblink(object):
 			self.copyfile(inforoot+"/"+x)
 
 		# write local package counter for recording
-		counter = self.vartree.dbapi.counter_tick(self.myroot, mycpv=self.mycpv)
+		counter = self.vartree.dbapi.counter_tick(mycpv=self.mycpv)
 		codecs.open(_unicode_encode(os.path.join(self.dbtmpdir, 'COUNTER'),
 			encoding=_encodings['fs'], errors='strict'),
 			'w', encoding=_encodings['repo.content'], errors='backslashreplace'
@@ -3861,14 +3265,18 @@ class dblink(object):
 			dblnk._clear_contents_cache()
 		self._clear_contents_cache()
 
-		linkmap = self.vartree.dbapi.linkmap
-		self._linkmap_rebuild(include_file=os.path.join(inforoot,
-			linkmap._needed_aux_key))
+		linkmap = self.vartree.dbapi._linkmap
+		if linkmap is None:
+			# preserve-libs is entirely disabled
+			preserve_paths = None
+		else:
+			self._linkmap_rebuild(include_file=os.path.join(inforoot,
+				linkmap._needed_aux_key))
 
-		# Preserve old libs if they are still in use
-		preserve_paths = self._find_libs_to_preserve()
-		if preserve_paths:
-			self._add_preserve_libs_to_contents(preserve_paths)
+			# Preserve old libs if they are still in use
+			preserve_paths = self._find_libs_to_preserve()
+			if preserve_paths:
+				self._add_preserve_libs_to_contents(preserve_paths)
 
 		# If portage is reinstalling itself, remove the old
 		# version now since we want to use the temporary
@@ -3901,8 +3309,9 @@ class dblink(object):
 			dblnk._linkmap_broken = self._linkmap_broken
 			dblnk.settings["REPLACED_BY_VERSION"] = portage.versions.cpv_getversion(self.mycpv)
 			dblnk.settings.backup_changes("REPLACED_BY_VERSION")
-			unmerge_rval = dblnk.unmerge(trimworld=0,
-				ldpath_mtimes=prev_mtimes, others_in_slot=others_in_slot)
+			unmerge_rval = dblnk.unmerge(ldpath_mtimes=prev_mtimes,
+				others_in_slot=others_in_slot)
+			dblnk.settings.pop("REPLACED_BY_VERSION", None)
 
 			if unmerge_rval == os.EX_OK:
 				emerge_log(_(" >>> unmerge success: %s") % (dblnk.mycpv,))
@@ -3925,8 +3334,9 @@ class dblink(object):
 		_movefile(self.dbtmpdir, self.dbpkgdir, mysettings=self.settings)
 
 		# keep track of the libs we preserved
-		if preserve_paths:
-			self.vartree.dbapi.plib_registry.register(self.mycpv,
+		if self.vartree.dbapi._plib_registry is not None and \
+			preserve_paths:
+			self.vartree.dbapi._plib_registry.register(self.mycpv,
 				slot, counter, sorted(preserve_paths))
 
 		# Check for file collisions with blocking packages
@@ -3941,21 +3351,25 @@ class dblink(object):
 
 		# Unregister any preserved libs that this package has overwritten
 		# and update the contents of the packages that owned them.
-		plib_registry = self.vartree.dbapi.plib_registry
-		plib_dict = plib_registry.getPreservedLibs()
-		for cpv, paths in plib_collisions.items():
-			if cpv not in plib_dict:
-				continue
-			if cpv == self.mycpv:
-				continue
-			try:
-				slot, counter = self.vartree.dbapi.aux_get(
-					cpv, ["SLOT", "COUNTER"])
-			except KeyError:
-				continue
-			remaining = [f for f in plib_dict[cpv] if f not in paths]
-			plib_registry.register(cpv, slot, counter, remaining)
-			self.vartree.dbapi.removeFromContents(cpv, paths)
+		plib_registry = self.vartree.dbapi._plib_registry
+		if plib_registry is None:
+			# preserve-libs is entirely disabled
+			pass
+		else:
+			plib_dict = plib_registry.getPreservedLibs()
+			for cpv, paths in plib_collisions.items():
+				if cpv not in plib_dict:
+					continue
+				if cpv == self.mycpv:
+					continue
+				try:
+					slot, counter = self.vartree.dbapi.aux_get(
+						cpv, ["SLOT", "COUNTER"])
+				except KeyError:
+					continue
+				remaining = [f for f in plib_dict[cpv] if f not in paths]
+				plib_registry.register(cpv, slot, counter, remaining)
+				self.vartree.dbapi.removeFromContents(cpv, paths)
 
 		self.vartree.dbapi._add(self)
 		contents = self.getcontents()
@@ -3966,9 +3380,7 @@ class dblink(object):
 		self.settings.backup_changes("PORTAGE_UPDATE_ENV")
 		try:
 			if scheduler is None:
-				a = doebuild(myebuild, "postinst", destroot, self.settings,
-					use_cache=0, tree=self.treetype, mydbapi=mydbapi,
-					vartree=self.vartree)
+				a = _spawn_phase("postinst", self.settings)
 				if a == os.EX_OK:
 					showMessage(_(">>> %s merged.\n") % self.mycpv)
 			else:
@@ -3990,7 +3402,7 @@ class dblink(object):
 
 		#update environment settings, library paths. DO NOT change symlinks.
 		env_update(makelinks=(not downgrade),
-			target_root=self.settings["ROOT"], prev_mtimes=prev_mtimes,
+			target_root=self.settings['ROOT'], prev_mtimes=prev_mtimes,
 			contents=contents, env=self.settings.environ(),
 			writemsg_level=self._display_merge)
 
@@ -4064,7 +3476,8 @@ class dblink(object):
 		join = os.path.join
 		srcroot = normalize_path(srcroot).rstrip(sep) + sep
 		destroot = normalize_path(destroot).rstrip(sep) + sep
-		
+		calc_prelink = "prelink-checksums" in self.settings.features
+
 		# this is supposed to merge a list of files.  There will be 2 forms of argument passing.
 		if isinstance(stufftomerge, basestring):
 			#A directory is specified.  Figure out protection paths, listdir() it and process it.
@@ -4225,7 +3638,7 @@ class dblink(object):
 					return 1
 			elif stat.S_ISREG(mymode):
 				# we are merging a regular file
-				mymd5 = perform_md5(mysrc, calc_prelink=1)
+				mymd5 = perform_md5(mysrc, calc_prelink=calc_prelink)
 				# calculate config file protection stuff
 				mydestdir = os.path.dirname(mydest)
 				moveme = 1
@@ -4256,7 +3669,7 @@ class dblink(object):
 						if protected:
 							# we have a protection path; enable config file management.
 							cfgprot = 0
-							destmd5 = perform_md5(mydest, calc_prelink=1)
+							destmd5 = perform_md5(mydest, calc_prelink=calc_prelink)
 							if mymd5 == destmd5:
 								#file already in place; simply update mtimes of destination
 								moveme = 1
@@ -4337,7 +3750,7 @@ class dblink(object):
 					outfile.write("dev %s\n" % myrealdest)
 				showMessage(zing + " " + mydest + "\n")
 
-	def merge(self, mergeroot, inforoot, myroot, myebuild=None, cleanup=0,
+	def merge(self, mergeroot, inforoot, myroot=None, myebuild=None, cleanup=0,
 		mydbapi=None, prev_mtimes=None):
 		"""
 		If portage is reinstalling itself, create temporary
@@ -4347,12 +3760,17 @@ class dblink(object):
 		temporary directories. Pre-load elog modules here since
 		we won't be able to later if they get unmerged (happens
 		when namespace changes).
+
+		@param myroot: ignored, self._eroot is used instead
 		"""
+		myroot = None
 		if self.vartree.dbapi._categories is not None:
 			self.vartree.dbapi._categories = None
 		if self.myroot == "/" and \
 			match_from_list(PORTAGE_PACKAGE_ATOM, [self.mycpv]) and \
-			not self.vartree.dbapi.cpv_exists(self.mycpv):
+			(not self.vartree.dbapi.cpv_exists(self.mycpv) or \
+			'9999' in self.mycpv or \
+			'git' in self.settings.get('INHERITED', '').split()):
 			# Load lazily referenced portage submodules into memory,
 			# so imports won't fail during portage upgrade/downgrade.
 			portage.proxy.lazyimport._preload_portage_submodules()
@@ -4380,17 +3798,27 @@ class dblink(object):
 			elog_process(self.mycpv, self.settings)
 
 		return self._merge(mergeroot, inforoot,
-				myroot, myebuild=myebuild, cleanup=cleanup,
+				myebuild=myebuild, cleanup=cleanup,
 				mydbapi=mydbapi, prev_mtimes=prev_mtimes)
 
-	def _merge(self, mergeroot, inforoot, myroot, myebuild=None, cleanup=0,
+	def _merge(self, mergeroot, inforoot, myroot=None, myebuild=None, cleanup=0,
 		mydbapi=None, prev_mtimes=None):
+		"""
+		@param myroot: ignored, self._eroot is used instead
+		"""
+		myroot = None
 		retval = -1
 		self.lockdb()
 		self.vartree.dbapi._bump_mtime(self.mycpv)
 		try:
-			self.vartree.dbapi.plib_registry.load()
-			self.vartree.dbapi.plib_registry.pruneNonExisting()
+			plib_registry = self.vartree.dbapi._plib_registry
+			if plib_registry is None:
+				# preserve-libs is entirely disabled
+				pass
+			else:
+				plib_registry.load()
+				plib_registry.pruneNonExisting()
+
 			retval = self.treewalk(mergeroot, myroot, inforoot, myebuild,
 				cleanup=cleanup, mydbapi=mydbapi, prev_mtimes=prev_mtimes)
 
@@ -4406,8 +3834,14 @@ class dblink(object):
 					phase = 'die_hooks'
 
 				if self._scheduler is None:
-					_spawn_misc_sh(self.settings, [phase],
-						phase=phase)
+					task_scheduler = TaskScheduler()
+					ebuild_phase = MiscFunctionsProcess(
+						background=False,
+						commands=[phase],
+						scheduler=task_scheduler.sched_iface,
+						settings=self.settings)
+					task_scheduler.add(ebuild_phase)
+					task_scheduler.run()
 				else:
 					self._scheduler.dblinkEbuildPhase(
 						self, mydbapi, myebuild, phase)
@@ -4420,16 +3854,21 @@ class dblink(object):
 					if myebuild is None:
 						myebuild = os.path.join(inforoot, self.pkg + ".ebuild")
 
+					doebuild_environment(myebuild, "clean",
+						settings=self.settings, db=mydbapi)
 					if self._scheduler is None:
-						doebuild(myebuild, "clean", myroot,
-							self.settings, tree=self.treetype,
-							mydbapi=mydbapi, vartree=self.vartree)
+						_spawn_phase("clean", self.settings)
 					else:
 						self._scheduler.dblinkEbuildPhase(
 							self, mydbapi, myebuild, "clean")
 
 		finally:
-			self.vartree.dbapi.linkmap._clear_cache()
+			self.settings.pop('REPLACING_VERSIONS', None)
+			if self.vartree.dbapi._linkmap is None:
+				# preserve-libs is entirely disabled
+				pass
+			else:
+				self.vartree.dbapi._linkmap._clear_cache()
 			self.unlockdb()
 			self.vartree.dbapi._bump_mtime(self.mycpv)
 		return retval
@@ -4493,36 +3932,59 @@ class dblink(object):
 		"Is this a regular package (does it have a CATEGORY file?  A dblink can be virtual *and* regular)"
 		return os.path.exists(os.path.join(self.dbdir, "CATEGORY"))
 
-def merge(mycat, mypkg, pkgloc, infloc, myroot, mysettings, myebuild=None,
+def merge(mycat, mypkg, pkgloc, infloc,
+	myroot=None, settings=None, myebuild=None,
 	mytree=None, mydbapi=None, vartree=None, prev_mtimes=None, blockers=None,
 	scheduler=None):
-	if not os.access(myroot, os.W_OK):
-		writemsg(_("Permission denied: access('%s', W_OK)\n") % myroot,
+	"""
+	@param myroot: ignored, settings['EROOT'] is used instead
+	"""
+	myroot = None
+	if settings is None:
+		raise TypeError("settings argument is required")
+	if not os.access(settings['EROOT'], os.W_OK):
+		writemsg(_("Permission denied: access('%s', W_OK)\n") % settings['EROOT'],
 			noiselevel=-1)
 		return errno.EACCES
-	mylink = dblink(mycat, mypkg, myroot, mysettings, treetype=mytree,
+	mylink = dblink(mycat, mypkg, settings=settings, treetype=mytree,
 		vartree=vartree, blockers=blockers, scheduler=scheduler)
-	return mylink.merge(pkgloc, infloc, myroot, myebuild,
+	return mylink.merge(pkgloc, infloc, myebuild=myebuild,
 		mydbapi=mydbapi, prev_mtimes=prev_mtimes)
 
-def unmerge(cat, pkg, myroot, mysettings, mytrimworld=1, vartree=None,
+def unmerge(cat, pkg, myroot=None, settings=None,
+	mytrimworld=None, vartree=None,
 	ldpath_mtimes=None, scheduler=None):
-	mylink = dblink(cat, pkg, myroot, mysettings, treetype="vartree",
+	"""
+	@param myroot: ignored, settings['EROOT'] is used instead
+	@param mytrimworld: ignored
+	"""
+	myroot = None
+	if settings is None:
+		raise TypeError("settings argument is required")
+	mylink = dblink(cat, pkg, settings=settings, treetype="vartree",
 		vartree=vartree, scheduler=scheduler)
 	vartree = mylink.vartree
 	try:
 		mylink.lockdb()
 		if mylink.exists():
-			vartree.dbapi.plib_registry.load()
-			vartree.dbapi.plib_registry.pruneNonExisting()
-			retval = mylink.unmerge(trimworld=mytrimworld, cleanup=1,
-				ldpath_mtimes=ldpath_mtimes)
+			plib_registry = vartree.dbapi._plib_registry
+			if plib_registry is None:
+				# preserve-libs is entirely disabled
+				pass
+			else:
+				plib_registry.load()
+				plib_registry.pruneNonExisting()
+			retval = mylink.unmerge(ldpath_mtimes=ldpath_mtimes)
 			if retval == os.EX_OK:
 				mylink.delete()
 			return retval
 		return os.EX_OK
 	finally:
-		vartree.dbapi.linkmap._clear_cache()
+		if vartree.dbapi._linkmap is None:
+			# preserve-libs is entirely disabled
+			pass
+		else:
+			vartree.dbapi._linkmap._clear_cache()
 		mylink.unlockdb()
 
 def write_contents(contents, root, f):

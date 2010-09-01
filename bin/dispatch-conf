@@ -13,18 +13,10 @@
 
 from __future__ import print_function
 
-if not hasattr(__builtins__, "set"):
-    from sets import Set as set
-
-from stat import *
-from random import *
+from stat import ST_GID, ST_MODE, ST_UID
+from random import random
 import atexit, re, shutil, stat, sys
-try:
-    from subprocess import getoutput as subprocess_getoutput
-    from subprocess import getstatusoutput as subprocess_getstatusoutput
-except ImportError:
-    from commands import getoutput as subprocess_getoutput
-    from commands import getstatusoutput as subprocess_getstatusoutput
+
 try:
     import portage
 except ImportError:
@@ -35,6 +27,7 @@ except ImportError:
 from portage import os
 from portage import dispatch_conf
 from portage import _unicode_decode
+from portage.dispatch_conf import diffstatusoutput_len
 from portage.process import find_binary
 
 FIND_EXTANT_CONFIGS  = "find '%s' %s -name '._cfg????_%s' ! -name '.*~' ! -iname '.*.bak' -print"
@@ -78,7 +71,7 @@ class dispatch:
         confs = []
         count = 0
 
-
+        config_root = '/'
         self.options = portage.dispatch_conf.read_config(MANDATORY_OPTS)
 
         if "log-file" in self.options:
@@ -95,7 +88,7 @@ class dispatch:
         # Build list of extant configs
         #
 
-        for path in config_paths.split ():
+        for path in config_paths:
             path = portage.normalize_path(path)
             try:
                 mymode = os.stat(path).st_mode
@@ -120,6 +113,10 @@ class dispatch:
         # config file freezing support
         frozen_files = set(self.options.get("frozen-files", "").split())
         auto_zapped = []
+        protect_obj = portage.util.ConfigProtect(
+            config_root, config_paths,
+            portage.util.shlex_split(
+            portage.settings.get('CONFIG_PROTECT_MASK', '')))
 
         #
         # Remove new configs identical to current
@@ -137,11 +134,11 @@ class dispatch:
             else:
                 mrgfail = portage.dispatch_conf.file_archive(archive, conf['current'], conf['new'], mrgconf)
             if os.path.exists(archive + '.dist'):
-                unmodified = len(subprocess_getoutput(DIFF_CONTENTS % (conf['current'], archive + '.dist'))) == 0
+                unmodified = diffstatusoutput_len(DIFF_CONTENTS % (conf['current'], archive + '.dist'))[1] == 0
             else:
                 unmodified = 0
             if os.path.exists(mrgconf):
-                if mrgfail or len(subprocess_getoutput(DIFF_CONTENTS % (conf['new'], mrgconf))) == 0:
+                if mrgfail or diffstatusoutput_len(DIFF_CONTENTS % (conf['new'], mrgconf))[1] == 0:
                     os.unlink(mrgconf)
                     newconf = conf['new']
                 else:
@@ -152,24 +149,24 @@ class dispatch:
             if newconf == mrgconf and \
                 self.options.get('ignore-previously-merged') != 'yes' and \
                 os.path.exists(archive+'.dist') and \
-                len(subprocess_getoutput(DIFF_CONTENTS % (archive+'.dist', conf['new']))) == 0:
+                diffstatusoutput_len(DIFF_CONTENTS % (archive+'.dist', conf['new']))[1] == 0:
                 # The current update is identical to the archived .dist
                 # version that has previously been merged.
                 os.unlink(mrgconf)
                 newconf = conf['new']
 
-            mystatus, myoutput = subprocess_getstatusoutput(
+            mystatus, myoutput_len = diffstatusoutput_len(
                 DIFF_CONTENTS  % (conf ['current'], newconf))
-            same_file = 0 == len(myoutput)
+            same_file = 0 == myoutput_len
             if mystatus >> 8 == 2:
                 # Binary files differ
                 same_cvs = False
                 same_wsc = False
             else:
-                same_cvs = 0 == len(subprocess_getoutput(
-                    DIFF_CVS_INTERP % (conf ['current'], newconf)))
-                same_wsc = 0 == len(subprocess_getoutput(
-                    DIFF_WSCOMMENTS % (conf ['current'], newconf)))
+                same_cvs = 0 == diffstatusoutput_len(
+                    DIFF_CVS_INTERP % (conf ['current'], newconf))[1]
+                same_wsc = 0 == diffstatusoutput_len(
+                    DIFF_WSCOMMENTS % (conf ['current'], newconf))[1]
 
             # Do options permit?
             same_cvs = same_cvs and self.options['replace-cvs'] == 'yes'
@@ -194,7 +191,8 @@ class dispatch:
                 except OSError:
                     pass
                 return False
-            elif unmodified or same_cvs or same_wsc or conf ['dir'] in portage.settings ['CONFIG_PROTECT_MASK'].split ():
+            elif unmodified or same_cvs or same_wsc or \
+                not protect_obj.isprotected(conf['current']):
                 self.replace(newconf, conf['current'])
                 self.post_process(conf['current'])
                 if newconf == mrgconf:
@@ -430,6 +428,7 @@ d = dispatch ()
 
 if len(sys.argv) > 1:
     # for testing
-    d.grind (" ".join(sys.argv[1:]))
+    d.grind(sys.argv[1:])
 else:
-    d.grind (portage.settings ['CONFIG_PROTECT'])
+    d.grind(portage.util.shlex_split(
+        portage.settings.get('CONFIG_PROTECT', '')))

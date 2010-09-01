@@ -1,8 +1,8 @@
 # data.py -- Calculated/Discovered Data Values
-# Copyright 1998-2009 Gentoo Foundation
+# Copyright 1998-2010 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
-import os, sys, pwd, grp, platform
+import os, pwd, grp, platform
 
 import portage
 portage.proxy.lazyimport.lazyimport(globals(),
@@ -25,15 +25,11 @@ if not lchown:
 		def lchown(*pos_args, **key_args):
 			pass
 	else:
-		try:
-			import missingos
-			lchown = missingos.lchown
-		except ImportError:
-			def lchown(*pos_args, **key_args):
-				writemsg(colorize("BAD", "!!!") + _(
-					" It seems that os.lchown does not"
-					" exist.  Please rebuild python.\n"), noiselevel=-1)
-			lchown()
+		def lchown(*pargs, **kwargs):
+			writemsg(colorize("BAD", "!!!") + _(
+				" It seems that os.lchown does not"
+				" exist.  Please rebuild python.\n"), noiselevel=-1)
+		lchown()
 
 lchown = portage._unicode_func_wrapper(lchown)
 
@@ -74,10 +70,14 @@ try:
 except KeyError:
 	pass
 
+# Allow the overriding of the user used for 'userpriv' and 'userfetch'
+_portage_uname = os.environ.get('PORTAGE_USERNAME', 'portage')
+_portage_grpname = os.environ.get('PORTAGE_GRPNAME', 'portage')
+
 #Discover the uid and gid of the portage user/group
 try:
-	portage_uid=pwd.getpwnam("portage")[2]
-	portage_gid=grp.getgrnam("portage")[2]
+	portage_uid = pwd.getpwnam(_portage_uname)[2]
+	portage_gid = grp.getgrnam(_portage_grpname)[2]
 	if secpass < 1 and portage_gid in os.getgroups():
 		secpass=1
 except KeyError:
@@ -108,7 +108,7 @@ else:
 				# grp.getgrall() since it is known to trigger spurious
 				# SIGPIPE problems with nss_ldap.
 				mystatus, myoutput = \
-					portage.subprocess_getstatusoutput("id -G %s" % 'portage')
+					portage.subprocess_getstatusoutput("id -G %s" % _portage_uname)
 				if mystatus == os.EX_OK:
 					for x in myoutput.split():
 						try:

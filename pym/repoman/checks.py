@@ -1,5 +1,5 @@
 # repoman: Checks
-# Copyright 2007 Gentoo Foundation
+# Copyright 2007, 2010 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 """This module contains functions used in Repoman to ascertain the quality
@@ -8,6 +8,9 @@ and correctness of an ebuild."""
 import re
 import time
 import repoman.errors as errors
+from portage.eapi import eapi_supports_prefix, eapi_has_implicit_rdepend, \
+	eapi_has_src_prepare_and_src_configure, eapi_has_dosed_dohard, \
+	eapi_exports_AA, eapi_exports_KV
 
 class LineCheck(object):
 	"""Run a check on a line of an ebuild."""
@@ -70,8 +73,8 @@ class EbuildHeader(LineCheck):
 	gentoo_copyright = r'^# Copyright ((1999|2\d\d\d)-)?%s Gentoo Foundation$'
 	# Why a regex here, use a string match
 	# gentoo_license = re.compile(r'^# Distributed under the terms of the GNU General Public License v2$')
-	gentoo_license = r'# Distributed under the terms of the GNU General Public License v2'
-	cvs_header = re.compile(r'^#\s*\$Header.*\$$')
+	gentoo_license = '# Distributed under the terms of the GNU General Public License v2'
+	cvs_header = re.compile(r'^# \$Header: .*\$$')
 
 	def new(self, pkg):
 		if pkg.mtime is None:
@@ -87,7 +90,7 @@ class EbuildHeader(LineCheck):
 		elif num == 0:
 			if not self.gentoo_copyright_re.match(line):
 				return errors.COPYRIGHT_ERROR
-		elif num == 1 and line.strip() != self.gentoo_license:
+		elif num == 1 and line.rstrip('\n') != self.gentoo_license:
 			return errors.LICENSE_ERROR
 		elif num == 2:
 			if not self.cvs_header.match(line):
@@ -224,6 +227,13 @@ class EbuildAssignment(LineCheck):
 		self.previous_line = line
 		return e
 
+class Eapi3EbuildAssignment(EbuildAssignment):
+	"""Ensure ebuilds don't assign to readonly EAPI 3-introduced variables."""
+
+	readonly_assignment = re.compile(r'\s*(export\s+)?(ED|EPREFIX|EROOT)=')
+
+	def check_eapi(self, eapi):
+		return eapi_supports_prefix(eapi)
 
 class EbuildNestedDie(LineCheck):
 	"""Check ebuild for nested die statements (die statements in subshells"""
@@ -240,7 +250,7 @@ class EbuildUselessDodoc(LineCheck):
 	"""Check ebuild for useless files in dodoc arguments."""
 	repoman_check_name = 'ebuild.minorsyn'
 	uselessdodoc_re = re.compile(
-		r'^\s*dodoc(\s+|\s+.*\s+)(ABOUT-NLS|COPYING|LICENSE)($|\s)')
+		r'^\s*dodoc(\s+|\s+.*\s+)(ABOUT-NLS|COPYING|LICENCE|LICENSE)($|\s)')
 
 	def check(self, num, line):
 		match = self.uselessdodoc_re.match(line)
@@ -298,6 +308,121 @@ class EbuildQuotedA(LineCheck):
 		match = self.a_quoted.match(line)
 		if match:
 			return "Quoted \"${A}\" on line: %d"
+
+class EprefixifyDefined(LineCheck):
+	""" Check that prefix.eclass is inherited if needed"""
+
+	repoman_check_name = 'eprefixify.defined'
+
+	_eprefixify_re = re.compile(r'\beprefixify\b')
+	_inherit_prefix_re = re.compile(r'^\s*inherit\s(.*\s)?prefix\b')
+
+	def new(self, pkg):
+		self._prefix_inherited = False
+
+	def check(self, num, line):
+		if self._eprefixify_re.search(line) is not None:
+			if not self._prefix_inherited:
+				return errors.EPREFIXIFY_MISSING_INHERIT
+		elif self._inherit_prefix_re.search(line) is not None:
+			self._prefix_inherited = True
+
+class ImplicitRuntimeDeps(LineCheck):
+	"""
+	Detect the case where DEPEND is set and RDEPEND is unset in the ebuild,
+	since this triggers implicit RDEPEND=$DEPEND assignment (prior to EAPI 4).
+	"""
+
+	repoman_check_name = 'RDEPEND.implicit'
+	_assignment_re = re.compile(r'^\s*(R?DEPEND)=')
+
+	def new(self, pkg):
+		self._rdepend = False
+		self._depend = False
+
+	def check_eapi(self, eapi):
+		# Beginning with EAPI 4, there is no
+		# implicit RDEPEND=$DEPEND assignment
+		# to be concerned with.
+		return eapi_has_implicit_rdepend(eapi)
+
+	def check(self, num, line):
+		if not self._rdepend:
+			m = self._assignment_re.match(line)
+			if m is None:
+				pass
+			elif m.group(1) == "RDEPEND":
+				self._rdepend = True
+			elif m.group(1) == "DEPEND":
+				self._depend = True
+
+	def end(self):
+		if self._depend and not self._rdepend:
+			yield 'RDEPEND is not explicitly assigned'
+
+class InheritDeprecated(LineCheck):
+	"""Check if ebuild directly or indirectly inherits a deprecated eclass."""
+
+	repoman_check_name = 'inherit.deprecated'
+
+	# deprecated eclass : new eclass (False if no new eclass)
+	deprecated_classes = {
+		"gems": "ruby-fakegem",
+		"php-pear": "php-pear-r1",
+		"qt3": False,
+		"qt4": "qt4-r2",
+		"ruby": "ruby-ng",
+		"ruby-gnome2": "ruby-ng-gnome2"
+		}
+
+	_inherit_re = re.compile(r'^\s*inherit\s(.*)$')
+
+	def new(self, pkg):
+		self._errors = []
+		self._indirect_deprecated = set(eclass for eclass in \
+			self.deprecated_classes if eclass in pkg.inherited)
+
+	def check(self, num, line):
+
+		direct_inherits = None
+		m = self._inherit_re.match(line)
+		if m is not None:
+			direct_inherits = m.group(1)
+			if direct_inherits:
+				direct_inherits = direct_inherits.split()
+
+		if not direct_inherits:
+			return
+
+		for eclass in direct_inherits:
+			replacement = self.deprecated_classes.get(eclass)
+			if replacement is None:
+				pass
+			elif replacement is False:
+				self._indirect_deprecated.discard(eclass)
+				self._errors.append("please migrate from " + \
+					"'%s' (no replacement) on line: %d" % (eclass, num + 1))
+			else:
+				self._indirect_deprecated.discard(eclass)
+				self._errors.append("please migrate from " + \
+					"'%s' to '%s' on line: %d" % \
+					(eclass, replacement, num + 1))
+
+	def end(self):
+		for error in self._errors:
+			yield error
+		del self._errors
+
+		for eclass in self._indirect_deprecated:
+			replacement = self.deprecated_classes[eclass]
+			if replacement is False:
+				yield "please migrate from indirect " + \
+					"inherit of '%s' (no replacement)" % (eclass,)
+			else:
+				yield "please migrate from indirect " + \
+					"inherit of '%s' to '%s'" % \
+					(eclass, replacement)
+		del self._indirect_deprecated
 
 class InheritAutotools(LineCheck):
 	"""
@@ -381,6 +506,18 @@ class NoAsNeeded(LineCheck):
 	re = re.compile(r'.*\$\(no-as-needed\)')
 	error = errors.NO_AS_NEEDED
 
+class PreserveOldLib(LineCheck):
+	"""Check for calls to the preserve_old_lib function."""
+	repoman_check_name = 'upstream.workaround'
+	re = re.compile(r'.*preserve_old_lib')
+	error = errors.PRESERVE_OLD_LIB
+
+class SandboxAddpredict(LineCheck):
+	"""Check for calls to the addpredict function."""
+	repoman_check_name = 'upstream.workaround'
+	re = re.compile(r'(^|\s)addpredict\b')
+	error = errors.SANDBOX_ADDPREDICT
+
 class DeprecatedBindnowFlags(LineCheck):
 	"""Check for calls to the deprecated bindnow-flags function."""
 	repoman_check_name = 'ebuild.minorsyn'
@@ -403,7 +540,7 @@ class SrcCompileEconf(PhaseCheck):
 	configure_re = re.compile(r'\s(econf|./configure)')
 
 	def check_eapi(self, eapi):
-		return eapi not in ('0', '1')
+		return eapi_has_src_prepare_and_src_configure(eapi)
 
 	def phase_check(self, num, line):
 		if self.in_phase == 'src_compile':
@@ -416,15 +553,8 @@ class SrcUnpackPatches(PhaseCheck):
 	repoman_check_name = 'ebuild.minorsyn'
 	src_prepare_tools_re = re.compile(r'\s(e?patch|sed)\s')
 
-	def new(self, pkg):
-		if pkg.metadata['EAPI'] not in ('0', '1'):
-			self.eapi = pkg.metadata['EAPI']
-		else:
-			self.eapi = None
-		self.in_src_unpack = None
-
 	def check_eapi(self, eapi):
-		return eapi not in ('0', '1')
+		return eapi_has_src_prepare_and_src_configure(eapi)
 
 	def phase_check(self, num, line):
 		if self.in_phase == 'src_unpack':
@@ -445,11 +575,8 @@ class Eapi3DeprecatedFuncs(LineCheck):
 	ignore_line = re.compile(r'(^\s*#)')
 	deprecated_commands_re = re.compile(r'^\s*(check_license)\b')
 
-	def new(self, pkg):
-		self.eapi = pkg.metadata['EAPI']
-
 	def check_eapi(self, eapi):
-		return self.eapi not in ('0', '1', '2')
+		return eapi not in ('0', '1', '2')
 
 	def check(self, num, line):
 		m = self.deprecated_commands_re.match(line)
@@ -463,11 +590,8 @@ class Eapi4IncompatibleFuncs(LineCheck):
 	ignore_line = re.compile(r'(^\s*#)')
 	banned_commands_re = re.compile(r'^\s*(dosed|dohard)')
 
-	def new(self, pkg):
-		self.eapi = pkg.metadata['EAPI']
-
 	def check_eapi(self, eapi):
-		return self.eapi not in ('0', '1', '2', '3', '3_pre2')
+		return not eapi_has_dosed_dohard(eapi)
 
 	def check(self, num, line):
 		m = self.banned_commands_re.match(line)
@@ -480,11 +604,8 @@ class Eapi4GoneVars(LineCheck):
 	ignore_line = re.compile(r'(^\s*#)')
 	undefined_vars_re = re.compile(r'.*\$(\{(AA|KV)\}|(AA|KV))')
 
-	def new(self, pkg):
-		self.eapi = pkg.metadata['EAPI']
-
 	def check_eapi(self, eapi):
-		return self.eapi not in ('0', '1', '2', '3', '3_pre2')
+		return not eapi_exports_AA(eapi) or not eapi_exports_KV(eapi)
 
 	def check(self, num, line):
 		m = self.undefined_vars_re.match(line)
@@ -494,14 +615,15 @@ class Eapi4GoneVars(LineCheck):
 
 _constant_checks = tuple((c() for c in (
 	EbuildHeader, EbuildWhitespace, EbuildBlankLine, EbuildQuote,
-	EbuildAssignment, EbuildUselessDodoc,
+	EbuildAssignment, Eapi3EbuildAssignment, EbuildUselessDodoc,
 	EbuildUselessCdS, EbuildNestedDie,
-	EbuildPatches, EbuildQuotedA, EapiDefinition,
-	IUseUndefined, InheritAutotools,
+	EbuildPatches, EbuildQuotedA, EapiDefinition, EprefixifyDefined,
+	ImplicitRuntimeDeps, InheritAutotools, InheritDeprecated, IUseUndefined,
 	EMakeParallelDisabled, EMakeParallelDisabledViaMAKEOPTS, NoAsNeeded,
 	DeprecatedBindnowFlags, SrcUnpackPatches, WantAutoDefaultValue,
 	SrcCompileEconf, Eapi3DeprecatedFuncs,
-	Eapi4IncompatibleFuncs, Eapi4GoneVars, BuiltWithUse)))
+	Eapi4IncompatibleFuncs, Eapi4GoneVars, BuiltWithUse,
+	PreserveOldLib, SandboxAddpredict)))
 
 _here_doc_re = re.compile(r'.*\s<<[-]?(\w+)$')
 

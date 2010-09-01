@@ -72,6 +72,7 @@ REPO_NAME_LOC            = "profiles" + "/" + REPO_NAME_FILE
 
 PORTAGE_PACKAGE_ATOM     = "sys-apps/portage"
 LIBC_PACKAGE_ATOM        = "virtual/libc"
+OS_HEADERS_PACKAGE_ATOM  = "virtual/os-headers"
 
 INCREMENTALS             = ("USE", "USE_EXPAND", "USE_EXPAND_HIDDEN",
                            "FEATURES", "ACCEPT_KEYWORDS",
@@ -82,6 +83,23 @@ EBUILD_PHASES            = ("pretend", "setup", "unpack", "prepare", "configure"
                            "compile", "test", "install",
                            "package", "preinst", "postinst","prerm", "postrm",
                            "nofetch", "config", "info", "other")
+SUPPORTED_FEATURES       = frozenset([
+                           "assume-digests", "buildpkg", "buildsyspkg", "candy", "ccache",
+                           "chflags", "collision-protect", "compress-build-logs",
+                           "digest", "distcc", "distlocks",
+                           "fakeroot", "fail-clean", "fixpackages", "getbinpkg",
+                           "installsources", "keeptemp", "keepwork", "fixlafiles", "lmirror",
+                           "metadata-transfer", "mirror", "multilib-strict", "news",
+                           "noauto", "noclean", "nodoc", "noinfo", "noman", "nostrip",
+                           "notitles", "parallel-fetch", "parse-eapi-ebuild-head",
+                           "parse-eapi-glep-55", "prelink-checksums", "preserve-libs",
+                           "protect-owned", "python-trace", "sandbox",
+                           "selinux", "sesandbox", "severe", "sfperms",
+                           "sign", "skiprocheck", "split-elog", "split-log", "splitdebug",
+                           "strict", "stricter", "suidctl", "test", "test-fail-continue",
+                           "unknown-features-filter", "unknown-features-warn",
+                           "unmerge-logs", "unmerge-orphans", "userfetch", "userpriv",
+                           "usersandbox", "usersync", "webrsync-gpg"])
 
 EAPI                     = 3
 
@@ -96,3 +114,21 @@ MANIFEST2_IDENTIFIERS    = ("AUX", "MISC", "DIST", "EBUILD")
 # ===========================================================================
 # END OF CONSTANTS -- END OF CONSTANTS -- END OF CONSTANTS -- END OF CONSTANT
 # ===========================================================================
+
+# Private constants for use in conditional code in order to minimize the diff
+# between branches.
+_ENABLE_DYN_LINK_MAP    = True
+_ENABLE_PRESERVE_LIBS   = True
+_ENABLE_SET_CONFIG      = True
+
+
+# The definitions above will differ between branches, so it's useful to have
+# common lines of diff context here in order to avoid merge conflicts.
+
+if not _ENABLE_PRESERVE_LIBS:
+	SUPPORTED_FEATURES = set(SUPPORTED_FEATURES)
+	SUPPORTED_FEATURES.remove("preserve-libs")
+	SUPPORTED_FEATURES = frozenset(SUPPORTED_FEATURES)
+
+if not _ENABLE_SET_CONFIG:
+	WORLD_SETS_FILE = '/dev/null'

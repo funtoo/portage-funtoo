@@ -131,8 +131,6 @@ try:
 			'cpv_getkey@getCPFromCPV,endversion_keys,' + \
 			'suffix_value@endversion,pkgcmp,pkgsplit,vercmp,ververify',
 		'portage.xpak',
-		'portage._deprecated:commit_mtimedb,dep_virtual,' + \
-			'digestParseFile,getvirtuals,pkgmerge',
 	)
 
 	import portage.const
@@ -226,7 +224,9 @@ class _unicode_func_wrapper(object):
 
 		rval = self._func(*wrapped_args, **wrapped_kwargs)
 
-		if isinstance(rval, (list, tuple)):
+		# Don't use isinstance() since we don't want to convert subclasses
+		# of tuple such as posix.stat_result in python-3.2.
+		if rval.__class__ in (list, tuple):
 			decoded_rval = []
 			for x in rval:
 				try:
@@ -289,6 +289,7 @@ class _unicode_module_wrapper(object):
 import os as _os
 _os_overrides = {
 	id(_os.fdopen)        : _os.fdopen,
+	id(_os.mkfifo)        : _os.mkfifo,
 	id(_os.popen)         : _os.popen,
 	id(_os.read)          : _os.read,
 	id(_os.system)        : _os.system,
@@ -323,6 +324,8 @@ except (ImportError, OSError) as e:
 # ===========================================================================
 # END OF IMPORTS -- END OF IMPORTS -- END OF IMPORTS -- END OF IMPORTS -- END
 # ===========================================================================
+
+_python_interpreter = os.path.realpath(sys.executable)
 
 def _ensure_default_encoding():
 
@@ -478,7 +481,7 @@ def _movefile(src, dest, **kwargs):
 auxdbkeys = (
   'DEPEND',    'RDEPEND',   'SLOT',      'SRC_URI',
 	'RESTRICT',  'HOMEPAGE',  'LICENSE',   'DESCRIPTION',
-	'KEYWORDS',  'INHERITED', 'IUSE', 'UNUSED_00',
+	'KEYWORDS',  'INHERITED', 'IUSE', 'REQUIRED_USE',
 	'PDEPEND',   'PROVIDE', 'EAPI',
 	'PROPERTIES', 'DEFINED_PHASES', 'UNUSED_05', 'UNUSED_04',
 	'UNUSED_03', 'UNUSED_02', 'UNUSED_01',
@@ -519,7 +522,7 @@ def create_trees(config_root=None, target_root=None, trees=None):
 		# environment to apply to the config that's associated
 		# with ROOT != "/", so pass a nearly empty dict for the env parameter.
 		clean_env = {}
-		for k in ('PATH', 'TERM'):
+		for k in ('PATH', 'PORTAGE_GRPNAME', 'PORTAGE_USERNAME', 'TERM'):
 			v = settings.get(k)
 			if v is not None:
 				clean_env[k] = v
@@ -572,7 +575,7 @@ class _LegacyGlobalProxy(proxy.objectproxy.ObjectProxy):
 _legacy_global_var_names = ("archlist", "db", "features",
 	"groups", "mtimedb", "mtimedbfile", "pkglines",
 	"portdb", "profiledir", "root", "selinux_enabled",
-	"settings", "thirdpartymirrors", "usedefaults")
+	"settings", "thirdpartymirrors")
 
 for k in _legacy_global_var_names:
 	globals()[k] = _LegacyGlobalProxy(k)

@@ -10,6 +10,7 @@ __all__ = [
 	"editor_is_executable",
 	"FindPackagesToScan",
 	"FindPortdir",
+	"FindVCS",
 	"format_qa_output",
 	"get_commit_message_with_editor",
 	"get_commit_message_with_stdin",
@@ -36,6 +37,8 @@ from portage import util
 normalize_path = util.normalize_path
 util.initialize_logger()
 
+if sys.hexversion >= 0x3000000:
+	basestring = str
 
 def detect_vcs_conflicts(options, vcs):
 	"""Determine if the checkout has problems like cvs conflicts.
@@ -73,6 +76,9 @@ def detect_vcs_conflicts(options, vcs):
 			if not line:
 				continue
 			if line[0] not in "UPMARD": # Updates,Patches,Modified,Added,Removed/Replaced(svn),Deleted(svn)
+				# Stray Manifest is fine, we will readd it anyway.
+				if line[0] == '?' and line[1:].lstrip() == 'Manifest':
+					continue
 				logging.error(red("!!! Please fix the following issues reported " + \
 					"from cvs: ")+green("(U,P,M,A,R,D are ok)"))
 				logging.error(red("!!! Note: This is a pretend/no-modify pass..."))
@@ -106,26 +112,51 @@ def have_profile_dir(path, maxdepth=3, filename="profiles.desc"):
 		path = normalize_path(path + "/..")
 		maxdepth -= 1
 
-def parse_metadata_use(xml_tree, uselist=None):
+def parse_metadata_use(xml_tree):
 	"""
 	Records are wrapped in XML as per GLEP 56
-	returns a dict of the form a list of flags"""
-	if uselist is None:
-		uselist = []
+	returns a dict with keys constisting of USE flag names and values
+	containing their respective descriptions
+	"""
+	uselist = {}
 
-	usetag = xml_tree.findall("use")
-	if not usetag:
+	usetags = xml_tree.findall("use")
+	if not usetags:
 		return uselist
 
-	flags = usetag[0].findall("flag")
-	if not flags:
-		raise exception.ParseError("missing 'flag' tag(s)")
+	# It's possible to have multiple 'use' elements.
+	for usetag in usetags:
+		flags = usetag.findall("flag")
+		if not flags:
+			raise exception.ParseError("missing 'flag' tag(s)")
 
-	for flag in flags:
-		pkg_flag = flag.get("name")
-		if pkg_flag is None:
-			raise exception.ParseError("missing 'name' attribute for 'flag' tag")
-		uselist.append(pkg_flag)
+		for flag in flags:
+			pkg_flag = flag.get("name")
+			if pkg_flag is None:
+				raise exception.ParseError("missing 'name' attribute for 'flag' tag")
+			flag_restrict = flag.get("restrict")
+
+			# emulate the Element.itertext() method from python-2.7
+			inner_text = []
+			stack = []
+			stack.append(flag)
+			while stack:
+				obj = stack.pop()
+				if isinstance(obj, basestring):
+					inner_text.append(obj)
+					continue
+				if isinstance(obj.text, basestring):
+					inner_text.append(obj.text)
+				if isinstance(obj.tail, basestring):
+					stack.append(obj.tail)
+				stack.extend(reversed(obj))
+
+			if pkg_flag not in uselist:
+				uselist[pkg_flag] = {}
+
+			# (flag_restrict can be None)
+			uselist[pkg_flag][flag_restrict] = " ".join("".join(inner_text).split())
+
 	return uselist
 
 class UnknownHerdsError(ValueError):
@@ -139,7 +170,7 @@ class UnknownHerdsError(ValueError):
 def check_metadata_herds(xml_tree, herd_base):
 	herd_nodes = xml_tree.findall('herd')
 	unknown_herds = [name for name in
-			(e.text.strip() for e in herd_nodes)
+			(e.text.strip() for e in herd_nodes if e.text is not None)
 			if not herd_base.known_herd(name)]
 
 	if unknown_herds:
@@ -433,3 +464,47 @@ def FindPortdir(settings):
 		portdir += '/'
 
 	return [normalize_path(x) for x in (portdir, portdir_overlay, location)]
+
+def FindVCS():
+	""" Try to figure out in what VCS' working tree we are. """
+
+	outvcs = []
+
+	def seek(depth = None):
+		""" Seek for distributed VCSes. """
+		retvcs = []
+		pathprep = ''
+
+		while depth is None or depth > 0:
+			if os.path.isdir(os.path.join(pathprep, '.git')):
+				retvcs.append('git')
+			if os.path.isdir(os.path.join(pathprep, '.bzr')):
+				retvcs.append('bzr')
+			if os.path.isdir(os.path.join(pathprep, '.hg')):
+				retvcs.append('hg')
+
+			if retvcs:
+				break
+			pathprep = os.path.join(pathprep, '..')
+			if os.path.realpath(pathprep).strip('/') == '':
+				break
+			if depth is not None:
+				depth = depth - 1
+
+		return retvcs
+
+	# Level zero VCS-es.
+	if os.path.isdir('CVS'):
+		outvcs.append('cvs')
+	if os.path.isdir('.svn'):
+		outvcs.append('svn')
+
+	# If we already found one of 'level zeros', just take a quick look
+	# at the current directory. Otherwise, seek parents till we get
+	# something or reach root.
+	if outvcs:
+		outvcs.extend(seek(1))
+	else:
+		outvcs = seek()
+
+	return outvcs

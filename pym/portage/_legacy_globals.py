@@ -28,7 +28,7 @@ def _get_legacy_global(name):
 
 	kwargs = {}
 	for k, envvar in (("config_root", "PORTAGE_CONFIGROOT"), ("target_root", "ROOT")):
-		kwargs[k] = os.environ.get(envvar, "/")
+		kwargs[k] = os.environ.get(envvar)
 
 	portage._initializing_globals = True
 	portage.db = portage.create_trees(**kwargs)
@@ -71,9 +71,6 @@ def _get_legacy_global(name):
 
 	portage.thirdpartymirrors = settings.thirdpartymirrors()
 	constructed.add('thirdpartymirrors')
-
-	portage.usedefaults = settings.use_defs
-	constructed.add('usedefaults')
 
 	profiledir = os.path.join(settings["PORTAGE_CONFIGROOT"], PROFILE_PATH)
 	if not os.path.isdir(profiledir):

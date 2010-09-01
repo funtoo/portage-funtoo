@@ -9,7 +9,6 @@ import portage
 portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.dbapi.dep_expand:dep_expand@_dep_expand',
 	'portage.dep:match_from_list',
-	'portage.locks:unlockfile',
 	'portage.output:colorize',
 	'portage.util:cmp_sort_key,writemsg',
 	'portage.versions:catsplit,catpkgsplit,vercmp',
@@ -146,7 +145,7 @@ class dbapi(object):
 		2) Check enabled/disabled flag states.
 		"""
 
-		iuse_implicit_re = self.settings._iuse_implicit_re
+		iuse_implicit_match = self.settings._iuse_implicit_match
 		for cpv in cpv_iter:
 			try:
 				iuse, slot, use = self.aux_get(cpv, ["IUSE", "SLOT", "USE"])
@@ -156,15 +155,17 @@ class dbapi(object):
 			iuse = frozenset(x.lstrip('+-') for x in iuse.split())
 			missing_iuse = False
 			for x in atom.use.required:
-				if x not in iuse and iuse_implicit_re.match(x) is None:
+				if x not in iuse and x not in atom.use.missing_enabled \
+					and x not in atom.use.missing_disabled and not iuse_implicit_match(x):
 					missing_iuse = True
 					break
 			if missing_iuse:
 				continue
 			if not self._use_mutable:
-				if atom.use.enabled.difference(use):
+				if atom.use.enabled.difference(use).difference(atom.use.missing_enabled):
 					continue
-				if atom.use.disabled.intersection(use):
+				if atom.use.disabled.intersection(use) or \
+					atom.use.disabled.difference(iuse).difference(atom.use.missing_disabled):
 					continue
 			else:
 				# Check masked and forced flags for repoman.
@@ -183,14 +184,7 @@ class dbapi(object):
 			yield cpv
 
 	def invalidentry(self, mypath):
-		if mypath.endswith('portage_lockfile'):
-			if "PORTAGE_MASTER_PID" not in os.environ:
-				writemsg(_("Lockfile removed: %s\n") % mypath, 1)
-				unlockfile((mypath, None, None))
-			else:
-				# Nothing we can do about it. We're probably sandboxed.
-				pass
-		elif '/-MERGING-' in mypath:
+		if '/-MERGING-' in mypath:
 			if os.path.exists(mypath):
 				writemsg(colorize("BAD", _("INCOMPLETE MERGE:"))+" %s\n" % mypath,
 					noiselevel=-1)
@@ -200,8 +194,8 @@ class dbapi(object):
 	def update_ents(self, updates, onProgress=None, onUpdate=None):
 		"""
 		Update metadata of all packages for package moves.
-		@param updates: A list of move commands
-		@type updates: List
+		@param updates: A list of move commands, or dict of {repo_name: list}
+		@type updates: list or dict
 		@param onProgress: A progress callback function
 		@type onProgress: a callable that takes 2 integer arguments: maxval and curval
 		@param onUpdate: A progress callback function called only
@@ -214,15 +208,33 @@ class dbapi(object):
 		maxval = len(cpv_all)
 		aux_get = self.aux_get
 		aux_update = self.aux_update
-		update_keys = ["DEPEND", "RDEPEND", "PDEPEND", "PROVIDE"]
+		meta_keys = ["DEPEND", "RDEPEND", "PDEPEND", "PROVIDE", 'repository']
+		repo_dict = None
+		if isinstance(updates, dict):
+			repo_dict = updates
 		from portage.update import update_dbentries
 		if onUpdate:
 			onUpdate(maxval, 0)
 		if onProgress:
 			onProgress(maxval, 0)
 		for i, cpv in enumerate(cpv_all):
-			metadata = dict(zip(update_keys, aux_get(cpv, update_keys)))
-			metadata_updates = update_dbentries(updates, metadata)
+			metadata = dict(zip(meta_keys, aux_get(cpv, meta_keys)))
+			repo = metadata.pop('repository')
+			if repo_dict is None:
+				updates_list = updates
+			else:
+				try:
+					updates_list = repo_dict[repo]
+				except KeyError:
+					try:
+						updates_list = repo_dict['DEFAULT']
+					except KeyError:
+						continue
+
+			if not updates_list:
+				continue
+
+			metadata_updates = update_dbentries(updates_list, metadata)
 			if metadata_updates:
 				aux_update(cpv, metadata_updates)
 				if onUpdate:
@@ -230,10 +242,12 @@ class dbapi(object):
 			if onProgress:
 				onProgress(maxval, i+1)
 
-	def move_slot_ent(self, mylist):
+	def move_slot_ent(self, mylist, repo_match=None):
 		"""This function takes a sequence:
 		Args:
 			mylist: a sequence of (package, originalslot, newslot)
+			repo_match: callable that takes single repo_name argument
+				and returns True if the update should be applied
 		Returns:
 			The number of slotmoves this function did
 		"""
@@ -247,6 +261,9 @@ class dbapi(object):
 		for mycpv in origmatches:
 			slot = self.aux_get(mycpv, ["SLOT"])[0]
 			if slot != origslot:
+				continue
+			if repo_match is not None \
+				and not repo_match(self.aux_get(mycpv, ['repository'])[0]):
 				continue
 			moves += 1
 			mydata = {"SLOT": newslot+"\n"}

@@ -1,4 +1,4 @@
-# Copyright 1998-2009 Gentoo Foundation
+# Copyright 1998-2010 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 __all__ = [
@@ -8,8 +8,9 @@ __all__ = [
 import portage
 portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.checksum',
+	'portage.data:portage_gid,secpass',
 	'portage.dbapi.dep_expand:dep_expand',
-	'portage.dep:dep_getkey,flatten,match_from_list,paren_reduce,use_reduce',
+	'portage.dep:dep_getkey,match_from_list,use_reduce',
 	'portage.env.loaders:KeyValuePairFileLoader',
 	'portage.package.ebuild.doebuild:doebuild',
 	'portage.util:ensure_dirs,shlex_split,writemsg,writemsg_level',
@@ -20,7 +21,6 @@ portage.proxy.lazyimport.lazyimport(globals(),
 from portage.cache.cache_errors import CacheError
 from portage.cache.mappings import Mapping
 from portage.const import REPO_NAME_LOC
-from portage.data import portage_gid, secpass
 from portage.dbapi import dbapi
 from portage.exception import PortageException, \
 	FileNotFound, InvalidDependString, InvalidPackageName
@@ -32,9 +32,10 @@ from portage import eclass_cache, auxdbkeys, \
 	_eapi_is_deprecated
 from portage import os
 from portage import _encodings
-from portage import _unicode_decode
 from portage import _unicode_encode
 from portage import OrderedDict
+from _emerge.EbuildMetadataPhase import EbuildMetadataPhase
+from _emerge.TaskScheduler import TaskScheduler
 
 import os as _os
 import codecs
@@ -44,74 +45,8 @@ import sys
 import warnings
 
 if sys.hexversion >= 0x3000000:
+	basestring = str
 	long = int
-
-def _src_uri_validate(cpv, eapi, src_uri):
-	"""
-	Take a SRC_URI structure as returned by paren_reduce or use_reduce
-	and validate it. Raises InvalidDependString if a problem is detected,
-	such as missing operand for a -> operator.
-	"""
-	uri = None
-	operator = None
-	for x in src_uri:
-		if isinstance(x, list):
-			if operator is not None:
-				raise portage.exception.InvalidDependString(
-					("getFetchMap(): '%s' SRC_URI arrow missing " + \
-					"right operand") % (cpv,))
-			uri = None
-			_src_uri_validate(cpv, eapi, x)
-			continue
-		if x == '||':
-			raise portage.exception.InvalidDependString(
-				("getFetchMap(): '%s' SRC_URI contains invalid " + \
-				"|| operator") % (cpv,))
-
-		if x[-1:] == "?":
-			if operator is not None:
-				raise portage.exception.InvalidDependString(
-					("getFetchMap(): '%s' SRC_URI arrow missing " + \
-					"right operand") % (cpv,))
-			uri = None
-			continue
-		if uri is None:
-			if x == "->":
-				raise portage.exception.InvalidDependString(
-					("getFetchMap(): '%s' SRC_URI arrow missing " + \
-					"left operand") % (cpv,))
-			uri = x
-			continue
-		if x == "->":
-			if eapi in ("0", "1"):
-				raise portage.exception.InvalidDependString(
-					("getFetchMap(): '%s' SRC_URI arrows are not " + \
-					"supported with EAPI='%s'") % (cpv, eapi))
-			operator = x
-			continue
-		if operator is None:
-			uri = x
-			continue
-
-		# This should be the right operand of an arrow operator.
-		if "/" in x:
-			raise portage.exception.InvalidDependString(
-				("getFetchMap(): '%s' SRC_URI '/' character in " + \
-				"file name: '%s'") % (cpv, x))
-
-		if x[-1:] == "?":
-			raise portage.exception.InvalidDependString(
-				("getFetchMap(): '%s' SRC_URI arrow missing " + \
-				"right operand") % (cpv,))
-
-		# Found the right operand, so reset state.
-		uri = None
-		operator = None
-
-	if operator is not None:
-		raise portage.exception.InvalidDependString(
-			"getFetchMap(): '%s' SRC_URI arrow missing right operand" % \
-			(cpv,))
 
 class _repo_info(object):
 	__slots__ = ('name', 'path', 'eclass_db', 'portdir', 'portdir_overlay')
@@ -126,24 +61,6 @@ class portdbapi(dbapi):
 	"""this tree will scan a portage directory located at root (passed to init)"""
 	portdbapi_instances = []
 	_use_mutable = True
-
-	def _get_settings(self):
-		warnings.warn("Use portdbapi.settings instead of portdbapi.mysettings",
-			DeprecationWarning)
-		return self.settings
-
-	def _set_settings(self, settings):
-		warnings.warn("Use portdbapi.settings instead of portdbapi.mysettings",
-			DeprecationWarning)
-		self.settings = settings
-
-	def _del_settings (self):
-		warnings.warn("Use portdbapi.settings instead of portdbapi.mysettings",
-			DeprecationWarning)
-		del self.settings
-
-	mysettings = property(_get_settings, _set_settings, _del_settings,
-		"Deprecated self.mysettings, only for backward compatibility")
 
 	@property
 	def _categories(self):
@@ -167,9 +84,7 @@ class portdbapi(dbapi):
 
 		porttree_root = self.settings['PORTDIR']
 
-		# always show this warning after this parameter
-		# is unused in stable portage
-		if _unused_param is not None and _unused_param != porttree_root:
+		if _unused_param is not None:
 			warnings.warn("The first parameter of the " + \
 				"portage.dbapi.porttree.portdbapi" + \
 				" constructor is now unused. Use " + \
@@ -402,7 +317,7 @@ class portdbapi(dbapi):
 		self._aux_cache_keys = set(
 			["DEPEND", "EAPI", "INHERITED", "IUSE", "KEYWORDS", "LICENSE",
 			"PDEPEND", "PROPERTIES", "PROVIDE", "RDEPEND", "repository",
-			"RESTRICT", "SLOT", "DEFINED_PHASES"])
+			"RESTRICT", "SLOT", "DEFINED_PHASES", "REQUIRED_USE"])
 
 		self._aux_cache = {}
 		self._broken_ebuilds = set()
@@ -523,8 +438,7 @@ class portdbapi(dbapi):
 		if metadata is not None:
 			return None
 
-		import _emerge
-		process = _emerge.EbuildMetadataPhase(cpv=cpv, ebuild_path=ebuild_path,
+		process = EbuildMetadataPhase(cpv=cpv, ebuild_path=ebuild_path,
 			ebuild_mtime=emtime, metadata_callback=self._metadata_callback,
 			portdb=self, repo_path=repo_path, settings=self.doebuild_settings)
 		return process
@@ -647,7 +561,6 @@ class portdbapi(dbapi):
 				raise KeyError(mycpv)
 
 			self.doebuild_settings.setcpv(mycpv)
-			mydata = {}
 			eapi = None
 
 			if eapi is None and \
@@ -662,23 +575,24 @@ class portdbapi(dbapi):
 				self.doebuild_settings.configdict['pkg']['EAPI'] = eapi
 
 			if eapi is not None and not portage.eapi_is_supported(eapi):
-				mydata['EAPI'] = eapi
+				mydata = self._metadata_callback(
+					mycpv, myebuild, mylocation, {'EAPI':eapi}, emtime)
 			else:
-				myret = doebuild(myebuild, "depend",
-					self.doebuild_settings["ROOT"], self.doebuild_settings,
-					dbkey=mydata, tree="porttree", mydbapi=self)
-				if myret != os.EX_OK:
+				sched = TaskScheduler()
+				proc = EbuildMetadataPhase(cpv=mycpv, ebuild_path=myebuild,
+					ebuild_mtime=emtime,
+					metadata_callback=self._metadata_callback, portdb=self,
+					repo_path=mylocation, scheduler=sched.sched_iface,
+					settings=self.doebuild_settings)
+
+				sched.add(proc)
+				sched.run()
+
+				if proc.returncode != os.EX_OK:
 					self._broken_ebuilds.add(myebuild)
 					raise KeyError(mycpv)
 
-			self._metadata_callback(
-				mycpv, myebuild, mylocation, mydata, emtime)
-
-			if mydata.get("INHERITED", False):
-				mydata["_eclasses_"] = self._repo_info[mylocation
-					].eclass_db.get_eclass_data(mydata["INHERITED"].split())
-			else:
-				mydata["_eclasses_"] = {}
+				mydata = proc.metadata
 
 		# do we have a origin repository name for the current package
 		mydata["repository"] = self._repository_map.get(mylocation, "")
@@ -740,36 +654,8 @@ class portdbapi(dbapi):
 				"getFetchMap(): '%s' has unsupported EAPI: '%s'" % \
 				(mypkg, eapi.lstrip("-")))
 
-		myuris = paren_reduce(myuris)
-		_src_uri_validate(mypkg, eapi, myuris)
-		myuris = use_reduce(myuris, uselist=useflags,
-			matchall=(useflags is None))
-		myuris = flatten(myuris)
-
-		uri_map = OrderedDict()
-
-		myuris.reverse()
-		while myuris:
-			uri = myuris.pop()
-			if myuris and myuris[-1] == "->":
-				operator = myuris.pop()
-				distfile = myuris.pop()
-			else:
-				distfile = os.path.basename(uri)
-				if not distfile:
-					raise portage.exception.InvalidDependString(
-						("getFetchMap(): '%s' SRC_URI has no file " + \
-						"name: '%s'") % (mypkg, uri))
-
-			uri_set = uri_map.get(distfile)
-			if uri_set is None:
-				uri_set = set()
-				uri_map[distfile] = uri_set
-			uri_set.add(uri)
-			uri = None
-			operator = None
-
-		return uri_map
+		return _parse_uri_map(mypkg, {'EAPI':eapi,'SRC_URI':myuris},
+			use=useflags)
 
 	def getfetchsizes(self, mypkg, useflags=None, debug=0):
 		# returns a filename:size dictionnary of remaining downloads
@@ -788,7 +674,9 @@ class portdbapi(dbapi):
 		#XXX: maybe this should be improved: take partial downloads
 		# into account? check checksums?
 		for myfile in myfiles:
-			if myfile not in checksums:
+			try:
+				fetch_size = int(checksums[myfile]["size"])
+			except (KeyError, ValueError):
 				if debug:
 					writemsg(_("[bad digest]: missing %(file)s for %(pkg)s\n") % {"file":myfile, "pkg":mypkg})
 				continue
@@ -800,9 +688,20 @@ class portdbapi(dbapi):
 				pass
 			if mystat is None:
 				existing_size = 0
+				ro_distdirs = self.settings.get("PORTAGE_RO_DISTDIRS")
+				if ro_distdirs is not None:
+					for x in shlex_split(ro_distdirs):
+						try:
+							mystat = os.stat(os.path.join(x, myfile))
+						except OSError:
+							pass
+						else:
+							if mystat.st_size == fetch_size:
+								existing_size = fetch_size
+								break
 			else:
 				existing_size = mystat.st_size
-			remaining_size = int(checksums[myfile]["size"]) - existing_size
+			remaining_size = fetch_size - existing_size
 			if remaining_size > 0:
 				# Assume the download is resumable.
 				filesdict[myfile] = remaining_size
@@ -894,8 +793,12 @@ class portdbapi(dbapi):
 		mysplit = mycp.split("/")
 		invalid_category = mysplit[0] not in self._categories
 		d={}
-		if mytree:
-			mytrees = [mytree]
+		if mytree is not None:
+			if isinstance(mytree, basestring):
+				mytrees = [mytree]
+			else:
+				# assume it's iterable
+				mytrees = mytree
 		else:
 			mytrees = self.porttrees
 		for oroot in mytrees:
@@ -1151,11 +1054,11 @@ def close_portdbapi_caches():
 		i.close_caches()
 
 class portagetree(object):
-	def __init__(self, root="/", virtual=None, settings=None):
+	def __init__(self, root=None, virtual=None, settings=None):
 		"""
 		Constructor for a PortageTree
 		
-		@param root: ${ROOT}, defaults to '/', see make.conf(5)
+		@param root: deprecated, defaults to settings['ROOT']
 		@type root: String/Path
 		@param virtual: UNUSED
 		@type virtual: No Idea
@@ -1163,14 +1066,29 @@ class portagetree(object):
 		@type settings: Instance of portage.config
 		"""
 
-		if True:
-			self.root = root
-			if settings is None:
-				from portage import settings
-			self.settings = settings
-			self.portroot = settings["PORTDIR"]
-			self.virtual = virtual
-			self.dbapi = portdbapi(mysettings=settings)
+		if settings is None:
+			settings = portage.settings
+		self.settings = settings
+
+		if root is not None and root != settings['ROOT']:
+			warnings.warn("The root parameter of the " + \
+				"portage.dbapi.porttree.portagetree" + \
+				" constructor is now unused. Use " + \
+				"settings['ROOT'] instead.",
+				DeprecationWarning, stacklevel=2)
+
+		self.portroot = settings["PORTDIR"]
+		self.virtual = virtual
+		self.dbapi = portdbapi(mysettings=settings)
+
+	@property
+	def root(self):
+		warnings.warn("The root attribute of " + \
+			"portage.dbapi.porttree.portagetree" + \
+			" is deprecated. Use " + \
+			"settings['ROOT'] instead.",
+			DeprecationWarning, stacklevel=2)
+		return self.settings['ROOT']
 
 	def dep_bestmatch(self,mydep):
 		"compatibility method"
@@ -1240,6 +1158,9 @@ class FetchlistDict(Mapping):
 
 	def has_key(self, pkg_key):
 		"""Returns true if the given package exists within pkgdir."""
+		warnings.warn("portage.dbapi.porttree.FetchlistDict.has_key() is "
+			"deprecated, use the 'in' operator instead",
+			DeprecationWarning, stacklevel=2)
 		return pkg_key in self
 
 	def __iter__(self):
@@ -1256,3 +1177,35 @@ class FetchlistDict(Mapping):
 
 	if sys.hexversion >= 0x3000000:
 		keys = __iter__
+
+def _parse_uri_map(cpv, metadata, use=None):
+
+	myuris = use_reduce(metadata.get('SRC_URI', ''),
+		uselist=use, matchall=(use is None),
+		is_src_uri=True,
+		eapi=metadata['EAPI'])
+
+	uri_map = OrderedDict()
+
+	myuris.reverse()
+	while myuris:
+		uri = myuris.pop()
+		if myuris and myuris[-1] == "->":
+			operator = myuris.pop()
+			distfile = myuris.pop()
+		else:
+			distfile = os.path.basename(uri)
+			if not distfile:
+				raise portage.exception.InvalidDependString(
+					("getFetchMap(): '%s' SRC_URI has no file " + \
+					"name: '%s'") % (cpv, uri))
+
+		uri_set = uri_map.get(distfile)
+		if uri_set is None:
+			uri_set = set()
+			uri_map[distfile] = uri_set
+		uri_set.add(uri)
+		uri = None
+		operator = None
+
+	return uri_map
