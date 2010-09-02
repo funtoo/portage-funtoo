@@ -179,7 +179,7 @@ class vardbapi(dbapi):
 			for x in (catdir, base):
 				os.utime(x, t)
 		except OSError:
-			os.makedirs(catdir)
+			ensure_dirs(catdir)
 
 	def cpv_exists(self, mykey):
 		"Tells us whether an actual ebuild exists on disk (no masking)"
@@ -198,7 +198,7 @@ class vardbapi(dbapi):
 
 	def cpv_inject(self, mycpv):
 		"injects a real package into our on-disk database; assumes mycpv is valid and doesn't already exist"
-		os.makedirs(self.getpath(mycpv))
+		ensure_dirs(self.getpath(mycpv))
 		counter = self.counter_tick(mycpv=mycpv)
 		# write local package counter so that emerge clean does the right thing
 		write_atomic(self.getpath(mycpv, filename="COUNTER"), str(counter))
@@ -239,7 +239,7 @@ class vardbapi(dbapi):
 			moves += 1
 			if not os.path.exists(self.getpath(mynewcat)):
 				#create the directory
-				os.makedirs(self.getpath(mynewcat))
+				ensure_dirs(self.getpath(mynewcat))
 			newpath = self.getpath(mynewcpv)
 			if os.path.exists(newpath):
 				#dest already exists; keep this puppy where it is.
@@ -1100,7 +1100,7 @@ class vartree(object):
 		except SystemExit as e:
 			raise
 		except Exception as e:
-			mydir = os.path.join(self.dbapi._eroot, VDB_PATH, mycpv)
+			mydir = self.dbapi.getpath(mycpv)
 			writemsg(_("\nParse Error reading PROVIDE and USE in '%s'\n") % mydir,
 				noiselevel=-1)
 			if mylines:
@@ -2846,7 +2846,7 @@ class dblink(object):
 			self._eerror("preinst", lines)
 
 		if not os.path.exists(self.dbcatdir):
-			os.makedirs(self.dbcatdir)
+			ensure_dirs(self.dbcatdir)
 
 		otherversions = []
 		for v in self.vartree.dbapi.cp_list(self.mysplit[0]):
@@ -3613,21 +3613,46 @@ class dblink(object):
 						showMessage(_("bak %s %s.backup\n") % (mydest, mydest),
 							level=logging.ERROR, noiselevel=-1)
 						#now create our directory
-						if self.settings.selinux_enabled():
-							_selinux_merge.mkdir(mydest, mysrc)
-						else:
-							os.mkdir(mydest)
+						try:
+							if self.settings.selinux_enabled():
+								_selinux_merge.mkdir(mydest, mysrc)
+							else:
+								os.mkdir(mydest)
+						except OSError as e:
+							# Error handling should be equivalent to
+							# portage.util.ensure_dirs() for cases
+							# like bug #187518.
+							if e.errno in (errno.EEXIST,):
+								pass
+							elif os.path.isdir(mydest):
+								pass
+							else:
+								raise
+							del e
+
 						if bsd_chflags:
 							bsd_chflags.lchflags(mydest, dflags)
 						os.chmod(mydest, mystat[0])
 						os.chown(mydest, mystat[4], mystat[5])
 						showMessage(">>> %s/\n" % mydest)
 				else:
-					#destination doesn't exist
-					if self.settings.selinux_enabled():
-						_selinux_merge.mkdir(mydest, mysrc)
-					else:
-						os.mkdir(mydest)
+					try:
+						#destination doesn't exist
+						if self.settings.selinux_enabled():
+							_selinux_merge.mkdir(mydest, mysrc)
+						else:
+							os.mkdir(mydest)
+					except OSError as e:
+						# Error handling should be equivalent to
+						# portage.util.ensure_dirs() for cases
+						# like bug #187518.
+						if e.errno in (errno.EEXIST,):
+							pass
+						elif os.path.isdir(mydest):
+							pass
+						else:
+							raise
+						del e
 					os.chmod(mydest, mystat[0])
 					os.chown(mydest, mystat[4], mystat[5])
 					showMessage(">>> %s/\n" % mydest)

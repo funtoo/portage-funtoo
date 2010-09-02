@@ -2226,29 +2226,29 @@ class depgraph(object):
 		mask_docs = False
 
 		if show_missing_use:
-			writemsg("\nemerge: there are no ebuilds built with USE flags to satisfy "+green(xinfo)+".\n", noiselevel=-1)
-			writemsg("!!! One of the following packages is required to complete your request:\n", noiselevel=-1)
+			writemsg_stdout("\nemerge: there are no ebuilds built with USE flags to satisfy "+green(xinfo)+".\n", noiselevel=-1)
+			writemsg_stdout("!!! One of the following packages is required to complete your request:\n", noiselevel=-1)
 			for pkg, mreasons in show_missing_use:
-				writemsg("- "+pkg.cpv+" ("+", ".join(mreasons)+")\n", noiselevel=-1)
+				writemsg_stdout("- "+pkg.cpv+" ("+", ".join(mreasons)+")\n", noiselevel=-1)
 
 		elif masked_packages:
-			writemsg("\n!!! " + \
+			writemsg_stdout("\n!!! " + \
 				colorize("BAD", "All ebuilds that could satisfy ") + \
 				colorize("INFORM", xinfo) + \
 				colorize("BAD", " have been masked.") + "\n", noiselevel=-1)
-			writemsg("!!! One of the following masked packages is required to complete your request:\n", noiselevel=-1)
+			writemsg_stdout("!!! One of the following masked packages is required to complete your request:\n", noiselevel=-1)
 			have_eapi_mask = show_masked_packages(masked_packages)
 			if have_eapi_mask:
-				writemsg("\n", noiselevel=-1)
+				writemsg_stdout("\n", noiselevel=-1)
 				msg = ("The current version of portage supports " + \
 					"EAPI '%s'. You must upgrade to a newer version" + \
 					" of portage before EAPI masked packages can" + \
 					" be installed.") % portage.const.EAPI
-				writemsg("\n".join(textwrap.wrap(msg, 75)), noiselevel=-1)
-			writemsg("\n", noiselevel=-1)
+				writemsg_stdout("\n".join(textwrap.wrap(msg, 75)), noiselevel=-1)
+			writemsg_stdout("\n", noiselevel=-1)
 			mask_docs = True
 		else:
-			writemsg("\nemerge: there are no ebuilds to satisfy "+green(xinfo)+".\n", noiselevel=-1)
+			writemsg_stdout("\nemerge: there are no ebuilds to satisfy "+green(xinfo)+".\n", noiselevel=-1)
 
 		# Show parent nodes and the argument that pulled them in.
 		traversed_nodes = set()
@@ -2276,12 +2276,12 @@ class depgraph(object):
 				if parent not in traversed_nodes:
 					selected_parent = parent
 			node = selected_parent
-		writemsg("\n".join(msg), noiselevel=-1)
-		writemsg("\n", noiselevel=-1)
+		writemsg_stdout("\n".join(msg), noiselevel=-1)
+		writemsg_stdout("\n", noiselevel=-1)
 
 		if mask_docs:
 			show_mask_docs()
-			writemsg("\n", noiselevel=-1)
+			writemsg_stdout("\n", noiselevel=-1)
 
 	def _iter_match_pkgs_any(self, root_config, atom, onlydeps=False):
 		for db, pkg_type, built, installed, db_keys in \
@@ -3602,7 +3602,9 @@ class depgraph(object):
 
 		if replacement_portage is not None and \
 			(running_portage is None or \
-			(running_portage.cpv != replacement_portage.cpv)):
+			running_portage.cpv != replacement_portage.cpv or \
+			'9999' in replacement_portage.cpv or \
+			'git' in replacement_portage.inherited):
 			# update from running_portage to replacement_portage asap
 			asap_nodes.append(replacement_portage)
 
@@ -6085,7 +6087,7 @@ def show_masked_packages(masked_packages):
 				# above via mreasons.
 				pass
 
-		writemsg("- "+cpv+" (masked by: "+", ".join(mreasons)+")\n", noiselevel=-1)
+		writemsg_stdout("- "+cpv+" (masked by: "+", ".join(mreasons)+")\n", noiselevel=-1)
 
 		if comment and comment not in shown_comments:
 			writemsg_stdout(filename + ":\n" + comment + "\n",
@@ -6098,13 +6100,13 @@ def show_masked_packages(masked_packages):
 				continue
 			msg = ("A copy of the '%s' license" + \
 			" is located at '%s'.\n\n") % (l, l_path)
-			writemsg(msg, noiselevel=-1)
+			writemsg_stdout(msg, noiselevel=-1)
 			shown_licenses.add(l)
 	return have_eapi_mask
 
 def show_mask_docs():
-	writemsg("For more information, see the MASKED PACKAGES section in the emerge\n", noiselevel=-1)
-	writemsg("man page or refer to the Gentoo Handbook.\n", noiselevel=-1)
+	writemsg_stdout("For more information, see the MASKED PACKAGES section in the emerge\n", noiselevel=-1)
+	writemsg_stdout("man page or refer to the Gentoo Handbook.\n", noiselevel=-1)
 
 def filter_iuse_defaults(iuse):
 	for flag in iuse:
