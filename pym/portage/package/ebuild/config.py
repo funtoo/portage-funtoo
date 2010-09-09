@@ -1056,8 +1056,6 @@ class config(object):
 				if x in remaining:
 					remaining.remove(x)
 					filtered_var_split.append(x)
-			var_split = filtered_var_split
-
 			if var_split:
 				value = ' '.join(var_split)
 			else:
@@ -1310,10 +1308,18 @@ class config(object):
 				if ebuild_force_test:
 					self.usemask.discard("test")
 
+		got_bindist = False
+		if "bindist" in use:
+			got_bindist = True
+
 		# Allow _* flags from USE_EXPAND wildcards to pass through here.
 		use.difference_update([x for x in use \
 			if (x not in explicit_iuse and \
 			not iuse_implicit_match(x)) and x[-2:] != '_*'])
+
+		# drobbins - bindist is special and preserved.
+		if got_bindist:
+			use.add("bindist")
 
 		# Use the calculated USE flags to regenerate the USE_EXPAND flags so
 		# that they are consistent. For optimal performance, use slice
