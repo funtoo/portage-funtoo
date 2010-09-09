@@ -29,6 +29,7 @@ from portage.const import CACHE_PATH, \
 	MODULES_FILE_PATH, PORTAGE_BIN_PATH, PORTAGE_PYM_PATH, \
 	PRIVATE_PATH, PROFILE_PATH, USER_CONFIG_PATH, \
 	USER_VIRTUALS_FILE
+from portage.const import _SANDBOX_COMPAT_LEVEL
 from portage.dbapi import dbapi
 from portage.dbapi.porttree import portdbapi
 from portage.dbapi.vartree import vartree
@@ -528,6 +529,9 @@ class config(object):
 			self["EROOT"] = eroot
 			self.backup_changes("EROOT")
 
+			self["PORTAGE_SANDBOX_COMPAT_LEVEL"] = _SANDBOX_COMPAT_LEVEL
+			self.backup_changes("PORTAGE_SANDBOX_COMPAT_LEVEL")
+
 			self.pkeywordsdict = portage.dep.ExtendedAtomDict(dict)
 			self._ppropertiesdict = portage.dep.ExtendedAtomDict(dict)
 			self._penvdict = portage.dep.ExtendedAtomDict(dict)
@@ -849,6 +853,14 @@ class config(object):
 				writemsg("!!! %s\n" % str(e),
 					noiselevel=-1)
 
+	@property
+	def pmaskdict(self):
+		return self._mask_manager._pmaskdict.copy()
+
+	@property
+	def punmaskdict(self):
+		return self._mask_manager._punmaskdict.copy()
+
 	def expandLicenseTokens(self, tokens):
 		""" Take a token from ACCEPT_LICENSE or package.license and expand it
 		if it's a group token (indicated by @) or just return it if it's not a
@@ -877,7 +889,7 @@ class config(object):
 		if not self.profile_path or (not os.path.islink(abs_profile_path) and \
 			not os.path.exists(os.path.join(abs_profile_path, "parent")) and \
 			os.path.exists(os.path.join(self["PORTDIR"], "profiles"))):
-			writemsg(_("\a\n\n!!! %s is not a symlink and will probably prevent most merges.\n") % abs_profile_path,
+			writemsg(_("\n\n!!! %s is not a symlink and will probably prevent most merges.\n") % abs_profile_path,
 				noiselevel=-1)
 			writemsg(_("!!! It should point into a profile within %s/profiles/\n") % self["PORTDIR"])
 			writemsg(_("!!! (You can safely ignore this message when syncing. It's harmless.)\n\n\n"))
@@ -1305,8 +1317,9 @@ class config(object):
 				use.discard("test")
 			else:
 				use.add("test")
-				if ebuild_force_test:
-					self.usemask.discard("test")
+				if ebuild_force_test and "test" in self.usemask:
+					self.usemask = \
+						frozenset(x for x in self.usemask if x != "test")
 
 		got_bindist = False
 		if "bindist" in use:
@@ -1978,6 +1991,20 @@ class config(object):
 
 		myflags.difference_update(self.usemask)
 		self.configlist[-1]["USE"]= " ".join(sorted(myflags))
+
+	@property
+	def virts_p(self):
+		warnings.warn("portage config.virts_p attribute " + \
+			"is deprecated, use config.get_virts_p()",
+			DeprecationWarning, stacklevel=2)
+		return self.get_virts_p()
+
+	@property
+	def virtuals(self):
+		warnings.warn("portage config.virtuals attribute " + \
+			"is deprecated, use config.getvirtuals()",
+			DeprecationWarning, stacklevel=2)
+		return self.getvirtuals()
 
 	def get_virts_p(self):
 		return self._virtuals_manager.get_virts_p()

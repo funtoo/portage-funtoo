@@ -35,6 +35,7 @@ from portage.output import blue, bold, colorize, create_color_func, darkgreen, \
 good = create_color_func("GOOD")
 bad = create_color_func("BAD")
 from portage.package.ebuild._ipc.QueryCommand import QueryCommand
+from portage.package.ebuild.doebuild import _check_temp_dir
 from portage._sets import load_default_config, SETPREFIX
 from portage._sets.base import InternalPackageSet
 from portage.util import cmp_sort_key, writemsg, \
@@ -410,11 +411,10 @@ def action_build(settings, trees, mtimedb,
 
 		if ("--resume" in myopts):
 			favorites=mtimedb["resume"]["favorites"]
-			mymergelist = mydepgraph.altlist()
-			mydepgraph.break_refs(mymergelist)
 			mergetask = Scheduler(settings, trees, mtimedb, myopts,
-				spinner, mymergelist, favorites, mydepgraph.schedulerGraph())
-			del mydepgraph, mymergelist
+				spinner, favorites=favorites,
+				graph_config=mydepgraph.schedulerGraph())
+			del mydepgraph
 			clear_caches(trees)
 
 			retval = mergetask.merge()
@@ -427,12 +427,11 @@ def action_build(settings, trees, mtimedb,
 				del mtimedb["resume"]
 				mtimedb.commit()
 
-			pkglist = mydepgraph.altlist()
 			mydepgraph.saveNomergeFavorites()
-			mydepgraph.break_refs(pkglist)
 			mergetask = Scheduler(settings, trees, mtimedb, myopts,
-				spinner, pkglist, favorites, mydepgraph.schedulerGraph())
-			del mydepgraph, pkglist
+				spinner, favorites=favorites,
+				graph_config=mydepgraph.schedulerGraph())
+			del mydepgraph
 			clear_caches(trees)
 
 			retval = mergetask.merge()
@@ -1098,21 +1097,20 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 		for node in clean_set:
 			graph.add(node, None)
 			mydeps = []
-			node_use = node.metadata["USE"].split()
 			for dep_type in dep_keys:
 				depstr = node.metadata[dep_type]
 				if not depstr:
 					continue
-				success, atoms = portage.dep_check(depstr, None, settings,
-					myuse=node_use,
-					trees=resolver._dynamic_config._graph_trees,
-					myroot=myroot)
-				if not success:
+				priority = priority_map[dep_type]
+				try:
+					atoms = resolver._select_atoms(myroot, depstr,
+						myuse=node.use.enabled, parent=node,
+						priority=priority)[node]
+				except portage.exception.InvalidDependString:
 					# Ignore invalid deps of packages that will
 					# be uninstalled anyway.
 					continue
 
-				priority = priority_map[dep_type]
 				for atom in atoms:
 					if not isinstance(atom, portage.dep.Atom):
 						# Ignore invalid atoms returned from dep_check().
@@ -1837,9 +1835,13 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 	portdb = trees[settings["ROOT"]]["porttree"].dbapi
 	myportdir = portdb.porttree_root
 	out = portage.output.EOutput()
+	global_config_path = GLOBAL_CONFIG_PATH
+	if settings['EPREFIX']:
+		global_config_path = os.path.join(settings['EPREFIX'],
+				GLOBAL_CONFIG_PATH.lstrip(os.sep))
 	if not myportdir:
 		sys.stderr.write("!!! PORTDIR is undefined.  " + \
-			"Is %s/make.globals missing?\n" % GLOBAL_CONFIG_PATH)
+			"Is %s/make.globals missing?\n" % global_config_path)
 		sys.exit(1)
 	if myportdir[-1]=="/":
 		myportdir=myportdir[:-1]
@@ -1851,6 +1853,12 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		print(">>>",myportdir,"not found, creating it.")
 		os.makedirs(myportdir,0o755)
 		st = os.stat(myportdir)
+
+	# PORTAGE_TMPDIR is used below, so validate it and
+	# bail out if necessary.
+	rval = _check_temp_dir(settings)
+	if rval != os.EX_OK:
+		return rval
 
 	usersync_uid = None
 	spawn_kwargs = {}
@@ -1879,7 +1887,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 	syncuri = settings.get("SYNC", "").strip()
 	if not syncuri:
 		writemsg_level("!!! SYNC is undefined. " + \
-			"Is %s/make.globals missing?\n" % GLOBAL_CONFIG_PATH,
+			"Is %s/make.globals missing?\n" % global_config_path,
 			noiselevel=-1, level=logging.ERROR)
 		return 1
 
@@ -2114,8 +2122,13 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 			# --timeout option does not prevent.
 			if True:
 				# Temporary file for remote server timestamp comparison.
-				from tempfile import mkstemp
-				fd, tmpservertimestampfile = mkstemp()
+				# NOTE: If FEATURES=usersync is enabled then the tempfile
+				# needs to be in a directory that's readable by the usersync
+				# user. We assume that PORTAGE_TMPDIR will satisfy this
+				# requirement, since that's not necessarily true for the
+				# default directory used by the tempfile module.
+				fd, tmpservertimestampfile = \
+					tempfile.mkstemp(dir=settings['PORTAGE_TMPDIR'])
 				os.close(fd)
 				if usersync_uid is not None:
 					portage.util.apply_permissions(tmpservertimestampfile,
@@ -2127,15 +2140,14 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 				content = None
 				mypids = []
 				try:
-					def timeout_handler(signum, frame):
-						raise portage.exception.PortageException("timed out")
-					signal.signal(signal.SIGALRM, timeout_handler)
 					# Timeout here in case the server is unresponsive.  The
 					# --timeout rsync option doesn't apply to the initial
 					# connection attempt.
-					if rsync_initial_timeout:
-						signal.alarm(rsync_initial_timeout)
 					try:
+						if rsync_initial_timeout:
+							portage.exception.AlarmSignal.register(
+								rsync_initial_timeout)
+
 						mypids.extend(portage.process.spawn(
 							mycommand, returnpid=True, **spawn_kwargs))
 						exitcode = os.waitpid(mypids[0], 0)[1]
@@ -2145,15 +2157,14 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 						content = portage.grabfile(tmpservertimestampfile)
 					finally:
 						if rsync_initial_timeout:
-							signal.alarm(0)
+							portage.exception.AlarmSignal.unregister()
 						try:
 							os.unlink(tmpservertimestampfile)
 						except OSError:
 							pass
-				except portage.exception.PortageException as e:
+				except portage.exception.AlarmSignal:
 					# timed out
-					print(e)
-					del e
+					print('timed out')
 					if mypids and os.waitpid(mypids[0], os.WNOHANG) == (0,0):
 						os.kill(mypids[0], signal.SIGTERM)
 						os.waitpid(mypids[0], 0)
@@ -2458,7 +2469,7 @@ def action_uninstall(settings, trees, ldpath_mtimes,
 	# redirection of ebuild phase output to logs as required for
 	# options such as --quiet.
 	sched = Scheduler(settings, trees, None, opts,
-		spinner, [], [], None)
+		spinner)
 	sched._background = sched._background_mode()
 	sched._status_display.quiet = True
 
@@ -2792,7 +2803,7 @@ def load_emerge_config(trees=None):
 			settings = trees[myroot]["vartree"].settings
 			break
 
-	mtimedbfile = os.path.join(os.path.sep, settings['ROOT'], portage.CACHE_PATH, "mtimedb")
+	mtimedbfile = os.path.join(settings['EROOT'], portage.CACHE_PATH, "mtimedb")
 	mtimedb = portage.MtimeDB(mtimedbfile)
 	portage.output._init(config_root=settings['PORTAGE_CONFIGROOT'])
 	QueryCommand._db = trees
@@ -2815,7 +2826,7 @@ def chk_updated_cfg_files(target_root, config_protect):
 		print(" "+yellow("*")+" man page to learn how to update config files.")
 
 def display_news_notification(root_config, myopts):
-	target_root = root_config.root
+	target_root = root_config.settings['EROOT']
 	trees = root_config.trees
 	settings = trees["vartree"].settings
 	portdb = trees["porttree"].dbapi

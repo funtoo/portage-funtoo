@@ -5,16 +5,19 @@
 PORTAGE_BIN_PATH="${PORTAGE_BIN_PATH:-/usr/lib/portage/bin}"
 PORTAGE_PYM_PATH="${PORTAGE_PYM_PATH:-/usr/lib/portage/pym}"
 
+if [[ $PORTAGE_SANDBOX_COMPAT_LEVEL -lt 22 ]] ; then
+	# Ensure that /dev/std* streams have appropriate sandbox permission for
+	# bug #288863. This can be removed after sandbox is fixed and portage
+	# depends on the fixed version (sandbox-2.2 has the fix but it is
+	# currently unstable).
+	export SANDBOX_WRITE="${SANDBOX_WRITE:+${SANDBOX_WRITE}:}/dev/stdout:/dev/stderr"
+	export SANDBOX_READ="${SANDBOX_READ:+${SANDBOX_READ}:}/dev/stdin"
+fi
+
 # Don't use sandbox's BASH_ENV for new shells because it does
 # 'source /etc/profile' which can interfere with the build
 # environment by modifying our PATH.
 unset BASH_ENV
-
-# Avoid sandbox violations in temporary directories.
-for x in TEMP TMP TMPDIR ; do
-	[[ -n ${!x} ]] && export SANDBOX_WRITE="${SANDBOX_WRITE:+${SANDBOX_WRITE}:}${!x}"
-done
-unset x
 
 ROOTPATH=${ROOTPATH##:}
 ROOTPATH=${ROOTPATH%%:}
@@ -97,6 +100,18 @@ addpredict() { _sb_append_var PREDICT "$@" ; }
 addwrite "${PORTAGE_TMPDIR}"
 addread "/:${PORTAGE_TMPDIR}"
 [[ -n ${PORTAGE_GPG_DIR} ]] && addpredict "${PORTAGE_GPG_DIR}"
+
+# Avoid sandbox violations in temporary directories.
+if [[ -w $T ]] ; then
+	export TEMP=$T
+	export TMP=$T
+	export TMPDIR=$T
+else
+	for x in TEMP TMP TMPDIR ; do
+		[[ -n ${!x} ]] && addwrite "${!x}"
+	done
+	unset x
+fi
 
 lchown() {
 	chown -h "$@"
@@ -375,6 +390,9 @@ unpack() {
 				assert_sigpipe_ok "$myfail"
 				;;
 			ZIP|zip|jar)
+				# unzip will interactively prompt under some error conditions,
+				# as reported in bug #336285
+				( while true ; do echo n ; done ) | \
 				unzip -qo "${srcdir}${x}" || die "$myfail"
 				;;
 			gz|Z|z)
@@ -669,7 +687,6 @@ ebuild_phase() {
 
 ebuild_phase_with_hooks() {
 	local x phase_name=${1}
-	[ -n "$EBUILD_PHASE" ] && rm -f "$T/logging/$EBUILD_PHASE"
 	for x in {pre_,,post_}${phase_name} ; do
 		ebuild_phase ${x}
 	done
@@ -680,7 +697,15 @@ dyn_pretend() {
 }
 
 dyn_setup() {
-	ebuild_phase_with_hooks pkg_setup
+	if [[ -e $PORTAGE_BUILDDIR/.setuped ]] ; then
+		vecho ">>> It appears that '$PF' is already setup; skipping."
+		vecho ">>> Remove '$PORTAGE_BUILDDIR/.setuped' to force setup."
+		return 0
+	fi
+	ebuild_phase pre_pkg_setup
+	ebuild_phase pkg_setup
+	> "$PORTAGE_BUILDDIR"/.setuped
+	ebuild_phase post_pkg_setup
 }
 
 dyn_unpack() {
@@ -703,7 +728,7 @@ dyn_unpack() {
 	fi
 	if [ "${newstuff}" == "yes" ]; then
 		# We don't necessarily have privileges to do a full dyn_clean here.
-		rm -rf "${PORTAGE_BUILDDIR}"/{.unpacked,.prepared,.configured,.compiled,.tested,.installed,.packaged,build-info}
+		rm -rf "${PORTAGE_BUILDDIR}"/{.setuped,.unpacked,.prepared,.configured,.compiled,.tested,.installed,.packaged,build-info}
 		if ! hasq keepwork $FEATURES ; then
 			rm -rf "${WORKDIR}"
 		fi
@@ -722,7 +747,6 @@ dyn_unpack() {
 	if [ ! -d "${WORKDIR}" ]; then
 		install -m${PORTAGE_WORKDIR_MODE:-0700} -d "${WORKDIR}" || die "Failed to create dir '${WORKDIR}'"
 	fi
-	[ -n "$EBUILD_PHASE" ] && rm -f "$T/logging/$EBUILD_PHASE"
 	cd "${WORKDIR}" || die "Directory change failed: \`cd '${WORKDIR}'\`"
 	ebuild_phase pre_src_unpack
 	vecho ">>> Unpacking source..."
@@ -753,7 +777,7 @@ dyn_clean() {
 	fi
 
 	if [[ $EMERGE_FROM = binary ]] || ! hasq keepwork $FEATURES; then
-		rm -f "$PORTAGE_BUILDDIR"/.{ebuild_changed,logid,unpacked,prepared} \
+		rm -f "$PORTAGE_BUILDDIR"/.{ebuild_changed,logid,setuped,unpacked,prepared} \
 			"$PORTAGE_BUILDDIR"/.{configured,compiled,tested,packaged} \
 			"$PORTAGE_BUILDDIR"/.die_hooks \
 			"$PORTAGE_BUILDDIR"/.ipc_{in,out,lock} \
@@ -969,7 +993,6 @@ dyn_prepare() {
 
 	trap abort_prepare SIGINT SIGQUIT
 
-	[ -n "$EBUILD_PHASE" ] && rm -f "$T/logging/$EBUILD_PHASE"
 	ebuild_phase pre_src_prepare
 	vecho ">>> Preparing source in $PWD ..."
 	ebuild_phase src_prepare
@@ -1000,7 +1023,6 @@ dyn_configure() {
 
 	trap abort_configure SIGINT SIGQUIT
 
-	[ -n "$EBUILD_PHASE" ] && rm -f "$T/logging/$EBUILD_PHASE"
 	ebuild_phase pre_src_configure
 
 	vecho ">>> Configuring source in $PWD ..."
@@ -1033,7 +1055,6 @@ dyn_compile() {
 
 	trap abort_compile SIGINT SIGQUIT
 
-	[ -n "$EBUILD_PHASE" ] && rm -f "$T/logging/$EBUILD_PHASE"
 	ebuild_phase pre_src_compile
 
 	vecho ">>> Compiling source in $PWD ..."
@@ -1075,7 +1096,6 @@ dyn_test() {
 	else
 		local save_sp=${SANDBOX_PREDICT}
 		addpredict /
-		[ -n "$EBUILD_PHASE" ] && rm -f "$T/logging/$EBUILD_PHASE"
 		ebuild_phase pre_src_test
 		ebuild_phase src_test
 		touch "$PORTAGE_BUILDDIR/.tested" || \
@@ -1097,7 +1117,6 @@ dyn_install() {
 		return 0
 	fi
 	trap "abort_install" SIGINT SIGQUIT
-	[ -n "$EBUILD_PHASE" ] && rm -f "$T/logging/$EBUILD_PHASE"
 	ebuild_phase pre_src_install
 	rm -rf "${PORTAGE_BUILDDIR}/image"
 	mkdir "${PORTAGE_BUILDDIR}/image"
@@ -1184,7 +1203,7 @@ dyn_preinst() {
 dyn_help() {
 	echo
 	echo "Portage"
-	echo "Copyright 1999-2008 Gentoo Foundation"
+	echo "Copyright 1999-2010 Gentoo Foundation"
 	echo
 	echo "How to use the ebuild command:"
 	echo
@@ -1726,8 +1745,9 @@ filter_readonly_variables() {
 	local filtered_sandbox_vars="SANDBOX_ACTIVE SANDBOX_BASHRC
 		SANDBOX_DEBUG_LOG SANDBOX_DISABLED SANDBOX_LIB
 		SANDBOX_LOG SANDBOX_ON"
+	local misc_garbage_vars="_portage_filter_opts"
 	filtered_vars="$readonly_bash_vars $bash_misc_vars
-		$READONLY_PORTAGE_VARS"
+		$READONLY_PORTAGE_VARS $misc_garbage_vars"
 
 	# Don't filter/interfere with prefix variables unless they are
 	# supported by the current EAPI.
@@ -1774,17 +1794,17 @@ filter_readonly_variables() {
 # interfering with the current environment. This is useful when an existing
 # environment needs to be loaded from a binary or installed package.
 preprocess_ebuild_env() {
-	local filter_opts=""
+	local _portage_filter_opts=""
 	if [ -f "${T}/environment.raw" ] ; then
 		# This is a signal from the python side, indicating that the
 		# environment may contain stale SANDBOX_{DENY,PREDICT,READ,WRITE}
 		# and FEATURES variables that should be filtered out. Between
 		# phases, these variables are normally preserved.
-		filter_opts+=" --filter-features --filter-locale --filter-path --filter-sandbox"
+		_portage_filter_opts+=" --filter-features --filter-locale --filter-path --filter-sandbox"
 	fi
-	filter_readonly_variables ${filter_opts} < "${T}"/environment \
+	filter_readonly_variables $_portage_filter_opts < "${T}"/environment \
 		> "${T}"/environment.filtered || return $?
-	unset filter_opts
+	unset _portage_filter_opts
 	mv "${T}"/environment.filtered "${T}"/environment || return $?
 	rm -f "${T}/environment.success" || return $?
 	# WARNING: Code inside this subshell should avoid making assumptions
@@ -1813,7 +1833,7 @@ preprocess_ebuild_env() {
 	) > "${T}/environment.filtered"
 	local retval
 	if [ -e "${T}/environment.success" ] ; then
-		filter_readonly_variables < \
+		filter_readonly_variables --filter-features < \
 			"${T}/environment.filtered" > "${T}/environment"
 		retval=$?
 	else
@@ -1885,6 +1905,10 @@ if [[ -n ${QA_INTERCEPTORS} ]] ; then
 	done
 	unset BIN_PATH BIN BODY FUNC_SRC
 fi
+
+# Subshell/helper die support (must export for the die helper).
+export EBUILD_MASTER_PID=$BASHPID
+trap 'exit 1' SIGTERM
 
 if ! hasq "$EBUILD_PHASE" clean cleanrm depend && \
 	[ -f "${T}"/environment ] ; then
@@ -2069,12 +2093,6 @@ fi
 #a reasonable default for $S
 [[ -z ${S} ]] && export S=${WORKDIR}/${P}
 
-#some users have $TMP/$TMPDIR to a custom dir in their home ...
-#this will cause sandbox errors with some ./configure
-#scripts, so set it to $T.
-export TMP="${T}"
-export TMPDIR="${T}"
-
 # Note: readonly variables interfere with preprocess_ebuild_env(), so
 # declare them only after it has already run.
 if [ "${EBUILD_PHASE}" != "depend" ] ; then
@@ -2091,10 +2109,12 @@ fi
 ebuild_main() {
 
 	# Subshell/helper die support (must export for the die helper).
+	# Since this function is typically executed in a subshell,
+	# setup EBUILD_MASTER_PID to refer to the current $BASHPID,
+	# which seems to give the best results when further
+	# nested subshells call die.
 	export EBUILD_MASTER_PID=$BASHPID
 	trap 'exit 1' SIGTERM
-
-	local f x
 
 	if [[ $EBUILD_PHASE != depend ]] ; then
 		# Force configure scripts that automatically detect ccache to
@@ -2145,10 +2165,12 @@ ebuild_main() {
 		case "$EBUILD_SH_ARGS" in
 		configure|compile)
 
+			local x
 			for x in ASFLAGS CCACHE_DIR CCACHE_SIZE \
 				CFLAGS CXXFLAGS LDFLAGS LIBCFLAGS LIBCXXFLAGS ; do
 				[[ ${!x+set} = set ]] && export $x
 			done
+			unset x
 
 			hasq distcc $FEATURES && [[ -n $DISTCC_DIR ]] && \
 				[[ ${SANDBOX_WRITE/$DISTCC_DIR} = $SANDBOX_WRITE ]] && \
@@ -2171,7 +2193,6 @@ ebuild_main() {
 
 				local x
 				for x in 1 2 3 4 5 6 7 8; do
-					echo -ne "\a"
 					LC_ALL=C sleep 0.25
 				done
 
@@ -2204,11 +2225,6 @@ ebuild_main() {
 		export SANDBOX_ON="0"
 		;;
 	help|pretend|setup|preinst)
-		if [[ $EBUILD_SH_ARGS = setup ]] ; then
-			einfo "CPV:  $CATEGORY/$PF"
-			einfo "REPO: $PORTAGE_REPO_NAME"
-			einfo "USE:  $USE"
-		fi
 		#pkg_setup needs to be out of the sandbox for tmp file creation;
 		#for example, awking and piping a file in /tmp requires a temp file to be created
 		#in /etc.  If pkg_setup is in the sandbox, both our lilo and apache ebuilds break.
@@ -2276,6 +2292,25 @@ ebuild_main() {
 	esac
 }
 
+if [[ -s $SANDBOX_LOG ]] ; then
+	# We use SANDBOX_LOG to check for sandbox violations,
+	# so we ensure that there can't be a stale log to
+	# interfere with our logic.
+	x=
+	if [[ -n SANDBOX_ON ]] ; then
+		x=$SANDBOX_ON
+		export SANDBOX_ON=0
+	fi
+
+	rm -f "$SANDBOX_LOG" || \
+		die "failed to remove stale sandbox log: '$SANDBOX_LOG'"
+
+	if [[ -n $x ]] ; then
+		export SANDBOX_ON=$x
+	fi
+	unset x
+fi
+
 if [[ $EBUILD_PHASE = depend ]] ; then
 	ebuild_main
 elif [[ -n $EBUILD_SH_ARGS ]] ; then
@@ -2289,21 +2324,21 @@ elif [[ -n $EBUILD_SH_ARGS ]] ; then
 		# Save the env only for relevant phases.
 		if ! hasq "$EBUILD_SH_ARGS" clean help info nofetch ; then
 			umask 002
-			save_ebuild_env | filter_readonly_variables > "$T/environment"
+			save_ebuild_env | filter_readonly_variables \
+				--filter-features > "$T/environment"
 			assert "save_ebuild_env failed"
 			chown portage:portage "$T/environment" &>/dev/null
 			chmod g+w "$T/environment" &>/dev/null
 		fi
 		[[ -n $PORTAGE_EBUILD_EXIT_FILE ]] && > "$PORTAGE_EBUILD_EXIT_FILE"
-		[[ -n $PORTAGE_IPC_DAEMON ]] && "$PORTAGE_BIN_PATH"/ebuild-ipc exit 0
+		if [[ -n $PORTAGE_IPC_DAEMON ]] ; then
+			[[ ! -s $SANDBOX_LOG ]]
+			"$PORTAGE_BIN_PATH"/ebuild-ipc exit $?
+		fi
 		exit 0
 	)
 	exit $?
 fi
-
-# Subshell/helper die support (must export for the die helper).
-export EBUILD_MASTER_PID=$BASHPID
-trap 'exit 1' SIGTERM
 
 # Do not exit when ebuild.sh is sourced by other scripts.
 true

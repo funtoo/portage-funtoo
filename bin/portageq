@@ -456,7 +456,7 @@ def vdb_path(argv):
 	set environment/configuration options.
 	"""
 	out = sys.stdout
-	out.write(os.path.join(portage.settings["ROOT"], portage.VDB_PATH) + "\n")
+	out.write(os.path.join(portage.settings["EROOT"], portage.VDB_PATH) + "\n")
 	out.flush()
 	return os.EX_OK
 
@@ -574,6 +574,9 @@ list_preserved_libs.uses_root = True
 #
 # DO NOT CHANGE CODE BEYOND THIS POINT - IT'S NOT NEEDED!
 #
+
+if not portage.const._ENABLE_PRESERVE_LIBS:
+	del list_preserved_libs
 
 non_commands = frozenset(['eval_atom_use', 'exithandler', 'main',
 	'usage', 'writemsg', 'writemsg_stdout'])

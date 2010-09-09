@@ -6,7 +6,7 @@ import textwrap
 from _emerge.SpawnProcess import SpawnProcess
 from _emerge.EbuildIpcDaemon import EbuildIpcDaemon
 import portage
-from portage.elog.messages import eerror
+from portage.elog import messages as elog_messages
 from portage.localization import _
 from portage.package.ebuild._ipc.ExitCommand import ExitCommand
 from portage.package.ebuild._ipc.QueryCommand import QueryCommand
@@ -43,6 +43,21 @@ class AbstractEbuildProcess(SpawnProcess):
 			self.phase = phase
 
 	def _start(self):
+
+		need_builddir = self.phase not in self._phases_without_builddir
+
+		# This can happen if the pre-clean phase triggers
+		# die_hooks for some reason, and PORTAGE_BUILDDIR
+		# doesn't exist yet.
+		if need_builddir and \
+			not os.path.isdir(self.settings['PORTAGE_BUILDDIR']):
+			msg = _("The ebuild phase '%s' has been aborted "
+			"since PORTAGE_BUILDIR does not exist: '%s'") % \
+			(self.phase, self.settings['PORTAGE_BUILDDIR'])
+			self._eerror(textwrap.wrap(msg, 72))
+			self._set_returncode((self.pid, 1))
+			self.wait()
+			return
 
 		if self.background:
 			# Automatically prevent color codes from showing up in logs,
@@ -185,10 +200,20 @@ class AbstractEbuildProcess(SpawnProcess):
 		self._eerror(textwrap.wrap(msg, 72))
 
 	def _eerror(self, lines):
+		self._elog('eerror', lines)
+
+	def _elog(self, elog_funcname, lines):
 		out = StringIO()
 		phase = self.phase
-		for line in lines:
-			eerror(line, phase=phase, key=self.settings.mycpv, out=out)
+		elog_func = getattr(elog_messages, elog_funcname)
+		global_havecolor = portage.output.havecolor
+		try:
+			portage.output.havecolor = \
+				self.settings.get('NOCOLOR', 'false').lower() in ('no', 'false')
+			for line in lines:
+				elog_func(line, phase=phase, key=self.settings.mycpv, out=out)
+		finally:
+			portage.output.havecolor = global_havecolor
 		msg = _unicode_decode(out.getvalue(),
 			encoding=_encodings['content'], errors='replace')
 		if msg:

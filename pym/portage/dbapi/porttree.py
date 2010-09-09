@@ -35,7 +35,7 @@ from portage import _encodings
 from portage import _unicode_encode
 from portage import OrderedDict
 from _emerge.EbuildMetadataPhase import EbuildMetadataPhase
-from _emerge.TaskScheduler import TaskScheduler
+from _emerge.PollScheduler import PollScheduler
 
 import os as _os
 import codecs
@@ -84,11 +84,11 @@ class portdbapi(dbapi):
 
 		porttree_root = self.settings['PORTDIR']
 
-		if _unused_param is not None:
+		if _unused_param is not None and _unused_param != porttree_root:
 			warnings.warn("The first parameter of the " + \
 				"portage.dbapi.porttree.portdbapi" + \
-				" constructor is now unused. Use " + \
-				"mysettings['PORTDIR'] instead.",
+				" constructor is now unused. " + \
+				"mysettings['PORTDIR'] will be used instead.",
 				DeprecationWarning, stacklevel=2)
 
 		# This is strictly for use in aux_get() doebuild calls when metadata
@@ -578,15 +578,15 @@ class portdbapi(dbapi):
 				mydata = self._metadata_callback(
 					mycpv, myebuild, mylocation, {'EAPI':eapi}, emtime)
 			else:
-				sched = TaskScheduler()
 				proc = EbuildMetadataPhase(cpv=mycpv, ebuild_path=myebuild,
 					ebuild_mtime=emtime,
 					metadata_callback=self._metadata_callback, portdb=self,
-					repo_path=mylocation, scheduler=sched.sched_iface,
+					repo_path=mylocation,
+					scheduler=PollScheduler().sched_iface,
 					settings=self.doebuild_settings)
 
-				sched.add(proc)
-				sched.run()
+				proc.start()
+				proc.wait()
 
 				if proc.returncode != os.EX_OK:
 					self._broken_ebuilds.add(myebuild)
@@ -661,13 +661,13 @@ class portdbapi(dbapi):
 		# returns a filename:size dictionnary of remaining downloads
 		myebuild = self.findname(mypkg)
 		if myebuild is None:
-			raise AssertionError("ebuild not found for '%s'" % mypkg)
+			raise AssertionError(_("ebuild not found for '%s'") % mypkg)
 		pkgdir = os.path.dirname(myebuild)
 		mf = Manifest(pkgdir, self.settings["DISTDIR"], mini_manifest = "mini-manifest" in self.settings.features)
 		checksums = mf.getDigests()
 		if not checksums:
 			if debug: 
-				writemsg("[empty/missing/bad digest]: %s\n" % (mypkg,))
+				writemsg(_("[empty/missing/bad digest]: %s\n") % (mypkg,))
 			return {}
 		filesdict={}
 		myfiles = self.getFetchMap(mypkg, useflags=useflags)
@@ -719,7 +719,7 @@ class portdbapi(dbapi):
 		myfiles = self.getFetchMap(mypkg, useflags=useflags)
 		myebuild = self.findname(mypkg)
 		if myebuild is None:
-			raise AssertionError("ebuild not found for '%s'" % mypkg)
+			raise AssertionError(_("ebuild not found for '%s'") % mypkg)
 		pkgdir = os.path.dirname(myebuild)
 		mf = Manifest(pkgdir, self.settings["DISTDIR"], mini_manifest = "mini-manifest" in self.settings.features)
 		mysums = mf.getDigests()
@@ -1052,6 +1052,8 @@ class portdbapi(dbapi):
 def close_portdbapi_caches():
 	for i in portdbapi.portdbapi_instances:
 		i.close_caches()
+
+portage.process.atexit_register(portage.portageexit)
 
 class portagetree(object):
 	def __init__(self, root=None, virtual=None, settings=None):

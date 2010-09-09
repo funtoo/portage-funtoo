@@ -47,7 +47,7 @@ def unmerge(root_config, myopts, unmerge_action,
 			pkg_cache[cpv] = pkg
 		return pkg
 
-	vdb_path = os.path.join(settings["ROOT"], portage.VDB_PATH)
+	vdb_path = os.path.join(settings["EROOT"], portage.VDB_PATH)
 	try:
 		# At least the parent needs to exist for the lock file.
 		portage.util.ensure_dirs(vdb_path)
@@ -118,7 +118,7 @@ def unmerge(root_config, myopts, unmerge_action,
 	
 					sp_absx_len = len(sp_absx)
 	
-					vdb_path = os.path.join(settings["ROOT"], portage.VDB_PATH)
+					vdb_path = os.path.join(settings["EROOT"], portage.VDB_PATH)
 					vdb_len  = len(vdb_path)
 	
 					sp_vdb     = vdb_path.split("/")
@@ -342,7 +342,7 @@ def unmerge(root_config, myopts, unmerge_action,
 					unknown_sets.add(s)
 					out = portage.output.EOutput()
 					out.eerror(("Unknown set '@%s' in %s%s") % \
-						(s, root_config.root, portage.const.WORLD_SETS_FILE))
+						(s, root_config.settings['EROOT'], portage.const.WORLD_SETS_FILE))
 					continue
 
 				# only check instances of EditablePackageSet as other classes are generally used for
@@ -427,10 +427,10 @@ def unmerge(root_config, myopts, unmerge_action,
 			#avoid cluttering the preview printout with stuff that isn't getting unmerged
 			continue
 		if not (pkgmap[x]["protected"] or pkgmap[x]["omitted"]) and cp in syslist:
-			writemsg_level(colorize("BAD","\a\n\n!!! " + \
+			writemsg_level(colorize("BAD","\n\n!!! " + \
 				"'%s' is part of your system profile.\n" % cp),
 				level=logging.WARNING, noiselevel=-1)
-			writemsg_level(colorize("WARN","\a!!! Unmerging it may " + \
+			writemsg_level(colorize("WARN","!!! Unmerging it may " + \
 				"be damaging to your system.\n\n"),
 				level=logging.WARNING, noiselevel=-1)
 			if clean_delay and "--pretend" not in myopts and "--ask" not in myopts:

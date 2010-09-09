@@ -64,6 +64,11 @@ class bindbapi(fakedbapi):
 			self.bintree.populate()
 		return fakedbapi.match(self, *pargs, **kwargs)
 
+	def cpv_exists(self, cpv):
+		if self.bintree and not self.bintree.populated:
+			self.bintree.populate()
+		return fakedbapi.cpv_exists(self, cpv)
+
 	def cpv_inject(self, cpv, **kwargs):
 		self._aux_cache.pop(cpv, None)
 		fakedbapi.cpv_inject(self, cpv, **kwargs)
@@ -731,7 +736,7 @@ class binarytree(object):
 			except ImportError:
 				from urlparse import urlparse
 			urldata = urlparse(base_url)
-			pkgindex_file = os.path.join(self.settings["ROOT"], CACHE_PATH, "binhost",
+			pkgindex_file = os.path.join(self.settings["EROOT"], CACHE_PATH, "binhost",
 				urldata[1] + urldata[2], "Packages")
 			pkgindex = self._new_pkgindex()
 			try:

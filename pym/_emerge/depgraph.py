@@ -63,6 +63,13 @@ if sys.hexversion >= 0x3000000:
 	basestring = str
 	long = int
 
+class _scheduler_graph_config(object):
+	def __init__(self, trees, pkg_cache, graph, mergelist):
+		self.trees = trees
+		self.pkg_cache = pkg_cache
+		self.graph = graph
+		self.mergelist = mergelist
+
 class _frozen_depgraph_config(object):
 
 	def __init__(self, settings, trees, myopts, spinner):
@@ -95,7 +102,8 @@ class _frozen_depgraph_config(object):
 				self.trees[myroot][tree] = trees[myroot][tree]
 			self.trees[myroot]["vartree"] = \
 				FakeVartree(trees[myroot]["root_config"],
-					pkg_cache=self._pkg_cache)
+					pkg_cache=self._pkg_cache,
+					pkg_root_config=self.roots[myroot])
 			self.pkgsettings[myroot] = portage.config(
 				clone=self.trees[myroot]["vartree"].settings)
 
@@ -254,16 +262,25 @@ class _dynamic_depgraph_config(object):
 				depgraph._frozen_config.trees[myroot]["vartree"]
 
 			dbs = []
-			portdb = depgraph._frozen_config.trees[myroot]["porttree"].dbapi
-			bindb  = depgraph._frozen_config.trees[myroot]["bintree"].dbapi
-			vardb  = depgraph._frozen_config.trees[myroot]["vartree"].dbapi
 			#               (db, pkg_type, built, installed, db_keys)
-			if "--usepkgonly" not in depgraph._frozen_config.myopts:
-				db_keys = list(portdb._aux_cache_keys)
-				dbs.append((portdb, "ebuild", False, False, db_keys))
-			if "--usepkg" in depgraph._frozen_config.myopts:
-				db_keys = list(bindb._aux_cache_keys)
-				dbs.append((bindb,  "binary", True, False, db_keys))
+			if "remove" in self.myparams:
+				# For removal operations, use _dep_check_composite_db
+				# for availability and visibility checks. This provides
+				# consistency with install operations, so we don't
+				# get install/uninstall cycles like in bug #332719.
+				self._graph_trees[myroot]["porttree"] = filtered_tree
+			else:
+				if "--usepkgonly" not in depgraph._frozen_config.myopts:
+					portdb = depgraph._frozen_config.trees[myroot]["porttree"].dbapi
+					db_keys = list(portdb._aux_cache_keys)
+					dbs.append((portdb, "ebuild", False, False, db_keys))
+
+				if "--usepkg" in depgraph._frozen_config.myopts:
+					bindb  = depgraph._frozen_config.trees[myroot]["bintree"].dbapi
+					db_keys = list(bindb._aux_cache_keys)
+					dbs.append((bindb,  "binary", True, False, db_keys))
+
+			vardb  = depgraph._frozen_config.trees[myroot]["vartree"].dbapi
 			db_keys = list(depgraph._frozen_config._trees_orig[myroot
 				]["vartree"].dbapi._aux_cache_keys)
 			dbs.append((vardb, "installed", True, True, db_keys))
@@ -2204,14 +2221,24 @@ class depgraph(object):
 		show_missing_use = False
 		if unmasked_use_reasons:
 			# Only show the latest version.
-			show_missing_use = unmasked_use_reasons[:1]
+			show_missing_use = []
+			pkg_reason = None
+			parent_reason = None
 			for pkg, mreasons in unmasked_use_reasons:
-				if myparent and pkg == myparent:
-					#This happens if a use change on the parent
-					#leads to a satisfied conditional use dep.
-					show_missing_use.append((pkg, mreasons))
-					break
-				
+				if pkg is myparent:
+					if parent_reason is None:
+						#This happens if a use change on the parent
+						#leads to a satisfied conditional use dep.
+						parent_reason = (pkg, mreasons)
+				elif pkg_reason is None:
+					#Don't rely on the first pkg in unmasked_use_reasons,
+					#being the highest version of the dependency.
+					pkg_reason = (pkg, mreasons)
+			if pkg_reason:
+				show_missing_use.append(pkg_reason)
+			if parent_reason:
+				show_missing_use.append(parent_reason)
+
 		elif unmasked_iuse_reasons:
 			masked_with_iuse = False
 			for pkg in masked_pkg_instances:
@@ -2507,8 +2534,8 @@ class depgraph(object):
 
 			for key in "DEPEND", "RDEPEND", "PDEPEND", "LICENSE":
 				dep = pkg.metadata[key]
-				old_val = set(portage.dep.use_reduce(dep, pkg.use.enabled, is_valid_flag=pkg.iuse.is_valid_flag))
-				new_val = set(portage.dep.use_reduce(dep, new_use, is_valid_flag=pkg.iuse.is_valid_flag))
+				old_val = set(portage.dep.use_reduce(dep, pkg.use.enabled, is_valid_flag=pkg.iuse.is_valid_flag, flat=True))
+				new_val = set(portage.dep.use_reduce(dep, new_use, is_valid_flag=pkg.iuse.is_valid_flag, flat=True))
 
 				if old_val != new_val:
 					return True
@@ -2548,6 +2575,7 @@ class depgraph(object):
 		portdb = self._frozen_config.roots[root].trees["porttree"].dbapi
 		# List of acceptable packages, ordered by type preference.
 		matched_packages = []
+		matched_pkgs_ignore_use = []
 		highest_version = None
 		if not isinstance(atom, portage.dep.Atom):
 			atom = portage.dep.Atom(atom)
@@ -2709,6 +2737,7 @@ class depgraph(object):
 							# since IUSE cannot be adjusted by the user.
 							continue
 
+						matched_pkgs_ignore_use.append(pkg)
 						if allow_use_changes:
 							target_use = {}
 							for flag in atom.use.enabled:
@@ -2777,7 +2806,7 @@ class depgraph(object):
 						break
 					# Compare built package to current config and
 					# reject the built package if necessary.
-					if built and not installed and \
+					if built and (not installed or matched_pkgs_ignore_use) and \
 						("--newuse" in self._frozen_config.myopts or \
 						"--reinstall" in self._frozen_config.myopts or \
 						"--binpkg-respect-use" in self._frozen_config.myopts):
@@ -2930,6 +2959,18 @@ class depgraph(object):
 		in_graph = self._dynamic_config._slot_pkg_map[root].get(pkg.slot_atom)
 		return pkg, in_graph
 
+	def _select_pkg_from_installed(self, root, atom, onlydeps=False):
+		"""
+		Select packages that are installed.
+		"""
+		vardb = self._dynamic_config._graph_trees[root]["vartree"].dbapi
+		matches = vardb.match_pkgs(atom)
+		if not matches:
+			return None, None
+		pkg = matches[-1] # highest match
+		in_graph = self._dynamic_config._slot_pkg_map[root].get(pkg.slot_atom)
+		return pkg, in_graph
+
 	def _complete_graph(self, required_sets=None):
 		"""
 		Add any deep dependencies of required sets (args, system, world) that
@@ -2963,10 +3004,18 @@ class depgraph(object):
 		# parameter so that all dependencies are traversed and
 		# accounted for.
 		self._select_atoms = self._select_atoms_from_graph
-		self._select_package = self._select_pkg_from_graph
+		if "remove" in self._dynamic_config.myparams:
+			self._select_package = self._select_pkg_from_installed
+		else:
+			self._select_package = self._select_pkg_from_graph
 		already_deep = self._dynamic_config.myparams.get("deep") is True
 		if not already_deep:
 			self._dynamic_config.myparams["deep"] = True
+
+		# Invalidate the package selection cache, since
+		# _select_package has just changed implementations.
+		for trees in self._dynamic_config._filtered_trees.values():
+			trees["porttree"].dbapi._clear_cache()
 
 		for root in self._frozen_config.roots:
 			if root != self._frozen_config.target_root and \
@@ -3050,6 +3099,9 @@ class depgraph(object):
 		operation = "merge"
 		if installed or onlydeps:
 			operation = "nomerge"
+		# Ensure that we use the specially optimized RootConfig instance
+		# that refers to FakeVartree instead of the real vartree.
+		root_config = self._frozen_config.roots[root_config.root]
 		pkg = self._frozen_config._pkg_cache.get(
 			(type_name, root_config.root, cpv, operation))
 		if pkg is None and onlydeps and not installed:
@@ -3463,8 +3515,10 @@ class depgraph(object):
 		internal Package instances such that this depgraph instance should
 		not be used to perform any more calculations.
 		"""
-		if self._dynamic_config._scheduler_graph is None:
-			self.altlist()
+
+		# NOTE: altlist initializes self._dynamic_config._scheduler_graph
+		mergelist = self.altlist()
+		self.break_refs(mergelist)
 		self.break_refs(self._dynamic_config._scheduler_graph.order)
 
 		# Break DepPriority.satisfied attributes which reference
@@ -3476,7 +3530,24 @@ class depgraph(object):
 					if priority.satisfied:
 						priority.satisfied = True
 
-		return self._dynamic_config._scheduler_graph
+		pkg_cache = self._frozen_config._pkg_cache
+		graph = self._dynamic_config._scheduler_graph
+		trees = self._frozen_config.trees
+		pruned_pkg_cache = {}
+		for pkg in pkg_cache:
+			if pkg in graph or \
+				(pkg.installed and pkg in trees[pkg.root]['vartree'].dbapi):
+				pruned_pkg_cache[pkg] = pkg
+
+		for root in trees:
+			trees[root]['vartree']._pkg_cache = pruned_pkg_cache
+			self.break_refs(trees[root]['vartree'].dbapi)
+
+		self.break_refs(pruned_pkg_cache)
+		sched_config = \
+			_scheduler_graph_config(trees, pruned_pkg_cache, graph, mergelist)
+
+		return sched_config
 
 	def break_refs(self, nodes):
 		"""
@@ -5192,6 +5263,12 @@ class depgraph(object):
 					for dep_str in dep_strings:
 						affecting_use.update(extract_affecting_use(dep_str, atom))
 					
+					#Don't show flags as 'affecting' if the user can't change them,
+					pkgsettings = self._frozen_config.pkgsettings[node.root]
+					pkgsettings.setcpv(node)
+					affecting_use.difference_update(pkgsettings.usemask, \
+						pkgsettings.useforce)
+
 					pkg_name = node.cpv
 					if affecting_use:
 						usedep = []
@@ -5751,7 +5828,7 @@ class _dep_check_composite_db(dbapi):
 				arg = None
 			if arg:
 				return False
-		if pkg.installed and not pkg.visible:
+		if pkg.installed and not self._depgraph._pkg_visibility_check(pkg):
 			return False
 		in_graph = self._depgraph._dynamic_config._slot_pkg_map[
 			self._root].get(pkg.slot_atom)

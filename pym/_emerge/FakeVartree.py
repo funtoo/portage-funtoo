@@ -36,11 +36,15 @@ class FakeVartree(vartree):
 	global updates are necessary (updates are performed when necessary if there
 	is not a matching ebuild in the tree). Instances of this class are not
 	populated until the sync() method is called."""
-	def __init__(self, root_config, pkg_cache=None):
+	def __init__(self, root_config, pkg_cache=None, pkg_root_config=None):
 		self._root_config = root_config
+		if pkg_root_config is None:
+			pkg_root_config = self._root_config
+		self._pkg_root_config = pkg_root_config
 		if pkg_cache is None:
 			pkg_cache = {}
 		real_vartree = root_config.trees["vartree"]
+		self._real_vardb = real_vartree.dbapi
 		portdb = root_config.trees["porttree"].dbapi
 		self.root = real_vartree.root
 		self.settings = real_vartree.settings
@@ -102,7 +106,7 @@ class FakeVartree(vartree):
 		after one or more packages may have been installed or
 		uninstalled.
 		"""
-		vdb_path = os.path.join(self.root, portage.VDB_PATH)
+		vdb_path = os.path.join(self.settings['EROOT'], portage.VDB_PATH)
 		try:
 			# At least the parent needs to exist for the lock file.
 			portage.util.ensure_dirs(vdb_path)
@@ -131,12 +135,14 @@ class FakeVartree(vartree):
 		real_vardb = self._root_config.trees["vartree"].dbapi
 		current_cpv_set = frozenset(real_vardb.cpv_all())
 		pkg_vardb = self.dbapi
+		pkg_cache = self._pkg_cache
 		aux_get_history = self._aux_get_history
 
 		# Remove any packages that have been uninstalled.
 		for pkg in list(pkg_vardb):
 			if pkg.cpv not in current_cpv_set:
 				pkg_vardb.cpv_remove(pkg)
+				pkg_cache.pop(pkg, None)
 				aux_get_history.discard(pkg.cpv)
 
 		# Validate counters and timestamps.
@@ -157,6 +163,7 @@ class FakeVartree(vartree):
 				if counter != pkg.counter or \
 					mtime != pkg.mtime:
 					pkg_vardb.cpv_remove(pkg)
+					pkg_cache.pop(pkg, None)
 					aux_get_history.discard(pkg.cpv)
 					pkg = None
 
@@ -174,12 +181,17 @@ class FakeVartree(vartree):
 		real_vardb.flush_cache()
 
 	def _pkg(self, cpv):
-		root_config = self._root_config
-		real_vardb = root_config.trees["vartree"].dbapi
+		"""
+		The RootConfig instance that will become the Package.root_config
+		attribute can be overridden by the FakeVartree pkg_root_config
+		constructory argument, since we want to be consistent with the
+		depgraph._pkg() method which uses a specially optimized
+		RootConfig that has a FakeVartree instead of a real vartree.
+		"""
 		pkg = Package(cpv=cpv, built=True, installed=True,
 			metadata=zip(self._db_keys,
-			real_vardb.aux_get(cpv, self._db_keys)),
-			root_config=root_config,
+			self._real_vardb.aux_get(cpv, self._db_keys)),
+			root_config=self._pkg_root_config,
 			type_name="installed")
 
 		try:
@@ -188,6 +200,7 @@ class FakeVartree(vartree):
 			mycounter = 0
 			pkg.metadata["COUNTER"] = str(mycounter)
 
+		self._pkg_cache[pkg] = pkg
 		return pkg
 
 def grab_global_updates(portdb):

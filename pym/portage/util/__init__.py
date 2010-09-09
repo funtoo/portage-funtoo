@@ -8,12 +8,16 @@ __all__ = ['apply_permissions', 'apply_recursive_permissions',
 	'grabdict_package', 'grabfile', 'grabfile_package', 'grablines',
 	'initialize_logger', 'LazyItemsDict', 'map_dictlist_vals',
 	'new_protect_filename', 'normalize_path', 'pickle_read', 'stack_dictlist',
-	'stack_dicts', 'stack_lists', 'unique_array', 'varexpand', 'write_atomic',
-	'writedict', 'writemsg', 'writemsg_level', 'writemsg_stdout']
+	'stack_dicts', 'stack_lists', 'unique_array', 'unique_everseen', 'varexpand',
+	'write_atomic', 'writedict', 'writemsg', 'writemsg_level', 'writemsg_stdout']
 
 import codecs
 from copy import deepcopy
 import errno
+try:
+	from itertools import filterfalse
+except ImportError:
+	from itertools import ifilterfalse as filterfalse
 import logging
 import re
 import shlex
@@ -24,6 +28,7 @@ import traceback
 
 import portage
 portage.proxy.lazyimport.lazyimport(globals(),
+	'portage.dep:Atom',
 	'portage.util.listdir:_ignorecvs_dirs'
 )
 from portage import StringIO
@@ -36,7 +41,6 @@ from portage import _unicode_encode
 from portage import _unicode_decode
 from portage.exception import InvalidAtom, PortageException, FileNotFound, \
        OperationNotPermitted, PermissionDenied, ReadOnlyFileSystem
-from portage.dep import Atom
 from portage.localization import _
 from portage.proxy.objectproxy import ObjectProxy
 from portage.cache.mappings import UserDict
@@ -405,9 +409,6 @@ def getconfig(mycfg, tolerant=0, allow_sourcing=False, expand=True):
 		expand_map = {}
 	mykeys = {}
 	try:
-		# Workaround for avoiding a silent error in shlex that
-		# is triggered by a source statement at the end of the file without a
-		# trailing newline after the source statement
 		# NOTE: shex doesn't seem to support unicode objects
 		# (produces spurious \0 characters with python-2.6.2)
 		if sys.hexversion < 0x3000000:
@@ -417,8 +418,6 @@ def getconfig(mycfg, tolerant=0, allow_sourcing=False, expand=True):
 			content = open(_unicode_encode(mycfg,
 				encoding=_encodings['fs'], errors='strict'), mode='r',
 				encoding=_encodings['content'], errors='replace').read()
-		if content and content[-1] != '\n':
-			content += '\n'
 	except IOError as e:
 		if e.errno == PermissionDenied.errno:
 			raise PermissionDenied(mycfg)
@@ -427,6 +426,19 @@ def getconfig(mycfg, tolerant=0, allow_sourcing=False, expand=True):
 			if e.errno not in (errno.EISDIR,):
 				raise
 		return None
+
+	# Workaround for avoiding a silent error in shlex that is
+	# triggered by a source statement at the end of the file
+	# without a trailing newline after the source statement.
+	if content and content[-1] != '\n':
+		content += '\n'
+
+	# Warn about dos-style line endings since that prevents
+	# people from being able to source them with bash.
+	if '\r' in content:
+		writemsg(("!!! " + _("Please use dos2unix to convert line endings " + \
+			"in config file: '%s'") + "\n") % mycfg, noiselevel=-1)
+
 	try:
 		if tolerant:
 			shlex_class = _tolerant_shlex
@@ -717,6 +729,26 @@ def unique_array(s):
 		if x not in u:
 			u.append(x)
 	return u
+
+def unique_everseen(iterable, key=None):
+    """
+    List unique elements, preserving order. Remember all elements ever seen.
+    Taken from itertools documentation.
+    """
+    # unique_everseen('AAAABBBCCDAABBB') --> A B C D
+    # unique_everseen('ABBCcAD', str.lower) --> A B C D
+    seen = set()
+    seen_add = seen.add
+    if key is None:
+        for element in filterfalse(seen.__contains__, iterable):
+            seen_add(element)
+            yield element
+    else:
+        for element in iterable:
+            k = key(element)
+            if k not in seen:
+                seen_add(k)
+                yield element
 
 def apply_permissions(filename, uid=-1, gid=-1, mode=-1, mask=-1,
 	stat_cached=None, follow_links=True):
