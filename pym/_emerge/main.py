@@ -361,7 +361,7 @@ def post_emerge(root_config, myopts, mtimedb, retval):
 			if vdb_lock:
 				portage.locks.unlockdir(vdb_lock)
 
-	chk_updated_cfg_files(target_root, config_protect)
+	chk_updated_cfg_files(settings['EROOT'], config_protect)
 
 	display_news_notification(root_config, myopts)
 	if retval in (None, os.EX_OK) or (not "--pretend" in myopts):
@@ -1172,13 +1172,11 @@ def expand_set_arguments(myfiles, myaction, root_config):
 
 def repo_name_check(trees):
 	missing_repo_names = set()
-	for root, root_trees in trees.items():
-		if "porttree" in root_trees:
-			portdb = root_trees["porttree"].dbapi
-			missing_repo_names.update(portdb.porttrees)
-			repos = portdb.getRepositories()
-			for r in repos:
-				missing_repo_names.discard(portdb.getRepositoryPath(r))
+	for root_trees in trees.values():
+		porttree = root_trees.get("porttree")
+		if porttree:
+			portdb = porttree.dbapi
+			missing_repo_names.update(portdb.getMissingRepoNames())
 			if portdb.porttree_root in missing_repo_names and \
 				not os.path.exists(os.path.join(
 				portdb.porttree_root, "profiles")):
@@ -1197,6 +1195,7 @@ def repo_name_check(trees):
 		msg.extend(textwrap.wrap("NOTE: Each repo_name entry " + \
 			"should be a plain text file containing a unique " + \
 			"name for the repository on the first line.", 70))
+		msg.append("\n")
 		writemsg_level("".join("%s\n" % l for l in msg),
 			level=logging.WARNING, noiselevel=-1)
 
@@ -1208,7 +1207,7 @@ def repo_name_duplicate_check(trees):
 		if 'porttree' in root_trees:
 			portdb = root_trees['porttree'].dbapi
 			if portdb.settings.get('PORTAGE_REPO_DUPLICATE_WARN') != '0':
-				for repo_name, paths in portdb._ignored_repos:
+				for repo_name, paths in portdb.getIgnoredRepos():
 					k = (root, repo_name, portdb.getRepositoryPath(repo_name))
 					ignored_repos.setdefault(k, []).extend(paths)
 
@@ -1219,7 +1218,7 @@ def repo_name_duplicate_check(trees):
 		msg.append('  profiles/repo_name entries:')
 		msg.append('')
 		for k in sorted(ignored_repos):
-			msg.append('  %s overrides' % (k,))
+			msg.append('  %s overrides' % ", ".join(k))
 			for path in ignored_repos[k]:
 				msg.append('    %s' % (path,))
 			msg.append('')
@@ -1228,6 +1227,7 @@ def repo_name_duplicate_check(trees):
 			"to avoid having duplicates ignored. " + \
 			"Set PORTAGE_REPO_DUPLICATE_WARN=\"0\" in " + \
 			"/etc/make.conf if you would like to disable this warning."))
+		msg.append("\n")
 		writemsg_level(''.join('%s\n' % l for l in msg),
 			level=logging.WARNING, noiselevel=-1)
 
@@ -1308,7 +1308,7 @@ def emerge_main():
 
 	if myaction not in ('help', 'info', 'version') and \
 		myopts.get('--package-moves') != 'n' and \
-		_global_updates(trees, mtimedb["updates"]):
+		_global_updates(trees, mtimedb["updates"], quiet=("--quiet" in myopts)):
 		mtimedb.commit()
 		# Reload the whole config from scratch.
 		settings, trees, mtimedb = load_emerge_config(trees=trees)
@@ -1663,7 +1663,7 @@ def emerge_main():
 
 		for x in myfiles:
 			if x.startswith(SETPREFIX) or \
-				is_valid_package_atom(x):
+				is_valid_package_atom(x, allow_repo=True):
 				continue
 			if x[:1] == os.sep:
 				continue

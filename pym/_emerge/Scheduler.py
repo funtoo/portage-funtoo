@@ -19,7 +19,7 @@ import portage
 from portage import StringIO
 from portage import os
 from portage import _encodings
-from portage import _unicode_encode
+from portage import _unicode_decode, _unicode_encode
 from portage.cache.mappings import slot_dict_class
 from portage.const import LIBC_PACKAGE_ATOM
 from portage.elog.messages import eerror
@@ -154,7 +154,7 @@ class Scheduler(PollScheduler):
 		self._spinner = spinner
 		self._mtimedb = mtimedb
 		self._favorites = favorites
-		self._args_set = InternalPackageSet(favorites)
+		self._args_set = InternalPackageSet(favorites, allow_repo=True)
 		self._build_opts = self._build_opts_class()
 		for k in self._build_opts.__slots__:
 			setattr(self._build_opts, k, "--" + k.replace("_", "-") in myopts)
@@ -703,7 +703,7 @@ class Scheduler(PollScheduler):
 				'digest' not in pkgsettings.features:
 				continue
 			portdb = x.root_config.trees['porttree'].dbapi
-			ebuild_path = portdb.findname(x.cpv)
+			ebuild_path = portdb.findname(x.cpv, myrepo=x.repo)
 			if ebuild_path is None:
 				raise AssertionError("ebuild not found for '%s'" % x.cpv)
 			pkgsettings['O'] = os.path.dirname(ebuild_path)
@@ -780,7 +780,7 @@ class Scheduler(PollScheduler):
 			root_config = x.root_config
 			portdb = root_config.trees["porttree"].dbapi
 			quiet_config = quiet_settings[root_config.root]
-			ebuild_path = portdb.findname(x.cpv)
+			ebuild_path = portdb.findname(x.cpv, myrepo=x.repo)
 			if ebuild_path is None:
 				raise AssertionError("ebuild not found for '%s'" % x.cpv)
 			quiet_config["O"] = os.path.dirname(ebuild_path)
@@ -923,8 +923,12 @@ class Scheduler(PollScheduler):
 			if myopt not in bad_resume_opts:
 				if myarg is True:
 					mynewargv.append(myopt)
+				elif isinstance(myarg, list):
+					# arguments like --exclude that use 'append' action
+					for x in myarg:
+						mynewargv.append("%s=%s" % (myopt, x))
 				else:
-					mynewargv.append(myopt +"="+ str(myarg))
+					mynewargv.append("%s=%s" % (myopt, myarg))
 		# priority only needs to be adjusted on the first run
 		os.environ["PORTAGE_NICENESS"] = "0"
 		os.execv(mynewargv[0], mynewargv)
@@ -979,7 +983,7 @@ class Scheduler(PollScheduler):
 			else:
 				tree = "porttree"
 				portdb = root_config.trees["porttree"].dbapi
-				ebuild_path = portdb.findname(x.cpv)
+				ebuild_path = portdb.findname(x.cpv, myrepo=x.repo)
 				if ebuild_path is None:
 					raise AssertionError("ebuild not found for '%s'" % x.cpv)
 
@@ -1199,7 +1203,9 @@ class Scheduler(PollScheduler):
 				printer.eerror(line)
 			printer.eerror("")
 			for failed_pkg in self._failed_pkgs_all:
-				msg = " %s" % (colorize('INFORM', failed_pkg.pkg.__str__()),)
+				# Use _unicode_decode() to force unicode format string so
+				# that Package.__unicode__() is called in python2.
+				msg = _unicode_decode(" %s") % (failed_pkg.pkg,)
 				log_path = self._locate_failure_log(failed_pkg)
 				if log_path is not None:
 					msg += ", Log file:"

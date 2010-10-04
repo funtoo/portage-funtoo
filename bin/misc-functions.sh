@@ -144,7 +144,7 @@ prepcompress() {
 }
 
 install_qa_check() {
-	local f
+	local f x
 
 	cd "${D}" || die "cd failed"
 
@@ -153,6 +153,17 @@ install_qa_check() {
 	hasq "${EAPI}" 0 1 2 3 || prepcompress
 	ecompressdir --dequeue
 	ecompress --dequeue
+
+	f=
+	for x in etc/app-defaults usr/man usr/info usr/X11R6 usr/doc usr/locale ; do
+		[[ -d $D/$x ]] && f+="  $x\n"
+	done
+
+	if [[ -n $f ]] ; then
+		eqawarn "QA Notice: This ebuild installs into the following deprecated directories:"
+		eqawarn
+		eqawarn "$f"
+	fi
 
 	# Now we look for all world writable files.
 	local i
@@ -271,7 +282,7 @@ install_qa_check() {
 		fi
 
 		# Check for files built without respecting LDFLAGS
-		if [[ "${LDFLAGS}" == *--hash-style=gnu* ]] && [[ "${PN}" != *-bin ]] ; then
+		if [[ "${LDFLAGS}" == *,--hash-style=gnu* ]] && [[ "${PN}" != *-bin ]] ; then
 			qa_var="QA_DT_HASH_${ARCH/-/_}"
 			eval "[[ -n \${!qa_var} ]] && QA_DT_HASH=(\"\${${qa_var}[@]}\")"
 			f=$(scanelf -qyRF '%k %p' -k .hash "${D}" | sed -e "s:\.hash ::")
@@ -517,7 +528,7 @@ install_qa_check() {
 	fi
 
 	# Verify that the libtool files don't contain bogus $D entries.
-	local abort=no gentoo_bug=no
+	local abort=no gentoo_bug=no always_overflow=no
 	for a in "${D}"usr/lib*/*.la ; do
 		s=${a##*/}
 		if grep -qs "${D}" "${a}" ; then
@@ -584,12 +595,28 @@ install_qa_check() {
 			# force C locale to work around slow unicode locales #160234
 			f=$(LC_ALL=C $grep_cmd "${m}" "${PORTAGE_LOG_FILE}")
 			if [[ -n ${f} ]] ; then
-				vecho -ne '\n'
-				eqawarn "QA Notice: Package has poor programming practices which may compile"
-				eqawarn "           fine but exhibit random runtime failures."
-				eqawarn "${f}"
-				vecho -ne '\n'
 				abort="yes"
+				# for now, don't make this fatal (see bug #337031)
+				#case "$m" in
+				#	": warning: call to .* will always overflow destination buffer$") always_overflow=yes ;;
+				#esac
+				if [[ $always_overflow = yes ]] ; then
+					eerror
+					eerror "QA Notice: Package has poor programming practices which may compile"
+					eerror "           fine but exhibit random runtime failures."
+					eerror
+					eerror "${f}"
+					eerror
+					eerror " Please file a bug about this at http://bugs.gentoo.org/"
+					eerror " with the maintaining herd of the package."
+					eerror
+				else
+					vecho -ne '\n'
+					eqawarn "QA Notice: Package has poor programming practices which may compile"
+					eqawarn "           fine but exhibit random runtime failures."
+					eqawarn "${f}"
+					vecho -ne '\n'
+				fi
 			fi
 		done
 		local cat_cmd=cat
@@ -630,7 +657,7 @@ install_qa_check() {
 
 		fi
 		if [[ ${abort} == "yes" ]] ; then
-			if [[ ${gentoo_bug} == "yes" ]] ; then
+			if [[ $gentoo_bug = yes || $always_overflow = yes ]] ; then
 				die "install aborted due to" \
 					"poor programming practices shown above"
 			else
@@ -850,7 +877,7 @@ dyn_package() {
 	# for $PKGDIR and/or $PKGDIR/All.
 	export SANDBOX_ON="0"
 	[ -z "${PORTAGE_BINPKG_TMPFILE}" ] && \
-		PORTAGE_BINPKG_TMPFILE="${PKGDIR}/${CATEGORY}/${PF}.tbz2"
+		die "PORTAGE_BINPKG_TMPFILE is unset"
 	mkdir -p "${PORTAGE_BINPKG_TMPFILE%/*}" || die "mkdir failed"
 	tar $tar_options -cf - $PORTAGE_BINPKG_TAR_OPTS -C "${D}" . | \
 		$PORTAGE_BZIP2_COMMAND -c > "$PORTAGE_BINPKG_TMPFILE"

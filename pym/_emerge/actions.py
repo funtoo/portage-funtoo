@@ -73,6 +73,10 @@ def action_build(settings, trees, mtimedb,
 	if '--usepkgonly' not in myopts:
 		old_tree_timestamp_warn(settings['PORTDIR'], settings)
 
+	# It's best for config updates in /etc/portage to be processed
+	# before we get here, so warn if they're not (bug #267103).
+	chk_updated_cfg_files(settings['EROOT'], ['/etc/portage'])
+
 	# validate the state of the resume data
 	# so that we can make assumptions later.
 	for k in ("resume", "resume_backup"):
@@ -617,33 +621,18 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 	root_config = trees[myroot]["root_config"]
 	psets = root_config.setconfig.psets
 	deselect = myopts.get('--deselect') != 'n'
-
-	required_set_stack = ["world"]
 	required_sets = {}
-	set_args = []
+	required_sets['world'] = psets['world']
 
-	# Recursively create InternalPackageSet instances for world
-	# and any sets nested within it.
-	while required_set_stack:
-		s = required_set_stack.pop()
-		if s in required_sets:
-			continue
-		pset = psets.get(s)
-		if pset is not None:
-			required_sets[s] = InternalPackageSet(
-				initial_atoms=pset.getAtoms())
-			for n in pset.getNonAtoms():
-				if n.startswith(SETPREFIX):
-					required_set_stack.append(n[len(SETPREFIX):])
-
-	# When removing packages, use a temporary version of world 'selected'
-	# set which excludes packages that are intended to be eligible for
-	# removal.
-	selected_set = required_sets["selected"]
+	# When removing packages, a temporary version of the world 'selected'
+	# set may be used which excludes packages that are intended to be
+	# eligible for removal.
+	selected_set = psets['selected']
+	required_sets['selected'] = selected_set
 	protected_set = InternalPackageSet()
 	protected_set_name = '____depclean_protected_set____'
 	required_sets[protected_set_name] = protected_set
-	system_set = required_sets.get("system")
+	system_set = psets["system"]
 
 	if not system_set or not selected_set:
 
@@ -676,13 +665,18 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 		if args_set:
 
 			if deselect:
-				selected_set.clear()
+				# Start with an empty set.
+				selected_set = InternalPackageSet()
+				required_sets['selected'] = selected_set
+				# Pull in any sets nested within the selected set.
+				selected_set.update(psets['selected'].getNonAtoms())
 
 			# Pull in everything that's installed but not matched
 			# by an argument atom since we don't want to clean any
 			# package if something depends on it.
 			for pkg in vardb:
-				spinner.update()
+				if spinner:
+					spinner.update()
 
 				try:
 					if args_set.findAtomForPackage(pkg) is None:
@@ -698,7 +692,11 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 	elif action == "prune":
 
 		if deselect:
-			selected_set.clear()
+			# Start with an empty set.
+			selected_set = InternalPackageSet()
+			required_sets['selected'] = selected_set
+			# Pull in any sets nested within the selected set.
+			selected_set.update(psets['selected'].getNonAtoms())
 
 		# Pull in everything that's installed since we don't
 		# to prune a package if something depends on it.
@@ -744,6 +742,23 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 				protected_set.add("=" + pkg.cpv)
 				continue
 
+	if resolver._frozen_config.excluded_pkgs:
+		excluded_set = resolver._frozen_config.excluded_pkgs
+		required_sets['__excluded__'] = InternalPackageSet()
+
+		for pkg in vardb:
+			if spinner:
+				spinner.update()
+
+			try:
+				if excluded_set.findAtomForPackage(pkg):
+					required_sets['__excluded__'].add("=" + pkg.cpv)
+			except portage.exception.InvalidDependString as e:
+				show_invalid_depstring_notice(pkg,
+					pkg.metadata["PROVIDE"], str(e))
+				del e
+				required_sets['__excluded__'].add("=" + pkg.cpv)
+
 	success = resolver._complete_graph(required_sets={myroot:required_sets})
 	writemsg_level("\b\b... done!\n")
 
@@ -764,6 +779,12 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 			return False
 
 		if unresolvable and not allow_missing_deps:
+
+			if "--debug" in myopts:
+				writemsg("\ndigraph:\n\n", noiselevel=-1)
+				resolver._dynamic_config.digraph.debug_print()
+				writemsg("\n", noiselevel=-1)
+
 			prefix = bad(" * ")
 			msg = []
 			msg.append("Dependencies could not be completely resolved due to")
@@ -828,6 +849,11 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 			return -1
 
 	def create_cleanlist():
+
+		if "--debug" in myopts:
+			writemsg("\ndigraph:\n\n", noiselevel=-1)
+			graph.debug_print()
+			writemsg("\n", noiselevel=-1)
 
 		# Never display the special internal protected_set.
 		for node in graph:
@@ -1329,6 +1355,11 @@ def action_info(settings, trees, myopts, myfiles):
 
 	libtool_vers = ",".join(trees["/"]["vartree"].dbapi.match("sys-devel/libtool"))
 
+	repos = portdb.settings.repositories
+	writemsg_stdout("Repositories:\n\n")
+	for repo in repos:
+		writemsg_stdout(repo.info_string())
+
 	if "--verbose" in myopts:
 		myvars = list(settings)
 	else:
@@ -1503,6 +1534,7 @@ def action_info(settings, trees, myopts, myfiles):
 					f not in use_expand_flags:
 					use_disabled['USE'].append(f)
 
+			flag_displays = []
 			for varname in var_order:
 				if varname in use_expand_hidden:
 					continue
@@ -1515,8 +1547,11 @@ def action_info(settings, trees, myopts, myfiles):
 					flags.sort(key=UseFlagDisplay.sort_combined)
 				else:
 					flags.sort(key=UseFlagDisplay.sort_separated)
-				print('%s="%s"' % (varname, ' '.join(str(f) for f in flags)), end=' ')
-			print()
+				# Use _unicode_decode() to force unicode format string so
+				# that UseFlagDisplay.__unicode__() is called in python2.
+				flag_displays.append('%s="%s"' % (varname,
+					' '.join(_unicode_decode("%s") % (f,) for f in flags)))
+			writemsg_stdout('%s\n' % ' '.join(flag_displays), noiselevel=-1)
 			if pkg_type == "installed":
 				for myvar in mydesiredvars:
 					if metadata[myvar].split() != settings.get(myvar, '').split():
@@ -1532,7 +1567,7 @@ def action_info(settings, trees, myopts, myfiles):
 			if pkg_type == "installed":
 				ebuildpath = vardb.findname(pkg.cpv)
 			elif pkg_type == "ebuild":
-				ebuildpath = portdb.findname(pkg.cpv)
+				ebuildpath = portdb.findname(pkg.cpv, pkg.repo)
 			elif pkg_type == "binary":
 				tbz2_file = bindb.bintree.getname(pkg.cpv)
 				ebuild_file_name = pkg.cpv.split("/")[1] + ".ebuild"
@@ -2165,7 +2200,10 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 				except portage.exception.AlarmSignal:
 					# timed out
 					print('timed out')
-					if mypids and os.waitpid(mypids[0], os.WNOHANG) == (0,0):
+					# With waitpid and WNOHANG, only check the
+					# first element of the tuple since the second
+					# element may vary (bug #337465).
+					if mypids and os.waitpid(mypids[0], os.WNOHANG)[0] == 0:
 						os.kill(mypids[0], signal.SIGTERM)
 						os.waitpid(mypids[0], 0)
 					# This is the same code rsync uses for timeout.
@@ -2325,7 +2363,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		action_metadata(settings, portdb, myopts, porttrees=[myportdir])
 
 	if myopts.get('--package-moves') != 'n' and \
-		_global_updates(trees, mtimedb["updates"]):
+		_global_updates(trees, mtimedb["updates"], quiet=("--quiet" in myopts)):
 		mtimedb.commit()
 		# Reload the whole config from scratch.
 		settings, trees, mtimedb = load_emerge_config(trees=trees)
@@ -2339,7 +2377,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		trees[settings["ROOT"]]["vartree"].dbapi.match(
 		portage.const.PORTAGE_PACKAGE_ATOM))
 
-	chk_updated_cfg_files("/",
+	chk_updated_cfg_files(settings["EROOT"],
 		portage.util.shlex_split(settings.get("CONFIG_PROTECT", "")))
 
 	if myaction != "metadata":
@@ -2809,7 +2847,8 @@ def load_emerge_config(trees=None):
 	QueryCommand._db = trees
 	return settings, trees, mtimedb
 
-def chk_updated_cfg_files(target_root, config_protect):
+def chk_updated_cfg_files(eroot, config_protect):
+	target_root = eroot
 	result = list(
 		portage.util.find_updated_config_files(target_root, config_protect))
 

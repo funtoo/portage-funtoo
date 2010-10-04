@@ -2,6 +2,7 @@
 # Distributed under the terms of the GNU General Public License v2
 
 import gzip
+import sys
 import tempfile
 
 from _emerge.BinpkgEnvExtractor import BinpkgEnvExtractor
@@ -64,12 +65,19 @@ class EbuildPhase(CompositeTask):
 					maint_str = "<invalid metadata.xml>"
 
 			msg = []
-			msg.append("CPV:  %s" % self.settings.mycpv)
-			msg.append("REPO: %s" % self.settings['PORTAGE_REPO_NAME'])
+			msg.append("Package:    %s" % self.settings.mycpv)
+			if self.settings.get('PORTAGE_REPO_NAME'):
+				msg.append("Repository: %s" % self.settings['PORTAGE_REPO_NAME'])
 			if maint_str:
 				msg.append("Maintainer: %s" % maint_str)
 			msg.append("USE:  %s" % use)
 			self._elog('einfo', msg)
+
+		if self.phase == 'package':
+			if 'PORTAGE_BINPKG_TMPFILE' not in self.settings:
+				self.settings['PORTAGE_BINPKG_TMPFILE'] = \
+					os.path.join(self.settings['PKGDIR'],
+					self.settings['CATEGORY'], self.settings['PF']) + '.tbz2'
 
 		if self.phase == 'prerm':
 			env_extractor = BinpkgEnvExtractor(background=self.background,
@@ -98,8 +106,14 @@ class EbuildPhase(CompositeTask):
 		if self.phase in ("clean", "cleanrm"):
 			logfile = None
 
+		fd_pipes = None
+		if not self.background and self.phase == 'nofetch':
+			# All the pkg_nofetch output goes to stderr since
+			# it's considered to be an error message.
+			fd_pipes = {1 : sys.stderr.fileno()}
+
 		ebuild_process = EbuildProcess(actionmap=self.actionmap,
-			background=self.background, logfile=logfile,
+			background=self.background, fd_pipes=fd_pipes, logfile=logfile,
 			phase=self.phase, scheduler=self.scheduler,
 			settings=self.settings)
 

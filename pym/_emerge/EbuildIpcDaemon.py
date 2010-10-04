@@ -29,28 +29,30 @@ class EbuildIpcDaemon(FifoIpcDaemon):
 	__slots__ = ('commands',)
 
 	def _input_handler(self, fd, event):
-
+		# Read the whole pickle in a single atomic read() call.
+		data = None
 		if event & PollConstants.POLLIN:
+			# For maximum portability, use os.read() here since
+			# array.fromfile() and file.read() are both known to
+			# erroneously return an empty string from this
+			# non-blocking fifo stream on FreeBSD (bug #337465).
+			try:
+				data = os.read(fd, self._bufsize)
+			except OSError as e:
+				if e.errno != errno.EAGAIN:
+					raise
+				# Assume that another event will be generated
+				# if there's any relevant data.
 
-			# Read the whole pickle in a single read() call since
-			# this stream is in non-blocking mode and pickle.load()
-			# has been known to raise the following exception when
-			# reading from a non-blocking stream:
-			#
-			#   File "/usr/lib64/python2.6/pickle.py", line 1370, in load
-			#     return Unpickler(file).load()
-			#   File "/usr/lib64/python2.6/pickle.py", line 858, in load
-			#     dispatch[key](self)
-			#   File "/usr/lib64/python2.6/pickle.py", line 1195, in load_setitem
-			#     value = stack.pop()
-			# IndexError: pop from empty list
-
-			pickle_str = self._files.pipe_in.read()
+		if data:
 
 			try:
-				obj = pickle.loads(pickle_str)
-			except (EnvironmentError, EOFError, ValueError,
-				pickle.UnpicklingError):
+				obj = pickle.loads(data)
+			except SystemExit:
+				raise
+			except Exception:
+				# The pickle module can raise practically
+				# any exception when given corrupt data.
 				pass
 			else:
 				cmd_key = obj[0]
@@ -77,15 +79,8 @@ class EbuildIpcDaemon(FifoIpcDaemon):
 					reply_hook()
 
 	def _send_reply(self, reply):
-		output_fd = os.open(self.output_fifo, os.O_WRONLY|os.O_NONBLOCK)
-
 		# File streams are in unbuffered mode since we do atomic
 		# read and write of whole pickles.
-		output_file = os.fdopen(output_fd, 'wb', 0)
-
-		# Write the whole pickle in a single atomic write() call,
-		# since the reader is in non-blocking mode and we want
-		# it to get the whole pickle at once.
+		output_file = open(self.output_fifo, 'wb', 0)
 		output_file.write(pickle.dumps(reply))
-		output_file.flush()
 		output_file.close()
