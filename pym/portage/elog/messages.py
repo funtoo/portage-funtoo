@@ -121,11 +121,26 @@ def _elog_base(level, msg, phase="other", key=None, color=None, out=None):
 
 	#raise NotImplementedError()
 
-def collect_messages():
+def collect_messages(key=None, phasefilter=None):
 	global _msgbuffer
 
-	rValue = _msgbuffer
-	_reset_buffer()
+	if key is None:
+		rValue = _msgbuffer
+		_reset_buffer()
+	else:
+		rValue = {}
+		if key in _msgbuffer:
+			if phasefilter is None:
+				rValue[key] = _msgbuffer.pop(key)
+			else:
+				rValue[key] = {}
+				for phase in phasefilter:
+					try:
+						rValue[key][phase] = _msgbuffer[key].pop(phase)
+					except KeyError:
+						pass
+				if not _msgbuffer[key]:
+					del _msgbuffer[key]
 	return rValue
 
 def _reset_buffer():

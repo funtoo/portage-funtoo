@@ -759,7 +759,8 @@ class portdbapi(dbapi):
 
 	def freeze(self):
 		for x in "bestmatch-visible", "cp-list", "list-visible", "match-all", \
-			"match-visible", "minimum-all", "minimum-visible":
+			"match-all-cpv-only", "match-visible", "minimum-all", \
+			"minimum-visible":
 			self.xcache[x]={}
 		self.frozen=1
 
@@ -782,7 +783,28 @@ class portdbapi(dbapi):
 			mydep = dep_expand(origdep, mydb=self, settings=self.settings)
 			mykey = mydep.cp
 
-		if level == "list-visible":
+		if level == "match-all-cpv-only":
+			# match *all* packages, only against the cpv, in order
+			# to bypass unnecessary cache access for things like IUSE
+			# and SLOT.
+			myval = None
+			mytree = None
+			if mydep.repo is not None:
+				mytree = self.treemap.get(mydep.repo)
+				if mytree is None:
+					myval = []
+
+			if myval is None:
+				if mydep == mykey:
+					# Share cache with match-all/cp_list
+					# when the result is the same.
+					level = "match-all"
+					myval = self.cp_list(mykey, mytree=mytree)
+				else:
+					myval = match_from_list(mydep,
+						self.cp_list(mykey, mytree=mytree))
+
+		elif level == "list-visible":
 			#a list of all visible packages, not called directly (just by xmatch())
 			#myval = self.visible(self.cp_list(mykey))
 

@@ -19,6 +19,19 @@ from portage import _encodings
 
 _repo_name_sub_re = re.compile(r'[^\w-]')
 
+def _gen_valid_repo(name):
+	"""
+	Substitute hyphen in place of characters that don't conform to PMS 3.1.5,
+	and strip hyphen from left side if necessary. This returns None if the
+	given name contains no valid characters.
+	"""
+	name = _repo_name_sub_re.sub(' ', name.strip())
+	name = '-'.join(name.split())
+	name = name.lstrip('-')
+	if not name:
+		name = None
+	return name
+
 class RepoConfig(object):
 	"""Stores config of one repository"""
 
@@ -67,9 +80,11 @@ class RepoConfig(object):
 
 		location = repo_opts.get('location')
 		self.user_location = location
-		if location is not None:
+		if location is not None and location.strip():
 			if os.path.isdir(location):
 				location = os.path.realpath(location)
+		else:
+			location = None
 		self.location = location
 
 		missing = True
@@ -78,17 +93,13 @@ class RepoConfig(object):
 			# We must ensure that the name conforms to PMS 3.1.5
 			# in order to avoid InvalidAtom exceptions when we
 			# use it to generate atoms.
-			name = _repo_name_sub_re.sub(' ', name.strip())
-			name = '-'.join(name.split())
-			name = name.lstrip('-')
+			name = _gen_valid_repo(name)
 			if not name:
 				# name only contains invalid characters
 				name = "x-" + os.path.basename(self.location)
-				name = _repo_name_sub_re.sub(' ', name.strip())
-				name = '-'.join(name.split())
-				name = name.lstrip('-')
+				name = _gen_valid_repo(name)
 				# If basename only contains whitespace then the
-				# end result is name = 'x'.
+				# end result is name = 'x-'.
 
 		elif name == "DEFAULT": 
 			missing = False
@@ -256,7 +267,9 @@ class RepoConfigLoader(object):
 		ignored_map = {}
 		ignored_location_map = {}
 
-		portdir = os.path.realpath(settings.get('PORTDIR', ''))
+		portdir = settings.get('PORTDIR', '')
+		if portdir and portdir.strip():
+			portdir = os.path.realpath(portdir)
 		portdir_overlay = settings.get('PORTDIR_OVERLAY', '')
 		parse(paths, prepos, ignored_map, ignored_location_map)
 		add_overlays(portdir, portdir_overlay, prepos, ignored_map, ignored_location_map)
@@ -366,7 +379,7 @@ class RepoConfigLoader(object):
 
 			if repo.eclass_overrides:
 				for other_repo_name in repo.eclass_overrides:
-					if other_repo_name in self.prepos:
+					if other_repo_name in self.treemap:
 						eclass_locations.append(self.get_location_for_name(other_repo_name))
 					else:
 						writemsg_level(_("Unavailable repository '%s' " \
@@ -451,6 +464,7 @@ class RepoConfigLoader(object):
 def load_repository_config(settings):
 	#~ repoconfigpaths = [os.path.join(settings.global_config_path, "repos.conf")]
 	repoconfigpaths = []
-	repoconfigpaths.append(os.path.join(settings["PORTAGE_CONFIGROOT"],
-		USER_CONFIG_PATH, "repos.conf"))
+	if settings.local_config:
+		repoconfigpaths.append(os.path.join(settings["PORTAGE_CONFIGROOT"],
+			USER_CONFIG_PATH, "repos.conf"))
 	return RepoConfigLoader(repoconfigpaths, settings)
