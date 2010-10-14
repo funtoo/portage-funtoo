@@ -23,7 +23,7 @@ ROOTPATH=${ROOTPATH##:}
 ROOTPATH=${ROOTPATH%%:}
 PREROOTPATH=${PREROOTPATH##:}
 PREROOTPATH=${PREROOTPATH%%:}
-PATH=$PORTAGE_BIN_PATH/ebuild-helpers:$PREROOTPATH${PREROOTPATH:+:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${ROOTPATH:+:}$ROOTPATH
+PATH=$PREROOTPATH${PREROOTPATH:+:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${ROOTPATH:+:}$ROOTPATH:$PORTAGE_BIN_PATH/ebuild-helpers
 export PATH
 
 # This is just a temporary workaround for portage-9999 users since
