@@ -27,7 +27,7 @@ class AsynchronousLock(AsynchronousTask):
 
 	__slots__ = ('path', 'scheduler',) + \
 		('_imp', '_force_async', '_force_dummy', '_force_process', \
-		'_force_thread')
+		'_force_thread', '_waiting')
 
 	def _start(self):
 
@@ -55,12 +55,15 @@ class AsynchronousLock(AsynchronousTask):
 
 	def _imp_exit(self, imp):
 		# call exit listeners
-		self.wait()
+		if not self._waiting:
+			self.wait()
 
 	def _wait(self):
 		if self.returncode is not None:
 			return self.returncode
-		self.returncode = self._imp._wait()
+		self._waiting = True
+		self.returncode = self._imp.wait()
+		self._waiting = False
 		return self.returncode
 
 	def unlock(self):
@@ -84,8 +87,8 @@ class _LockThread(AbstractPollTask):
 	(before the start() method returns).
 	"""
 
-	__slots__ = ('lock_obj', 'path',) + \
-		('_files', '_force_dummy',
+	__slots__ = ('path',) + \
+		('_files', '_force_dummy', '_lock_obj',
 		'_thread', '_reg_id',)
 
 	def _start(self):
@@ -106,7 +109,7 @@ class _LockThread(AbstractPollTask):
 		self._thread.start()
 
 	def _run_lock(self):
-		self.lock_obj = lockfile(self.path, wantnewlockfile=True)
+		self._lock_obj = lockfile(self.path, wantnewlockfile=True)
 		self._files['pipe_write'].write(b'\0')
 
 	def _output_handler(self, f, event):
@@ -124,10 +127,12 @@ class _LockThread(AbstractPollTask):
 		return self.returncode
 
 	def unlock(self):
-		if self.lock_obj is None:
+		if self._lock_obj is None:
 			raise AssertionError('not locked')
-		unlockfile(self.lock_obj)
-		self.lock_obj = None
+		if self.returncode is None:
+			raise AssertionError('lock not acquired yet')
+		unlockfile(self._lock_obj)
+		self._lock_obj = None
 
 	def _unregister(self):
 		self._registered = False
@@ -217,6 +222,8 @@ class _LockProcess(AbstractPollTask):
 	def unlock(self):
 		if self._proc is None:
 			raise AssertionError('not locked')
+		if self.returncode is None:
+			raise AssertionError('lock not acquired yet')
 		self._files['pipe_out'].write(b'\0')
 		self._files['pipe_out'].close()
 		self._files = None

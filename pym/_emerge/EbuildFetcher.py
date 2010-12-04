@@ -1,6 +1,8 @@
 # Copyright 1999-2010 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
+import traceback
+
 from _emerge.SpawnProcess import SpawnProcess
 import sys
 import portage
@@ -46,6 +48,8 @@ class EbuildFetcher(SpawnProcess):
 
 		settings = self.config_pool.allocate()
 		settings.setcpv(self.pkg)
+		portage.doebuild_environment(ebuild_path, 'fetch',
+			settings=settings, db=portdb)
 
 		if self.prefetch and \
 			self._prefetch_size_ok(uri_map, settings, ebuild_path):
@@ -93,10 +97,17 @@ class EbuildFetcher(SpawnProcess):
 			not in ('yes', 'true')
 
 		rval = 1
-		if fetch(self._uri_map, self._settings, fetchonly=self.fetchonly):
-			rval = os.EX_OK
-
-		os._exit(rval)
+		try:
+			if fetch(self._uri_map, self._settings, fetchonly=self.fetchonly):
+				rval = os.EX_OK
+		except SystemExit:
+			raise
+		except:
+			traceback.print_exc()
+		finally:
+			# Call os._exit() from finally block, in order to suppress any
+			# finally blocks from earlier in the call stack. See bug #345289.
+			os._exit(rval)
 
 	def _get_uri_map(self, portdb, ebuild_path):
 		"""
@@ -154,7 +165,9 @@ class EbuildFetcher(SpawnProcess):
 			# When the output only goes to a log file,
 			# there's no point in creating a pty.
 			return os.pipe()
-		stdout_pipe = fd_pipes.get(1)
+		stdout_pipe = None
+		if not self.background:
+			stdout_pipe = fd_pipes.get(1)
 		got_pty, master_fd, slave_fd = \
 			_create_pty_or_pipe(copy_term_size=stdout_pipe)
 		return (master_fd, slave_fd)

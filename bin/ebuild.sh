@@ -78,9 +78,6 @@ source "${PORTAGE_BIN_PATH}/isolated-functions.sh"  &>/dev/null
 
 [[ $PORTAGE_QUIET != "" ]] && export PORTAGE_QUIET
 
-# the sandbox is disabled by default except when overridden in the relevant stages
-export SANDBOX_ON="0"
-
 # sandbox support functions; defined prior to profile.bashrc srcing, since the profile might need to add a default exception (/usr/lib64/conftest fex)
 _sb_append_var() {
 	local _v=$1 ; shift
@@ -106,12 +103,15 @@ if [[ -w $T ]] ; then
 	export TEMP=$T
 	export TMP=$T
 	export TMPDIR=$T
-else
+elif [[ $SANDBOX_ON = 1 ]] ; then
 	for x in TEMP TMP TMPDIR ; do
 		[[ -n ${!x} ]] && addwrite "${!x}"
 	done
 	unset x
 fi
+
+# the sandbox is disabled by default except when overridden in the relevant stages
+export SANDBOX_ON=0
 
 lchown() {
 	chown -h "$@"
@@ -188,11 +188,8 @@ has_version() {
 	fi
 	local retval=$?
 	case "${retval}" in
-		0)
-			return 0
-			;;
-		1)
-			return 1
+		0|1)
+			return ${retval}
 			;;
 		*)
 			die "unexpected portageq exit code: ${retval}"
@@ -230,11 +227,8 @@ best_version() {
 	fi
 	local retval=$?
 	case "${retval}" in
-		0)
-			return 0
-			;;
-		1)
-			return 1
+		0|1)
+			return ${retval}
 			;;
 		*)
 			die "unexpected portageq exit code: ${retval}"
@@ -1273,36 +1267,31 @@ dyn_help() {
 debug-print() {
 	# if $T isn't defined, we're in dep calculation mode and
 	# shouldn't do anything
-	[ ! -d "$T" ] && return 0
+	[[ $EBUILD_PHASE = depend || ! -d ${T} || ${#} -eq 0 ]] && return 0
 
-	while [ "$1" ]; do
+	if [[ ${ECLASS_DEBUG_OUTPUT} == on ]]; then
+		printf 'debug: %s\n' "${@}" >&2
+	elif [[ -n ${ECLASS_DEBUG_OUTPUT} ]]; then
+		printf 'debug: %s\n' "${@}" >> "${ECLASS_DEBUG_OUTPUT}"
+	fi
 
-		# extra user-configurable targets
-		if [ "$ECLASS_DEBUG_OUTPUT" == "on" ]; then
-			echo "debug: $1" >&2
-		elif [ -n "$ECLASS_DEBUG_OUTPUT" ]; then
-			echo "debug: $1" >> $ECLASS_DEBUG_OUTPUT
-		fi
-
+	if [[ -w $T ]] ; then
 		# default target
-		echo "$1" 2>/dev/null >> "${T}/eclass-debug.log"
+		printf '%s\n' "${@}" >> "${T}/eclass-debug.log"
 		# let the portage user own/write to this file
+		chgrp portage "${T}/eclass-debug.log" &>/dev/null
 		chmod g+w "${T}/eclass-debug.log" &>/dev/null
-
-		shift
-	done
+	fi
 }
 
 # The following 2 functions are debug-print() wrappers
 
 debug-print-function() {
-	str="$1: entering function"
-	shift
-	debug-print "$str, parameters: $*"
+	debug-print "${1}: entering function, parameters: ${*:2}"
 }
 
 debug-print-section() {
-	debug-print "now in section $*"
+	debug-print "now in section ${*}"
 }
 
 # Sources all eclasses in parameters
@@ -1689,7 +1678,8 @@ PORTAGE_READONLY_METADATA="DEFINED_PHASES DEPEND DESCRIPTION
 	PDEPEND PROVIDE RDEPEND RESTRICT SLOT SRC_URI"
 
 PORTAGE_READONLY_VARS="D EBUILD EBUILD_PHASE \
-	EBUILD_SH_ARGS ECLASSDIR EMERGE_FROM FILESDIR PM_EBUILD_HOOK_DIR \
+	EBUILD_SH_ARGS ECLASSDIR EMERGE_FROM FILESDIR MERGE_TYPE \
+	PM_EBUILD_HOOK_DIR \
 	PORTAGE_ACTUAL_DISTDIR PORTAGE_ARCHLIST PORTAGE_BASHRC  \
 	PORTAGE_BINPKG_FILE PORTAGE_BINPKG_TAR_OPTS PORTAGE_BINPKG_TMPFILE \
 	PORTAGE_BIN_PATH PORTAGE_BUILDDIR PORTAGE_BUNZIP2_COMMAND \
@@ -2075,7 +2065,7 @@ if ! hasq "$EBUILD_PHASE" clean cleanrm ; then
 		if [[ -n $QA_PREBUILT ]] ; then
 
 			# these ones support fnmatch patterns
-			QA_EXECSTAC+=" $QA_PREBUILT"
+			QA_EXECSTACK+=" $QA_PREBUILT"
 			QA_TEXTRELS+=" $QA_PREBUILT"
 			QA_WX_LOAD+=" $QA_PREBUILT"
 

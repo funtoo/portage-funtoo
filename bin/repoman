@@ -291,6 +291,7 @@ qahelp={
 	"inherit.autotools":"Ebuild inherits autotools but does not call eautomake, eautoconf or eautoreconf",
 	"inherit.deprecated":"Ebuild inherits a deprecated eclass",
 	"java.eclassesnotused":"With virtual/jdk in DEPEND you must inherit a java eclass",
+	"wxwidgets.eclassnotused":"Ebuild DEPENDs on x11-libs/wxGTK without inheriting wxwidgets.eclass",
 	"KEYWORDS.dropped":"Ebuilds that appear to have dropped KEYWORDS for some arch",
 	"KEYWORDS.missing":"Ebuilds that have a missing or empty KEYWORDS variable",
 	"KEYWORDS.stable":"Ebuilds that have been added directly with stable KEYWORDS",
@@ -404,6 +405,7 @@ qawarnings = set((
 "inherit.autotools",
 "inherit.deprecated",
 "java.eclassesnotused",
+"wxwidgets.eclassnotused",
 "metadata.warning",
 "virtual.versioned",
 "virtual.exists",
@@ -618,7 +620,7 @@ repolevel = len(reposplit)
 if options.mode == 'commit' and repolevel not in [1,2,3]:
 	print(red("***")+" Commit attempts *must* be from within a vcs co, category, or package directory.")
 	print(red("***")+" Attempting to commit from a packages files directory will be blocked for instance.")
-	print(red("***")+" This is intended behaviour, to ensure the manifest is recommited for a package.")
+	print(red("***")+" This is intended behaviour, to ensure the manifest is recommitted for a package.")
 	print(red("***"))
 	err("Unable to identify level we're commiting from for %s" % '/'.join(reposplit))
 
@@ -636,9 +638,19 @@ class ProfileDesc(object):
 	def __init__(self, arch, status, sub_path, tree_path):
 		self.arch = arch
 		self.status = status
-		self.sub_path = normalize_path(sub_path.lstrip(os.sep))
+		if sub_path:
+			sub_path = normalize_path(sub_path.lstrip(os.sep))
+		self.sub_path = sub_path
 		self.tree_path = tree_path
-		self.abs_path = os.path.join(tree_path, 'profiles', self.sub_path)
+		if tree_path:
+			self.abs_path = os.path.join(tree_path, 'profiles', self.sub_path)
+		else:
+			self.abs_path = tree_path
+
+	def __str__(self):
+		if self.sub_path:
+			return self.sub_path
+		return 'empty profile'
 
 profile_list = []
 valid_profile_types = frozenset(['dev', 'exp', 'stable'])
@@ -742,6 +754,11 @@ for prof in profile_list:
 		continue
 	profile_sub_paths.add(prof.sub_path)
 	profiles.setdefault(prof.arch, []).append(prof)
+
+# Use an empty profile for checking dependencies of
+# packages that have empty KEYWORDS.
+prof = ProfileDesc('**', 'stable', '', '')
+profiles.setdefault(prof.arch, []).append(prof)
 
 for x in repoman_settings.archlist():
 	if x[0] == "~":
@@ -1566,7 +1583,7 @@ for x in scanlist:
 		previous_keywords = slot_keywords.get(myaux["SLOT"])
 		if previous_keywords is None:
 			slot_keywords[myaux["SLOT"]] = set()
-		elif not live_ebuild:
+		elif ebuild_archs and not live_ebuild:
 			dropped_keywords = previous_keywords.difference(ebuild_archs)
 			if dropped_keywords:
 				stats["KEYWORDS.dropped"] += 1
@@ -1623,6 +1640,10 @@ for x in scanlist:
 				else:
 					arches.append([keyword, keyword, [keyword]])
 					allmasked = False
+			if not arches:
+				# Use an empty profile for checking dependencies of
+				# packages that have empty KEYWORDS.
+				arches.append(['**', '**', ['**']])
 
 		baddepsyntax = False
 		badlicsyntax = False
@@ -1631,6 +1652,7 @@ for x in scanlist:
 
 		inherited_java_eclass = "java-pkg-2" in inherited or \
 			"java-pkg-opt-2" in inherited
+		inherited_wxwidgets_eclass = "wxwidgets" in inherited
 		operator_tokens = set(["||", "(", ")"])
 		type_list, badsyntax = [], []
 		for mytype in ("DEPEND", "RDEPEND", "PDEPEND",
@@ -1667,6 +1689,14 @@ for x in scanlist:
 						atom.cp == "virtual/jdk":
 						stats['java.eclassesnotused'] += 1
 						fails['java.eclassesnotused'].append(relative_path)
+					elif mytype == "DEPEND" and \
+						not is_blocker and \
+						not inherited_wxwidgets_eclass and \
+						atom.cp == "x11-libs/wxGTK":
+						stats['wxwidgets.eclassnotused'] += 1
+						fails['wxwidgets.eclassnotused'].append(
+							relative_path + ": DEPENDs on x11-libs/wxGTK"
+							" without inheriting wxwidgets.eclass")
 					elif mytype in ("PDEPEND", "RDEPEND"):
 						if not is_blocker and \
 							atom.cp in suspect_rdepend:
@@ -1858,15 +1888,22 @@ for x in scanlist:
 				# just in case, prevent config.reset() from nuking these.
 				dep_settings.backup_changes("ACCEPT_KEYWORDS")
 
-				for prov_cp in provide_cps:
-					if prov_cp not in dep_settings.getvirtuals():
-						stats["virtual.unavailable"]+=1
-						fails["virtual.unavailable"].append("%s: %s(%s) %s" % \
-							(relative_path, keyword, prof.sub_path, prov_cp))
+				if prof.sub_path:
+					# old-style virtuals currently aren't
+					# resolvable with empty profile, since
+					# mappings from 'virtuals' files are
+					# unavailable (it would be expensive to
+					# search for PROVIDE in all ebuilds)
+					for prov_cp in provide_cps:
+						if prov_cp not in dep_settings.getvirtuals():
+							stats["virtual.unavailable"] += 1
+							fails["virtual.unavailable"].append(
+								"%s: %s(%s) %s" % (relative_path, keyword,
+								prof.sub_path, prov_cp))
 
 				if not baddepsyntax:
-					ismasked = os.path.join(catdir, y) not in \
-						portdb.xmatch("list-visible", x)
+					ismasked = not ebuild_archs or \
+						pkg.cpv not in portdb.xmatch("list-visible", pkg.cp)
 					if ismasked:
 						if not have_pmasked:
 							have_pmasked = bool(dep_settings._getMaskAtom(
@@ -1900,22 +1937,34 @@ for x in scanlist:
 
 						if success:
 							if atoms:
+
+								if not prof.sub_path:
+									# old-style virtuals currently aren't
+									# resolvable with empty profile, since
+									# 'virtuals' mappings are unavailable
+									# (it would be expensive to search
+									# for PROVIDE in all ebuilds)
+									atoms = [atom for atom in atoms if not \
+										(atom.cp.startswith('virtual/') and \
+										not portdb.cp_list(atom.cp))]
+
 								#we have some unsolvable deps
 								#remove ! deps, which always show up as unsatisfiable
 								atoms = [str(atom.unevaluated_atom) \
 									for atom in atoms if not atom.blocker]
+
 								#if we emptied out our list, continue:
 								if not atoms:
 									continue
 								stats[mykey]=stats[mykey]+1
 								fails[mykey].append("%s: %s(%s) %s" % \
 									(relative_path, keyword,
-									prof.sub_path, repr(atoms)))
+									prof, repr(atoms)))
 						else:
 							stats[mykey]=stats[mykey]+1
 							fails[mykey].append("%s: %s(%s) %s" % \
 								(relative_path, keyword,
-								prof.sub_path, repr(atoms)))
+								prof, repr(atoms)))
 
 	# Check for 'all unstable' or 'all masked' -- ACCEPT_KEYWORDS is stripped
 	# XXX -- Needs to be implemented in dep code. Can't determine ~arch nicely.
@@ -2044,7 +2093,7 @@ else:
 			myvcstree=portage.cvstree.getentries("./",recursive=1)
 			myunadded=portage.cvstree.findunadded(myvcstree,recursive=1,basedir="./")
 		except SystemExit as e:
-			raise  # TODO propogate this
+			raise  # TODO propagate this
 		except:
 			err("Error retrieving CVS tree; exiting.")
 	if vcs == "svn":
@@ -2052,7 +2101,7 @@ else:
 			svnstatus=os.popen("svn status --no-ignore").readlines()
 			myunadded = [ "./"+elem.rstrip().split()[1] for elem in svnstatus if elem.startswith("?") or elem.startswith("I") ]
 		except SystemExit as e:
-			raise  # TODO propogate this
+			raise  # TODO propagate this
 		except:
 			err("Error retrieving SVN info; exiting.")
 	if vcs == "git":
@@ -2065,7 +2114,7 @@ else:
 			bzrstatus=os.popen("bzr status -S .").readlines()
 			myunadded = [ "./"+elem.rstrip().split()[1].split('/')[-1:][0] for elem in bzrstatus if elem.startswith("?") or elem[0:2] == " D" ]
 		except SystemExit as e:
-			raise  # TODO propogate this
+			raise  # TODO propagate this
 		except:
 			err("Error retrieving bzr info; exiting.")
 	if vcs == "hg":
@@ -2151,21 +2200,13 @@ else:
 
 	if vcs == "svn":
 		svnstatus = os.popen("svn status").readlines()
-		mychanged = [ "./" + elem.split()[-1:][0] for elem in svnstatus if elem and elem[:1] in "MR" ]
-		mynew     = [ "./" + elem.split()[-1:][0] for elem in svnstatus if elem.startswith("A") ]
-		myremoved = [ "./" + elem.split()[-1:][0] for elem in svnstatus if elem.startswith("D") ]
-		# in contrast to CVS, SVN expands nothing by default.
-		# bin_blobs historically
-		# were just there to see what files need to be checked for
-		# keyword expansion, which is exactly what we do here, so
-		# slightly change the semantic meaning of "bin_blob"...  In the
-		# future we could store which keyword is expanded.
-		props = os.popen("svn propget -R svn:keywords").readlines()
+		mychanged = [ "./" + elem.split()[-1:][0] for elem in svnstatus if (elem[:1] in "MR" or elem[1:2] in "M")]
+		mynew     = [ "./" + elem.split()[-1:][0] for elem in svnstatus if elem.startswith("A")]
+		myremoved = [ "./" + elem.split()[-1:][0] for elem in svnstatus if elem.startswith("D")]
 
-		# For files with multiple props set, props are delimited by newlines,
-		# so exclude lines that don't contain " - " since each of those lines
-		# only a contain props for a file listed on a previous line.
-		expansion = set("./" + prop.split(" - ")[0] \
+		# Subversion expands keywords specified in svn:keywords properties.
+		props = os.popen("svn propget -R svn:keywords").readlines()
+		expansion = dict(("./" + prop.split(" - ")[0], prop.split(" - ")[1].split()) \
 			for prop in props if " - " in prop)
 
 	elif vcs == "git":
@@ -2226,10 +2267,21 @@ else:
 		print()
 	else:
 		if vcs == 'cvs':
-			headerstring = "'\$(Header|Id)"
-		elif vcs == 'svn':
-			headerstring = "'\$Id"
-		headerstring += ".*\$'"
+			headerstring = "'\$(Header|Id).*\$'"
+		elif vcs == "svn":
+			svn_keywords = dict((k.lower(), k) for k in [
+					"Rev",
+					"Revision",
+					"LastChangedRevision",
+					"Date",
+					"LastChangedDate",
+					"Author",
+					"LastChangedBy",
+					"URL",
+					"HeadURL",
+					"Id",
+					"Header",
+			])
 
 		for myfile in myupdates:
 
@@ -2242,14 +2294,22 @@ else:
 			elif vcs == "svn":
 				if myfile not in expansion:
 					continue
+				
+				# Subversion keywords are case-insensitive in svn:keywords properties, but case-sensitive in contents of files.
+				enabled_keywords = []
+				for k in expansion[myfile]:
+					keyword = svn_keywords.get(k.lower())
+					if keyword is not None:
+						enabled_keywords.append(keyword)
+
+				headerstring = "'\$(%s).*\$'" % "|".join(enabled_keywords)
 
 			myout = subprocess_getstatusoutput("egrep -q "+headerstring+" "+myfile)
 			if myout[0] == 0:
 				myheaders.append(myfile)
 
 		print("%s have headers that will change." % green(str(len(myheaders))))
-		print("* Files with headers will cause the " + \
-			"manifests to be made and recommited.")
+		print("* Files with headers will cause the manifests to be changed and committed separately.")
 
 	logging.info("myupdates: %s", myupdates)
 	logging.info("myheaders: %s", myheaders)

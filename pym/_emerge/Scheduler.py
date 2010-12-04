@@ -62,6 +62,9 @@ if sys.hexversion >= 0x3000000:
 
 class Scheduler(PollScheduler):
 
+	# max time between display status updates (milliseconds)
+	_max_display_latency = 3000
+
 	_opts_ignore_blockers = \
 		frozenset(["--buildpkgonly",
 		"--fetchonly", "--fetch-all-uri",
@@ -317,8 +320,50 @@ class Scheduler(PollScheduler):
 		gc.collect()
 
 	def _poll(self, timeout=None):
+
 		self._schedule()
-		PollScheduler._poll(self, timeout=timeout)
+
+		if timeout is None:
+			while True:
+				if not self._poll_event_handlers:
+					self._schedule()
+					if not self._poll_event_handlers:
+						raise StopIteration(
+							"timeout is None and there are no poll() event handlers")
+				previous_count = len(self._poll_event_queue)
+				PollScheduler._poll(self, timeout=self._max_display_latency)
+				self._status_display.display()
+				if previous_count != len(self._poll_event_queue):
+					break
+
+		elif timeout <= self._max_display_latency:
+			PollScheduler._poll(self, timeout=timeout)
+			if timeout == 0:
+				# The display is updated by _schedule() above, so it would be
+				# redundant to update it here when timeout is 0.
+				pass
+			else:
+				self._status_display.display()
+
+		else:
+			remaining_timeout = timeout
+			start_time = time.time()
+			while True:
+				previous_count = len(self._poll_event_queue)
+				PollScheduler._poll(self,
+					timeout=min(self._max_display_latency, remaining_timeout))
+				self._status_display.display()
+				if previous_count != len(self._poll_event_queue):
+					break
+				elapsed_time = time.time() - start_time
+				if elapsed_time < 0:
+					# The system clock has changed such that start_time
+					# is now in the future, so just assume that the
+					# timeout has already elapsed.
+					break
+				remaining_timeout = timeout - 1000 * elapsed_time
+				if remaining_timeout <= 0:
+					break
 
 	def _set_max_jobs(self, max_jobs):
 		self._max_jobs = max_jobs
@@ -961,6 +1006,7 @@ class Scheduler(PollScheduler):
 
 			root_config = x.root_config
 			settings = self.pkgsettings[root_config.root]
+			settings.setcpv(x)
 			tmpdir = tempfile.mkdtemp()
 			tmpdir_orig = settings["PORTAGE_TMPDIR"]
 			settings["PORTAGE_TMPDIR"] = tmpdir
@@ -979,6 +1025,7 @@ class Scheduler(PollScheduler):
 				os.makedirs(infloc)
 				portage.xpak.tbz2(tbz2_file).unpackinfo(infloc)
 				ebuild_path = os.path.join(infloc, x.pf + ".ebuild")
+				settings.configdict["pkg"]["MERGE_TYPE"] = "binary"
 
 			else:
 				tree = "porttree"
@@ -986,6 +1033,10 @@ class Scheduler(PollScheduler):
 				ebuild_path = portdb.findname(x.cpv, myrepo=x.repo)
 				if ebuild_path is None:
 					raise AssertionError("ebuild not found for '%s'" % x.cpv)
+				if self._build_opts.buildpkgonly:
+					settings.configdict["pkg"]["MERGE_TYPE"] = "buildonly"
+				else:
+					settings.configdict["pkg"]["MERGE_TYPE"] = "source"
 
 			portage.package.ebuild.doebuild.doebuild_environment(ebuild_path,
 				"pretend", settings=settings,
