@@ -2125,6 +2125,12 @@ ebuild_main() {
 	export EBUILD_MASTER_PID=$BASHPID
 	trap 'exit 1' SIGTERM
 
+	# auto-add xz-utils to DEPEND if we have a file that requires it.
+	if [ "${SRC_URI/\.xz/}" != "${SRC_URI}" ]
+	then
+		DEPEND="$DEPEND app-arch/xz-utils"
+	fi
+
 	if [[ $EBUILD_PHASE != depend ]] ; then
 		# Force configure scripts that automatically detect ccache to
 		# respect FEATURES="-ccache".
