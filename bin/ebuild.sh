@@ -2128,7 +2128,10 @@ ebuild_main() {
 	# auto-add xz-utils to DEPEND if we have a file that requires it.
 	if [ "${SRC_URI/\.xz/}" != "${SRC_URI}" ]
 	then
-		DEPEND="$DEPEND app-arch/xz-utils"
+		if [ "${DEPEND/app-arch\/xz-utils/}" = "${DEPEND}" ]
+		then
+			DEPEND="$DEPEND app-arch/xz-utils"
+		fi
 	fi
 
 	if [[ $EBUILD_PHASE != depend ]] ; then
