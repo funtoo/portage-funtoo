@@ -1910,8 +1910,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		global_config_path = os.path.join(settings['EPREFIX'],
 				GLOBAL_CONFIG_PATH.lstrip(os.sep))
 	if not myportdir:
-		sys.stderr.write("!!! PORTDIR is undefined.  " + \
-			"Is %s/make.globals missing?\n" % global_config_path)
+		sys.stderr.write("!!! PORTDIR is undefined. Is %s/make.globals missing?\n" % global_config_path)
 		sys.exit(1)
 	if myportdir[-1]=="/":
 		myportdir=myportdir[:-1]
@@ -1919,10 +1918,12 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		st = os.stat(myportdir)
 	except OSError:
 		st = None
-	if st is None:
-		print(">>>",myportdir,"not found, creating it.")
-		portage.util.ensure_dirs(myportdir, mode=0o755)
-		st = os.stat(myportdir)
+
+	# Need to fix later....
+	#if st is None:
+	#	print(">>>",myportdir,"not found, creating it.")
+	#	portage.util.ensure_dirs(myportdir, mode=0o755)
+	#	st = os.stat(myportdir)
 
 	usersync_uid = None
 	spawn_kwargs = {}
@@ -1963,7 +1964,8 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		return 1
 
 	vcs_dirs = frozenset([".git", ".svn", "CVS", ".hg"])
-	vcs_dirs = vcs_dirs.intersection(os.listdir(myportdir))
+	if os.path.exists(myportdir):
+		vcs_dirs = vcs_dirs.intersection(os.listdir(myportdir))
 
 	os.umask(0o022)
 	dosyncuri = syncuri
@@ -1971,39 +1973,37 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 	if myaction == "metadata":
 		print("skipping sync")
 		updatecache_flg = True
-	elif ".git" in vcs_dirs:
+#	elif ".git" in vcs_dirs:
 		# Update existing git repository, and ignore the syncuri. We are
 		# going to trust the user and assume that the user is in the branch
 		# that he/she wants updated. We'll let the user manage branches with
 		# git directly.
-		if portage.process.find_binary("git") is None:
-			msg = ["Command not found: git",
-			"Type \"emerge dev-util/git\" to enable git support."]
-			for l in msg:
-				writemsg_level("!!! %s\n" % l,
-					level=logging.ERROR, noiselevel=-1)
-			return 1
-		msg = ">>> Starting git pull in %s..." % myportdir
-		emergelog(xterm_titles, msg )
-		writemsg_level(msg + "\n")
-		exitcode = portage.process.spawn_bash("cd %s ; git pull --no-stat" % \
-			(portage._shell_quote(myportdir),), **spawn_kwargs)
-		if exitcode != os.EX_OK:
-			msg = "!!! git pull error in %s." % myportdir
-			emergelog(xterm_titles, msg)
-			writemsg_level(msg + "\n", level=logging.ERROR, noiselevel=-1)
-			return exitcode
-		msg = ">>> Git pull in %s successful" % myportdir
-		emergelog(xterm_titles, msg)
-		writemsg_level(msg + "\n")
-		exitcode = git_sync_timestamps(settings, myportdir)
-		if exitcode == os.EX_OK:
-			updatecache_flg = True
+#		if portage.process.find_binary("git") is None:
+#			msg = ["Command not found: git",
+#			"Type \"emerge dev-util/git\" to enable git support."]
+#			for l in msg:
+#				writemsg_level("!!! %s\n" % l,
+#					level=logging.ERROR, noiselevel=-1)
+#			return 1
+#		msg = ">>> Starting git pull in %s..." % myportdir
+#		emergelog(xterm_titles, msg )
+#		writemsg_level(msg + "\n")
+#		exitcode = portage.process.spawn_bash("cd %s ; git pull --no-stat" % \
+#			(portage._shell_quote(myportdir),), **spawn_kwargs)
+#		if exitcode != os.EX_OK:
+#			msg = "!!! git pull error in %s." % myportdir
+#			emergelog(xterm_titles, msg)
+#			writemsg_level(msg + "\n", level=logging.ERROR, noiselevel=-1)
+#			return exitcode
+#		msg = ">>> Git pull in %s successful" % myportdir
+#		emergelog(xterm_titles, msg)
+#		writemsg_level(msg + "\n")
+#		exitcode = git_sync_timestamps(settings, myportdir)
+#		if exitcode == os.EX_OK:
+#			updatecache_flg = True
 	elif syncuri[:8]=="rsync://" or syncuri[:6]=="ssh://":
 		for vcs_dir in vcs_dirs:
-			writemsg_level(("!!! %s appears to be under revision " + \
-				"control (contains %s).\n!!! Aborting rsync sync.\n") % \
-				(myportdir, vcs_dir), level=logging.ERROR, noiselevel=-1)
+			writemsg_level(("!!! %s appears to be under revision control (contains %s).\n!!! Aborting rsync sync.\n") % (myportdir, vcs_dir), level=logging.ERROR, noiselevel=-1)
 			return 1
 		if not os.path.exists("/usr/bin/rsync"):
 			print("!!! /usr/bin/rsync does not exist, so rsync support is disabled.")
@@ -2080,8 +2080,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 			rsync_opts.append("--checksum") # Force checksum on all files
 
 		# Real local timestamp file.
-		servertimestampfile = os.path.join(
-			myportdir, "metadata", "timestamp.chk")
+		servertimestampfile = os.path.join( myportdir, "metadata", "timestamp.chk")
 
 		content = portage.util.grabfile(servertimestampfile)
 		mytimestamp = 0
@@ -2419,6 +2418,37 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 			retval = portage.process.spawn_bash(
 				"cd %s; exec cvs -z0 -q update -dP" % \
 				(portage._shell_quote(myportdir),), **spawn_kwargs)
+			if retval != os.EX_OK:
+				sys.exit(retval)
+		dosyncuri = syncuri
+	elif ".git" in vcs_dirs or syncuri[:6]=="git://" or syncuri[:7] == "http://" or syncuri[:8] == "https://":
+		if portage.process.find_binary("git") is None:
+			msg = ["Command not found: git", "Type \"emerge dev-util/git\" to enable git support."]
+			for l in msg:
+				writemsg_level("!!! %s\n" % l, level=logging.ERROR, noiselevel=-1)
+			return 1
+		if not os.path.exists(myportdir+"/.git"):
+			#initial checkout
+			print(">>> Starting initial git clone with "+syncuri+"...")
+			try:
+				os.rmdir(myportdir)
+			except OSError as e:
+				if e.errno != errno.ENOENT:
+					sys.stderr.write( "!!! existing '%s' directory; exiting.\n" % myportdir)
+					sys.exit(1)
+				del e
+			cpath = portage._shell_quote(os.path.dirname(myportdir))
+			cdir = os.path.basename(myportdir)
+			if os.path.exists("%s/%s" % (cpath,cdir)):
+				print("!!! %s/%s already exists. Aborting clone." % (cpath,cdir))
+				sys.exit(1)
+			if portage.process.spawn_bash( "install -d %s; cd %s; exec git clone %s %s" % (cpath, cpath, portage._shell_quote(syncuri), cdir), **spawn_kwargs) != os.EX_OK:
+				print("!!! git clone error; exiting.")
+				sys.exit(1)
+		else:
+			#cvs update
+			print(">>> Starting git pull with "+syncuri+"...")
+			retval = portage.process.spawn_bash( "cd %s; exec git pull --no-stat" % (portage._shell_quote(myportdir),), **spawn_kwargs)
 			if retval != os.EX_OK:
 				sys.exit(retval)
 		dosyncuri = syncuri

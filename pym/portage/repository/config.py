@@ -255,8 +255,9 @@ class RepoConfigLoader(object):
 								base_priority -= 1
 
 					else:
-						writemsg(_("!!! Invalid PORTDIR_OVERLAY"
-							" (not a dir): '%s'\n") % ov, noiselevel=-1)
+						if os.path.exists(ov):
+							# if it just doesn't exist yet (such as initial sync of portage tree), don't print an error
+							writemsg(_("!!! Invalid PORTDIR_OVERLAY (not a dir): '%s'\n") % ov, noiselevel=-1)
 		def repo_priority(r):
 			"""
 			Key funtion for comparing repositories by priority.
@@ -349,7 +350,7 @@ class RepoConfigLoader(object):
 				prepos['DEFAULT'].main_repo = ignored_location_map[portdir]
 			else:
 				prepos['DEFAULT'].main_repo = None
-				writemsg(_("!!! main-repo not set in DEFAULT and PORTDIR is empty. \n"), noiselevel=-1)
+				writemsg(_("Portage repository is currently empty. \n"), noiselevel=-1)
 
 		self.prepos = prepos
 		self.prepos_order = prepos_order

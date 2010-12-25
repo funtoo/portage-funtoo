@@ -514,74 +514,74 @@ econf() {
 
 		# if the profile defines a location to install libs to aside from default, pass it on.
 		# if the ebuild passes in --libdir, they're responsible for the conf_libdir fun.
-		local CONF_LIBDIR LIBDIR_VAR="LIBDIR_${ABI}"
-		if [[ -n ${ABI} && -n ${!LIBDIR_VAR} ]] ; then
-			CONF_LIBDIR=${!LIBDIR_VAR}
-		fi
-		if [[ -n ${CONF_LIBDIR} ]] && ! hasgq --libdir=\* "$@" ; then
-			export CONF_PREFIX=$(hasg --exec-prefix=\* "$@")
-			[[ -z ${CONF_PREFIX} ]] && CONF_PREFIX=$(hasg --prefix=\* "$@")
-			: ${CONF_PREFIX:=/usr}
-			CONF_PREFIX=${CONF_PREFIX#*=}
-			[[ ${CONF_PREFIX} != /* ]] && CONF_PREFIX="/${CONF_PREFIX}"
-			[[ ${CONF_LIBDIR} != /* ]] && CONF_LIBDIR="/${CONF_LIBDIR}"
-			set -- --libdir="$(strip_duplicate_slashes ${CONF_PREFIX}${CONF_LIBDIR})" "$@"
-		fi
-
-		set -- \
-			--prefix=/usr \
-			${CBUILD:+--build=${CBUILD}} \
-			--host=${CHOST} \
-			${CTARGET:+--target=${CTARGET}} \
-			--mandir=/usr/share/man \
-			--infodir=/usr/share/info \
-			--datadir=/usr/share \
-			--sysconfdir=/etc \
-			--localstatedir=/var/lib \
-			"$@" \
-			${EXTRA_ECONF}
-		vecho "${ECONF_SOURCE}/configure" "$@"
-
-		if ! "${ECONF_SOURCE}/configure" "$@" ; then
-
-			if [ -s config.log ]; then
-				echo
-				echo "!!! Please attach the following file when seeking support:"
-				echo "!!! ${PWD}/config.log"
-			fi
-			die "econf failed"
-		fi
-	elif [ -f "${ECONF_SOURCE}/configure" ]; then
-		die "configure is not executable"
-	else
-		die "no configure script found"
+	local CONF_LIBDIR LIBDIR_VAR="LIBDIR_${ABI}"
+	if [[ -n ${ABI} && -n ${!LIBDIR_VAR} ]] ; then
+		CONF_LIBDIR=${!LIBDIR_VAR}
 	fi
+	if [[ -n ${CONF_LIBDIR} ]] && ! hasgq --libdir=\* "$@" ; then
+		export CONF_PREFIX=$(hasg --exec-prefix=\* "$@")
+		[[ -z ${CONF_PREFIX} ]] && CONF_PREFIX=$(hasg --prefix=\* "$@")
+		: ${CONF_PREFIX:=/usr}
+		CONF_PREFIX=${CONF_PREFIX#*=}
+		[[ ${CONF_PREFIX} != /* ]] && CONF_PREFIX="/${CONF_PREFIX}"
+		[[ ${CONF_LIBDIR} != /* ]] && CONF_LIBDIR="/${CONF_LIBDIR}"
+		set -- --libdir="$(strip_duplicate_slashes ${CONF_PREFIX}${CONF_LIBDIR})" "$@"
+	fi
+
+	set -- \
+		--prefix=/usr \
+		${CBUILD:+--build=${CBUILD}} \
+		--host=${CHOST} \
+		${CTARGET:+--target=${CTARGET}} \
+		--mandir=/usr/share/man \
+		--infodir=/usr/share/info \
+		--datadir=/usr/share \
+		--sysconfdir=/etc \
+		--localstatedir=/var/lib \
+		"$@" \
+		${EXTRA_ECONF}
+	vecho "${ECONF_SOURCE}/configure" "$@"
+
+	if ! "${ECONF_SOURCE}/configure" "$@" ; then
+
+		if [ -s config.log ]; then
+			echo
+			echo "!!! Please attach the following file when seeking support:"
+			echo "!!! ${PWD}/config.log"
+		fi
+		die "econf failed"
+	fi
+elif [ -f "${ECONF_SOURCE}/configure" ]; then
+	die "configure is not executable"
+else
+	die "no configure script found"
+fi
 }
 
 einstall() {
-	# CONF_PREFIX is only set if they didn't pass in libdir above.
-	local LOCAL_EXTRA_EINSTALL="${EXTRA_EINSTALL}"
-	LIBDIR_VAR="LIBDIR_${ABI}"
-	if [ -n "${ABI}" -a -n "${!LIBDIR_VAR}" ]; then
-		CONF_LIBDIR="${!LIBDIR_VAR}"
-	fi
-	unset LIBDIR_VAR
-	if [ -n "${CONF_LIBDIR}" ] && [ "${CONF_PREFIX:+set}" = set ]; then
-		EI_DESTLIBDIR="${D}/${CONF_PREFIX}/${CONF_LIBDIR}"
-		EI_DESTLIBDIR="$(strip_duplicate_slashes ${EI_DESTLIBDIR})"
-		LOCAL_EXTRA_EINSTALL="libdir=${EI_DESTLIBDIR} ${LOCAL_EXTRA_EINSTALL}"
-		unset EI_DESTLIBDIR
-	fi
+# CONF_PREFIX is only set if they didn't pass in libdir above.
+local LOCAL_EXTRA_EINSTALL="${EXTRA_EINSTALL}"
+LIBDIR_VAR="LIBDIR_${ABI}"
+if [ -n "${ABI}" -a -n "${!LIBDIR_VAR}" ]; then
+	CONF_LIBDIR="${!LIBDIR_VAR}"
+fi
+unset LIBDIR_VAR
+if [ -n "${CONF_LIBDIR}" ] && [ "${CONF_PREFIX:+set}" = set ]; then
+	EI_DESTLIBDIR="${D}/${CONF_PREFIX}/${CONF_LIBDIR}"
+	EI_DESTLIBDIR="$(strip_duplicate_slashes ${EI_DESTLIBDIR})"
+	LOCAL_EXTRA_EINSTALL="libdir=${EI_DESTLIBDIR} ${LOCAL_EXTRA_EINSTALL}"
+	unset EI_DESTLIBDIR
+fi
 
-	if [ -f ./[mM]akefile -o -f ./GNUmakefile ] ; then
-		if [ "${PORTAGE_DEBUG}" == "1" ]; then
-			${MAKE:-make} -n prefix="${D}usr" \
-				datadir="${D}usr/share" \
-				infodir="${D}usr/share/info" \
-				localstatedir="${D}var/lib" \
-				mandir="${D}usr/share/man" \
-				sysconfdir="${D}etc" \
-				${LOCAL_EXTRA_EINSTALL} \
+if [ -f ./[mM]akefile -o -f ./GNUmakefile ] ; then
+	if [ "${PORTAGE_DEBUG}" == "1" ]; then
+		${MAKE:-make} -n prefix="${D}usr" \
+			datadir="${D}usr/share" \
+			infodir="${D}usr/share/info" \
+			localstatedir="${D}var/lib" \
+			mandir="${D}usr/share/man" \
+			sysconfdir="${D}etc" \
+			${LOCAL_EXTRA_EINSTALL} \
 				${MAKEOPTS} ${EXTRA_EMAKE} -j1 \
 				"$@" install
 		fi
