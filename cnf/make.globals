@@ -17,9 +17,6 @@ CFLAGS=""
 CXXFLAGS=""
 LDFLAGS=""
 
-# Default rsync mirror
-#SYNC="git://github.com/funtoo/portage-mini-2010.git"
-
 # Default distfiles mirrors. This rotation has multiple hosts and is reliable.
 # Approved by the mirror-admin team.
 GENTOO_MIRRORS="http://distfiles.gentoo.org"
