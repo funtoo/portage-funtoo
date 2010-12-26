@@ -1958,8 +1958,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 
 	syncuri = settings.get("SYNC", "").strip()
 	if not syncuri:
-		writemsg_level("!!! SYNC is undefined. Is %s/make.globals missing?\n" % global_config_path,
-			noiselevel=-1, level=logging.ERROR)
+		writemsg_level("SYNC is undefined.\nPlease set SYNC to the remote location of the Portage repository.\n", noiselevel=-1, level=logging.ERROR)
 		return 1
 
 	vcs_dirs = frozenset([".git", ".svn", "CVS", ".hg"])
