@@ -1919,52 +1919,11 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 	except OSError:
 		st = None
 
-	# Need to fix later....
-	#if st is None:
-	#	print(">>>",myportdir,"not found, creating it.")
-	#	portage.util.ensure_dirs(myportdir, mode=0o755)
-	#	st = os.stat(myportdir)
-
-	usersync_uid = None
-	spawn_kwargs = {}
-	spawn_kwargs["env"] = settings.environ()
-	if 'usersync' in settings.features and \
-		portage.data.secpass >= 2 and \
-		(st.st_uid != os.getuid() and st.st_mode & 0o700 or \
-		st.st_gid != os.getgid() and st.st_mode & 0o070):
-		try:
-			homedir = pwd.getpwuid(st.st_uid).pw_dir
-		except KeyError:
-			pass
-		else:
-			# Drop privileges when syncing, in order to match
-			# existing uid/gid settings.
-			usersync_uid = st.st_uid
-			spawn_kwargs["uid"]    = st.st_uid
-			spawn_kwargs["gid"]    = st.st_gid
-			spawn_kwargs["groups"] = [st.st_gid]
-			spawn_kwargs["env"]["HOME"] = homedir
-			umask = 0o002
-			if not st.st_mode & 0o020:
-				umask = umask | 0o020
-			spawn_kwargs["umask"] = umask
-
-	if usersync_uid is not None:
-		# PORTAGE_TMPDIR is used below, so validate it and
-		# bail out if necessary.
-		rval = _check_temp_dir(settings)
-		if rval != os.EX_OK:
-			return rval
-
 	syncuri = settings.get("SYNC", "").strip()
 	if not syncuri:
 		writemsg_level("!!! SYNC is undefined. Is %s/make.globals missing?\n" % global_config_path,
 			noiselevel=-1, level=logging.ERROR)
 		return 1
-
-	vcs_dirs = frozenset([".git", ".svn", "CVS", ".hg"])
-	if os.path.exists(myportdir):
-		vcs_dirs = vcs_dirs.intersection(os.listdir(myportdir))
 
 	os.umask(0o022)
 	dosyncuri = syncuri

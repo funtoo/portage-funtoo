@@ -232,13 +232,6 @@ def help(myopts, havecolor=1):
 		for line in wrap(desc, desc_width):
 			print(desc_indent + line)
 		print()
-		print(desc_indent + green("NOTE:"))
-		desc = "The emerge-webrsync program will download the entire " + \
-			"portage tree as a tarball, which is much faster than emerge " + \
-			"--sync for first time syncs."
-		for line in wrap(desc, desc_width):
-			print(desc_indent + line)
-		print()
 		print("       "+green("--unmerge")+" ("+green("-C")+" short option)")
 		print("              "+turquoise("WARNING: This action can remove important packages!"))
 		print("              Removes all matching packages. This does no checking of")
