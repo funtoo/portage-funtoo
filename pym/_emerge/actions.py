@@ -1295,6 +1295,22 @@ class _info_pkgs_ver(object):
 		"""
 		return self.ver + self.repo_suffix + self.provide_suffix
 
+def headSHA1(tree):
+	print("Portage Tree: %s" % tree)
+	head = None
+	hfile = os.path.join(tree,".git/HEAD")
+	if os.path.exists(hfile):
+		infile = open(hfile,"r")
+		head = infile.readline().split()[1]
+		infile.close()
+		hfile2 = os.path.join(tree,".git")
+		hfile2 = os.path.join(hfile2,head)
+		if os.path.exists(hfile2):
+			infile = open(hfile2,"r")
+			head = infile.readline().split()[0]
+			infile.close()
+	print ("Portage HEAD:",head,hfile2)
+
 def action_info(settings, trees, myopts, myfiles):
 	print(getportageversion(settings["PORTDIR"], settings["ROOT"],
 		settings.profile_path, settings["CHOST"],
@@ -1307,14 +1323,7 @@ def action_info(settings, trees, myopts, myfiles):
 	print(header_width * "=")
 	print("System uname: "+platform.platform(aliased=1))
 
-	lastSync = portage.grabfile(os.path.join(
-		settings["PORTDIR"], "metadata", "timestamp.chk"))
-	print("Timestamp of tree:", end=' ')
-	if lastSync:
-		print(lastSync[0])
-	else:
-		print("Unknown")
-
+	headSHA1(settings["PORTDIR"])
 	output=subprocess_getstatusoutput("distcc --version")
 	if not output[0]:
 		print(str(output[1].split("\n",1)[0]), end=' ')
