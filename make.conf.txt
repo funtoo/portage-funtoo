@@ -502,31 +502,6 @@ emerge is running at. In other words, this will not set the nice level,
 it will increment it. For more information about nice levels and what 
 are acceptable ranges, see nice(1).
 
-PORTAGE_RSYNC_EXTRA_OPTS
-------------------------
-
-:suggest: --exclude=/etc/portage/rsync_exclude
-:valdesc: rsync options
-
-Additional rsync options to be used by emerge --sync.
-
-PORTAGE_RSYNC_OPTS
-------------------
-
-:default: --recursive --links --safe-links --perms --times --compress --force --whole-file --delete --delete-after --stats --timeout=180 --exclude=/distfiles --exclude=/local --exclude=/packages
-:valdesc: rsync options
-
-Default rsync options to be used by emerge --sync. **Don't change this unless
-you know exactly what you're doing!**
-
-PORTAGE_RSYNC_RETRIES
----------------------
-
-:default: -1
-:valdesc: integer
-
-The number of times rsync should retry on failed connections before giving up.
-
 PORTAGE_TMPDIR
 --------------
 
