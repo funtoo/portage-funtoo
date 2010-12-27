@@ -382,7 +382,7 @@ class RepoConfigLoader(object):
 						writemsg_level(_("Unavailable repository '%s' " \
 							"referenced by masters entry in '%s'\n") % \
 							(master_name, layout_filename),
-							level=logging.ERROR, noiselevel=-1)
+							level=logging.ERROR, noiselevel=0)
 					else:
 						master_repos.append(prepos[master_name])
 				repo.masters = tuple(master_repos)
