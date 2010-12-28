@@ -260,9 +260,45 @@ class config(object):
 			self._expand_map = copy.deepcopy(clone._expand_map)
 
 		else:
+			#Loading Repositories
+			self.repositories = load_repository_config(self)
+
+			#filling PORTDIR and PORTDIR_OVERLAY variable for compatibility
+			main_repo = self.repositories.mainRepo()
+			if main_repo is not None:
+				main_repo = main_repo.user_location
+				self["PORTDIR"] = main_repo
+				self.backup_changes("PORTDIR")
+			portdir_overlay = list(self.repositories.repoUserLocationList())
+			if self["PORTDIR"] in portdir_overlay:
+				portdir_overlay.remove(self["PORTDIR"])
+			self["PORTDIR_OVERLAY"] = " ".join(portdir_overlay)
+			self.backup_changes("PORTDIR_OVERLAY")
+
+			""" repoman controls PORTDIR_OVERLAY via the environment, so no
+			special cases are needed here."""
+
+			overlays = shlex_split(self.get('PORTDIR_OVERLAY', ''))
+			if overlays:
+				new_ov = []
+				for ov in overlays:
+					ov = normalize_path(ov)
+					if os.path.isdir(ov):
+						new_ov.append(ov)
+					else:
+						writemsg(_("!!! Invalid PORTDIR_OVERLAY (not a dir): '%s'\n") % ov, noiselevel=-1)
+				self["PORTDIR_OVERLAY"] = " ".join(new_ov)
+				self.backup_changes("PORTDIR_OVERLAY")
+
 			locations_manager = LocationsManager(config_root=config_root,
 				config_profile_path=config_profile_path, eprefix=eprefix,
 				local_config=local_config, target_root=target_root)
+
+			# Define portage tree location and overlay locations. Note that in Funtoo, this call must come prior to the profile
+			# initialization calls, since we support the ability for absolute profile paths in "parent" files to begin with "/"
+			# and be relative to the Portage tree or overlay:
+			
+			locations_manager.set_profile_dirs(self["PORTDIR"], self["PORTDIR_OVERLAY"])
 
 			eprefix = locations_manager.eprefix
 			config_root = locations_manager.config_root
@@ -472,43 +508,6 @@ class config(object):
 
 			self._ppropertiesdict = portage.dep.ExtendedAtomDict(dict)
 			self._penvdict = portage.dep.ExtendedAtomDict(dict)
-
-			#Loading Repositories
-			self.repositories = load_repository_config(self)
-
-			#filling PORTDIR and PORTDIR_OVERLAY variable for compatibility
-			main_repo = self.repositories.mainRepo()
-			if main_repo is not None:
-				main_repo = main_repo.user_location
-				self["PORTDIR"] = main_repo
-				self.backup_changes("PORTDIR")
-			portdir_overlay = list(self.repositories.repoUserLocationList())
-			if self["PORTDIR"] in portdir_overlay:
-				portdir_overlay.remove(self["PORTDIR"])
-			self["PORTDIR_OVERLAY"] = " ".join(portdir_overlay)
-			self.backup_changes("PORTDIR_OVERLAY")
-
-			""" repoman controls PORTDIR_OVERLAY via the environment, so no
-			special cases are needed here."""
-
-			overlays = shlex_split(self.get('PORTDIR_OVERLAY', ''))
-			if overlays:
-				new_ov = []
-				for ov in overlays:
-					ov = normalize_path(ov)
-					if os.path.isdir(ov):
-						new_ov.append(ov)
-					else:
-						writemsg(_("!!! Invalid PORTDIR_OVERLAY (not a dir): '%s'\n") % ov, noiselevel=-1)
-				self["PORTDIR_OVERLAY"] = " ".join(new_ov)
-				self.backup_changes("PORTDIR_OVERLAY")
-
-			# Define portage tree location and overlay locations. Note that in Funtoo, this call must come prior to the profile
-			# initialization calls, since we support the ability for absolute profile paths in "parent" files to begin with "/"
-			# and be relative to the Portage tree or overlay:
-			
-			locations_manager.set_profile_dirs(self["PORTDIR"], self["PORTDIR_OVERLAY"])
-			
 
 			#Read package.keywords and package.accept_keywords.
 			self._keywords_manager = KeywordsManager(self.profiles, abs_user_config, \
