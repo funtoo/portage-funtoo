@@ -499,12 +499,16 @@ class config(object):
 					if os.path.isdir(ov):
 						new_ov.append(ov)
 					else:
-						writemsg(_("!!! Invalid PORTDIR_OVERLAY"
-							" (not a dir): '%s'\n") % ov, noiselevel=-1)
+						writemsg(_("!!! Invalid PORTDIR_OVERLAY (not a dir): '%s'\n") % ov, noiselevel=-1)
 				self["PORTDIR_OVERLAY"] = " ".join(new_ov)
 				self.backup_changes("PORTDIR_OVERLAY")
 
-			locations_manager.set_port_dirs(self["PORTDIR"], self["PORTDIR_OVERLAY"])
+			# Define portage tree location and overlay locations. Note that in Funtoo, this call must come prior to the profile
+			# initialization calls, since we support the ability for absolute profile paths in "parent" files to begin with "/"
+			# and be relative to the Portage tree or overlay:
+			
+			locations_manager.set_profile_dirs(self["PORTDIR"], self["PORTDIR_OVERLAY"])
+			
 
 			#Read package.keywords and package.accept_keywords.
 			self._keywords_manager = KeywordsManager(self.profiles, abs_user_config, \

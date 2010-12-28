@@ -193,23 +193,20 @@ class LocationsManager(object):
 
 		self.global_config_path = os.path.join(self.eprefix, GLOBAL_CONFIG_PATH)
 
-	def set_port_dirs(self, portdir, portdir_overlay):
+	def set_profile_dirs(self, portdir, portdir_overlay):
 
-		# This method defines the location of the Portage tree (portdir) as well as initializes several variables
-		# related to master profiles defined in overlays.
+		# This method defines the location of the profile directories.
 
 		# we are passed the PORTDIR and PORTDIR_OVERLAY values as arguments:
 
-		self.portdir = portdir
-		self.portdir_overlay = portdir_overlay
-		if self.portdir_overlay is None:
-			self.portdir_overlay = ""
+		if portdir_overlay is None:
+			portdir_overlay = ""
 
 		self.overlay_profiles = []
 
 		# for each overlay listed in PORTDIR_OVERLAY:
 
-		for ov in shlex_split(self.portdir_overlay):
+		for ov in shlex_split(portdir_overlay):
 			ov = normalize_path(ov)
 			profiles_dir = os.path.join(ov, "profiles")
 
