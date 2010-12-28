@@ -520,8 +520,7 @@ class config(object):
 					self.configdict["conf"].get("USE", ""))
 
 			#Read license_groups and optionally license_groups and package.license from user config
-			self._license_manager = LicenseManager(locations_manager.profile_locations, \
-				abs_user_config, user_config=local_config)
+			self._license_manager = LicenseManager(locations_manager.profile_locations, abs_user_config, user_config=local_config)
 			#Extract '*/*' entries from package.license
 			self.configdict["conf"]["ACCEPT_LICENSE"] = \
 				self._license_manager.extract_global_changes( \
@@ -572,9 +571,10 @@ class config(object):
 				for k, v in penvdict.items():
 					self._penvdict.setdefault(k.cp, {})[k] = v
 
-			#getting categories from an external file now
-			self.categories = [grabfile(os.path.join(x, "categories")) \
-				for x in locations_manager.profile_and_user_locations]
+			# Get the master list of Portage categories by combining all the categories files defined in the main Portage
+			# tree, plus all overlays, plus the user-defined profile (/etc/portage/profile):
+			
+			self.categories = [grabfile(os.path.join(x, "categories")) for x in locations_manager.profile_and_user_locations]
 			category_re = dbapi._category_re
 			self.categories = tuple(sorted(
 				x for x in stack_lists(self.categories, incremental=1)
