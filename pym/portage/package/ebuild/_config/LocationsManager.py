@@ -32,54 +32,71 @@ class LocationsManager(object):
 		if self.config_root is None:
 			self.config_root = self.eprefix + os.sep
 
-		self.config_root = normalize_path(os.path.abspath(
-			self.config_root)).rstrip(os.path.sep) + os.path.sep
+		self.config_root = normalize_path(os.path.abspath(self.config_root)).rstrip(os.path.sep) + os.path.sep
 
-		self._check_var_directory("PORTAGE_CONFIGROOT", self.config_root)
+		# make sure config_root, ie. "/etc", is a directory. If not, complain to the user about the value of "PORTAGE_CONFIGROOT":
+
+		self._check_directory("PORTAGE_CONFIGROOT", self.config_root)
+
+		# set abs_user_config to "/etc/portage":
+
 		self.abs_user_config = os.path.join(self.config_root, USER_CONFIG_PATH)
 
 		if config_profile_path is None:
-			config_profile_path = \
-				os.path.join(self.config_root, PROFILE_PATH)
+			# if repoman didn't passing config_profile_path of "", then set the profile path ourselves...
+			config_profile_path = os.path.join(self.config_root, PROFILE_PATH)
+			# is /etc/make.profile a directory?:
 			if os.path.isdir(config_profile_path):
+				# yes - ok, use it. The "classic" approach.
 				self.profile_path = config_profile_path
 			else:
+				# no? look for /etc/portage/make.profile:
 				config_profile_path = \
 					os.path.join(self.abs_user_config, 'make.profile')
+				# is /etc/portage/make.profile a directory?
 				if os.path.isdir(config_profile_path):
+					# yes - ok, treat /etc/portage/make.profile as an alternative to traditional /etc/make.profile:
 					self.profile_path = config_profile_path
 				else:
+					# no - hrm. We don't have a profile directory then!
 					self.profile_path = None
 		else:
-			# NOTE: repoman may pass in an empty string
-			# here, in order to create an empty profile
-			# for checking dependencies of packages with
-			# empty KEYWORDS.
+			# NOTE: repoman may pass in an empty string here, in order to create an empty profile  for checking dependencies of packages with empty KEYWORDS.
 			self.profile_path = config_profile_path
 
+		# create a list of all our profiles - this recursively iterates through cascading profiles and makes a list of all  of 'em:
 
-		# The symlink might not exist or might not be a symlink.
 		self.profiles = []
+
+		# do we have a profile directory?:
 		if self.profile_path:
+			# yes - ok, try grabbing profiles:
 			try:
+				# this does the recursive heavy lifting of looking at "parent" files and creating a list of profiles in self.profiles:
 				self._addProfile(os.path.realpath(self.profile_path))
 			except ParseError as e:
+				# ugh - there was some error recursively parsing the profile...
 				writemsg(_("!!! Unable to parse profile: '%s'\n") % \
 					self.profile_path, noiselevel=-1)
 				writemsg("!!! ParseError: %s\n" % str(e), noiselevel=-1)
 				self.profiles = []
 
+		# we have a list of all our cascading profiles. Now we want to see if we have an /etc/portage/profile directory.
+
 		if self._user_config and self.profiles:
-			custom_prof = os.path.join(
-				self.config_root, CUSTOM_PROFILE_PATH)
+			# /etc/portage/profile:
+			custom_prof = os.path.join(self.config_root, CUSTOM_PROFILE_PATH)
 			if os.path.exists(custom_prof):
+				# /etc/portage/profile exists! so let's tag it at the end of our cascaded profiles then.
 				self.user_profile_dir = custom_prof
 				self.profiles.append(custom_prof)
 			del custom_prof
 
+		# ok, we now have a list of all our profiles - convert them from mutable list to immutable tuple. We're done:
+
 		self.profiles = tuple(self.profiles)
 
-	def _check_var_directory(self, varname, var):
+	def _check_directory(self, varname, var):
 		if not os.path.isdir(var):
 			writemsg(_("!!! Error: %s='%s' is not a directory. "
 				"Please correct this.\n") % (varname, var),
@@ -132,7 +149,7 @@ class LocationsManager(object):
 			self.target_root)).rstrip(os.path.sep) + os.path.sep
 
 		ensure_dirs(self.target_root)
-		self._check_var_directory("ROOT", self.target_root)
+		self._check_directory("ROOT", self.target_root)
 
 		self.eroot = self.target_root.rstrip(os.sep) + self.eprefix + os.sep
 
