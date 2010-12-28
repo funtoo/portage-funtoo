@@ -271,20 +271,23 @@ class config(object):
 			self.user_profile_dir = locations_manager.user_profile_dir
 			abs_user_config = locations_manager.abs_user_config
 
-			make_conf = getconfig(
-				os.path.join(config_root, MAKE_CONF_FILE),
-				tolerant=tolerant, allow_sourcing=True) or {}
+			# get make.conf values from /etc/make.conf:
 
-			make_conf.update(getconfig(
-				os.path.join(abs_user_config, 'make.conf'),
-				tolerant=tolerant, allow_sourcing=True,
-				expand=make_conf) or {})
+			make_conf = getconfig( os.path.join(config_root, MAKE_CONF_FILE), tolerant=tolerant, allow_sourcing=True) or {}
 
-			# Allow ROOT setting to come from make.conf if it's not overridden
-			# by the constructor argument (from the calling environment).
+			# modify these values using any settings from /etc/profile/make.conf:
+
+			make_conf.update(getconfig( os.path.join(abs_user_config, 'make.conf'), tolerant=tolerant, allow_sourcing=True, expand=make_conf) or {})
+
+			# set target_root using the setting from our make.conf, if it is defined:
+
 			locations_manager.set_root_override(make_conf.get("ROOT"))
+
 			target_root = locations_manager.target_root
 			eroot = locations_manager.eroot
+
+			# grab global_confi_path from locations manager:
+
 			self.global_config_path = locations_manager.global_config_path
 
 			if config_incrementals is None:
@@ -296,8 +299,7 @@ class config(object):
 
 			self.module_priority    = ("user", "default")
 			self.modules            = {}
-			modules_loader = KeyValuePairFileLoader(
-				os.path.join(config_root, MODULES_FILE_PATH), None, None)
+			modules_loader = KeyValuePairFileLoader( os.path.join(config_root, MODULES_FILE_PATH), None, None)
 			modules_dict, modules_errors = modules_loader.load()
 			self.modules["user"] = modules_dict
 			if self.modules["user"] is None:
@@ -306,6 +308,17 @@ class config(object):
 				"portdbapi.metadbmodule": "portage.cache.metadata.database",
 				"portdbapi.auxdbmodule":  "portage.cache.flat_hash.database",
 			}
+
+
+	# CONFIGLIST START
+	# CONFIGDICT START
+
+	# Requires: self.profiles (for iterating through "make.defaults")
+	# Requires: self.global_config_path
+
+	# Note: "make.defaults" hard-coded
+	# Note: "make.conf" hard-coded
+	# Note: "make.globals" hard-coded
 
 			self.configlist=[]
 
@@ -318,20 +331,6 @@ class config(object):
 
 			self.configlist.append({})
 			self.configdict["pkginternal"] = self.configlist[-1]
-
-			self.packages_list = [grabfile_package(os.path.join(x, "packages"), verify_eapi=True) for x in self.profiles]
-			self.packages      = tuple(stack_lists(self.packages_list, incremental=1))
-			del self.packages_list
-			#self.packages = grab_stacked("packages", self.profiles, grabfile, incremental_lines=1)
-
-			# revmaskdict
-			self.prevmaskdict={}
-			for x in self.packages:
-				# Negative atoms are filtered by the above stack_lists() call.
-				if not isinstance(x, Atom):
-					x = Atom(x.lstrip('*'))
-				self.prevmaskdict.setdefault(x.cp, []).append(x)
-
 			# The expand_map is used for variable substitution
 			# in getconfig() calls, and the getconfig() calls
 			# update expand_map with the value of each variable
@@ -350,8 +349,7 @@ class config(object):
 			expand_map = {}
 			self._expand_map = expand_map
 
-			env_d = getconfig(os.path.join(eroot, "etc", "profile.env"),
-				expand=expand_map)
+			env_d = getconfig(os.path.join(eroot, "etc", "profile.env"), expand=expand_map)
 			# env_d will be None if profile.env doesn't exist.
 			if env_d:
 				self.configdict["env.d"].update(env_d)
@@ -380,10 +378,11 @@ class config(object):
 				del k, v
 
 			self.configdict["env"] = LazyItemsDict(self.backupenv)
+	
+	# "globals" - GLOBALS START
 
 			for x in (self.global_config_path,):
-				self.mygcfg = getconfig(os.path.join(x, "make.globals"),
-					expand=expand_map)
+				self.mygcfg = getconfig(os.path.join(x, "make.globals"), expand=expand_map)
 				if self.mygcfg:
 					break
 
@@ -395,6 +394,10 @@ class config(object):
 
 			self.configlist.append(self.mygcfg)
 			self.configdict["globals"]=self.configlist[-1]
+
+	# GLOBALS STOP
+
+	# "conf" - MAKE.DEFAULTS / MAKE.CONF COMBINED START
 
 			self.make_defaults_use = []
 			self.mygcfg = {}
@@ -409,19 +412,13 @@ class config(object):
 			self.configlist.append(self.mygcfg)
 			self.configdict["defaults"]=self.configlist[-1]
 
-			self.mygcfg = getconfig(
-				os.path.join(config_root, MAKE_CONF_FILE),
-				tolerant=tolerant, allow_sourcing=True,
-				expand=expand_map) or {}
+			self.mygcfg = getconfig( os.path.join(config_root, MAKE_CONF_FILE), tolerant=tolerant, allow_sourcing=True, expand=expand_map) or {}
+			self.mygcfg.update(getconfig( os.path.join(abs_user_config, 'make.conf'), tolerant=tolerant, allow_sourcing=True, expand=expand_map) or {})
 
-			self.mygcfg.update(getconfig(
-				os.path.join(abs_user_config, 'make.conf'),
-				tolerant=tolerant, allow_sourcing=True,
-				expand=expand_map) or {})
+		# PROFILE_ONLY_VARIABLES START
 
 			# Don't allow the user to override certain variables in make.conf
-			profile_only_variables = self.configdict["defaults"].get(
-				"PROFILE_ONLY_VARIABLES", "").split()
+			profile_only_variables = self.configdict["defaults"].get("PROFILE_ONLY_VARIABLES", "").split()
 			profile_only_variables = stack_lists([profile_only_variables])
 			non_user_variables = set()
 			non_user_variables.update(profile_only_variables)
@@ -432,8 +429,12 @@ class config(object):
 			for k in profile_only_variables:
 				self.mygcfg.pop(k, None)
 
+		# PROFILE_ONLY_VARIBLES STOP
+
 			self.configlist.append(self.mygcfg)
 			self.configdict["conf"]=self.configlist[-1]
+
+	# MAKE.DEFAULTS / MAKE.CONF COMBINED STOP
 
 			self.configlist.append(LazyItemsDict())
 			self.configdict["pkg"]=self.configlist[-1]
@@ -449,6 +450,31 @@ class config(object):
 			# make lookuplist for loading package.*
 			self.lookuplist=self.configlist[:]
 			self.lookuplist.reverse()
+
+
+	# SELF.CONFIGLIST STOP
+	# SELF.CONFIGDICT STOP
+
+
+	# SELF.PACKAGES START
+	# SELF.PREVMASKDICT START
+
+			self.packages_list = [grabfile_package(os.path.join(x, "packages"), verify_eapi=True) for x in self.profiles]
+			self.packages      = tuple(stack_lists(self.packages_list, incremental=1))
+			del self.packages_list
+			#self.packages = grab_stacked("packages", self.profiles, grabfile, incremental_lines=1)
+
+			# revmaskdict
+			self.prevmaskdict={}
+			for x in self.packages:
+				# Negative atoms are filtered by the above stack_lists() call.
+				if not isinstance(x, Atom):
+					x = Atom(x.lstrip('*'))
+				self.prevmaskdict.setdefault(x.cp, []).append(x)
+
+
+	# SELF.PACKAGES STOP
+	# SELF.PREVMASKDICT STOP
 
 			# Blacklist vars that could interfere with portage internals.
 			for blacklisted in self._env_blacklist:
@@ -473,7 +499,7 @@ class config(object):
 			self._ppropertiesdict = portage.dep.ExtendedAtomDict(dict)
 			self._penvdict = portage.dep.ExtendedAtomDict(dict)
 
-			#Loading Repositories
+			#Loading Repositories 
 			self.repositories = load_repository_config(self)
 
 			#filling PORTDIR and PORTDIR_OVERLAY variable for compatibility

@@ -159,7 +159,7 @@ class LocationsManager(object):
 		# This method is used to set the self.target_root, self.eroot and self.global_config_path variables.
 		# These are used by pym/portage/package/ebuild/config.py to define these settings for portage.
 
-		# root_override is the value of ROOT that comes from the environment.
+		# root_override is the value of ROOT that comes from /etc/make.conf. 
 		
 		# if target_root isn't defined, and root_override is specified, then use root_override as self.target_root:
 
