@@ -169,7 +169,7 @@ class RepoConfig(object):
 
 class RepoConfigLoader(object):
 	"""Loads and store config of several repositories, loaded from PORTDIR_OVERLAY or repos.conf"""
-	def __init__(self, paths, settings):
+	def __init__(self, paths, repo_vars):
 		"""Load config from files in paths"""
 		def parse(paths, prepos, ignored_map, ignored_location_map):
 			"""Parse files in paths to load config"""
@@ -205,6 +205,7 @@ class RepoConfigLoader(object):
 			if portdir:
 				portdir = normalize_path(portdir)
 				overlays.append(portdir)
+
 			port_ov = [normalize_path(i) for i in shlex_split(portdir_overlay)]
 			overlays.extend(port_ov)
 			default_repo_opts = {}
@@ -217,6 +218,7 @@ class RepoConfigLoader(object):
 			if prepos['DEFAULT'].masters is not None:
 				default_repo_opts['masters'] = \
 					' '.join(prepos['DEFAULT'].masters)
+		
 			if overlays:
 				#overlay priority is negative because we want them to be looked before any other repo
 				base_priority = -1
@@ -274,15 +276,14 @@ class RepoConfigLoader(object):
 		ignored_map = {}
 		ignored_location_map = {}
 
-		portdir = settings.get('PORTDIR', '')
+		portdir = repo_vars["PORTDIR"]
 		if portdir and portdir.strip():
 			portdir = os.path.realpath(portdir)
-		portdir_overlay = settings.get('PORTDIR_OVERLAY', '')
+		portdir_overlay = repo_vars["PORTDIR_OVERLAY"]
 		parse(paths, prepos, ignored_map, ignored_location_map)
 		add_overlays(portdir, portdir_overlay, prepos, ignored_map, ignored_location_map)
 		ignored_repos = tuple((repo_name, tuple(paths)) \
 			for repo_name, paths in ignored_map.items())
-
 		self.missing_repo_names = frozenset(repo.location for repo in prepos.values() if repo.missing_repo_name)
 
 		#Parse layout.conf and read masters key.
@@ -336,10 +337,10 @@ class RepoConfigLoader(object):
 
 		if portdir in location_map:
 			portdir_repo = prepos[location_map[portdir]]
-			portdir_sync = settings.get('SYNC', '')
+			#portdir_sync = settings.get('SYNC', '')
 			#if SYNC variable is set and not overwritten by repos.conf
-			if portdir_sync and not portdir_repo.sync:
-				portdir_repo.sync = portdir_sync
+			#if portdir_sync and not portdir_repo.sync:
+			#	portdir_repo.sync = portdir_sync
 
 		if prepos['DEFAULT'].main_repo is None or \
 			prepos['DEFAULT'].main_repo not in prepos:
@@ -480,9 +481,9 @@ class RepoConfigLoader(object):
 		for repo_name in self.prepos_order:
 			yield self.prepos[repo_name]
 
-def load_repository_config(settings):
+def load_repository_config(repo_vars):
 	#~ repoconfigpaths = [os.path.join(settings.global_config_path, "repos.conf")]
-	repoconfigpaths = []
-	if settings.local_config:
-		repoconfigpaths.append(os.path.join(settings["PORTAGE_CONFIGROOT"], USER_CONFIG_PATH, "repos.conf"))
-	return RepoConfigLoader(repoconfigpaths, settings)
+	repoconfigpaths = [ "/etc" ]
+	#if settings.local_config:
+	#	repoconfigpaths.append(os.path.join(settings["PORTAGE_CONFIGROOT"], USER_CONFIG_PATH, "repos.conf"))
+	return RepoConfigLoader(repoconfigpaths, repo_vars)
