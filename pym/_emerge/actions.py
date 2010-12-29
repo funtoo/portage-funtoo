@@ -1955,12 +1955,12 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		if os.path.exists("%s/%s" % (cpath,cdir)):
 			print("!!! %s/%s already exists. Aborting clone." % (cpath,cdir))
 			sys.exit(1)
-		if portage.process.spawn_bash( "install -d %s; cd %s; exec git clone %s %s" % (cpath, cpath, portage._shell_quote(syncuri), cdir), **spawn_kwargs) != os.EX_OK:
+		if portage.process.spawn_bash( "install -d %s; cd %s; exec git clone %s %s" % (cpath, cpath, portage._shell_quote(syncuri), cdir)) != os.EX_OK:
 			print("!!! git clone error; exiting.")
 			sys.exit(1)
 	else:
 		print(">>> Starting git pull with "+syncuri+"...")
-		exitcode = portage.process.spawn_bash( "cd %s; exec git pull --no-stat" % (portage._shell_quote(myportdir),), **spawn_kwargs)
+		exitcode = portage.process.spawn_bash( "cd %s; exec git pull --no-stat" % (portage._shell_quote(myportdir),))
 		if exitcode != os.EX_OK:
 			msg = "!!! git pull error in %s." % myportdir
 			emergelog(xterm_titles, msg)
