@@ -135,8 +135,7 @@ class config(object):
 			writemsg(_("!!! Error: %s='%s' is not a directory. " "Please correct this.\n") % (varname, var), noiselevel=-1)
 			raise DirectoryNotFound(var)
 
-	def _addProfile(self, currentPath):
-
+	def _addProfile(self, rootPath, currentPath):
 		# _addProfile implements the "cascading" profile support in Portage by recursively iterating through profiles and
 		# creating a list of all referenced profiles in self.profiles.
 
@@ -147,7 +146,6 @@ class config(object):
 		
 		parentsFile = os.path.join(currentPath, "parent")
 		eapi_file = os.path.join(currentPath, "eapi")
-
 	
 		# if eapi file exists, try to open it. If IOError, just continue. But if we open it and the EAPI listed isn't supported,
 		# then throw an error:
@@ -175,12 +173,16 @@ class config(object):
 			# For each line in the parents file, use the line as a relative path to modify "currentPath", our current path:
 
 			for parentPath in parents:
-				parentPath = normalize_path(os.path.join(currentPath, parentPath))
+				if parentPath[0] == "/":
+					# an absolute path in "parents" file means "relative to $PORTDIR/profiles" (ie. rootPath, an argument).	
+					parentPath = rootPath + parentPath
+				else:
+					parentPath = normalize_path(os.path.join(currentPath, parentPath))
 
 				# if this path exists, recursively add this profile (recursive call):
 
 				if os.path.exists(parentPath):
-					self._addProfile(parentPath)
+					self._addProfile(rootPath, parentPath)
 				else:
 					raise ParseError( _("Parent '%s' not found: '%s'") % (parentPath, parentsFile))
 
@@ -440,6 +442,8 @@ class config(object):
 	# Finally, if "/etc/portage/profile" exists, tack it on the end of self.profiles so the user-defined profile has the ability to modify any settings
 	# that were defined in the profile.
 
+			profile_root = "%s/profiles" % self.repositories.mainRepoLocation()
+
 			if config_profile_path is None:
 				# if repoman didn't passing config_profile_path of "", then set the profile path ourselves...
 				config_profile_path = os.path.join(config_root, PROFILE_PATH)
@@ -469,7 +473,7 @@ class config(object):
 			# yes - ok, try grabbing profiles:
 				try:
 					# this does the recursive heavy lifting of looking at "parent" files and creating a list of profiles in self.profiles:
-					self._addProfile(os.path.realpath(self.profile_path))
+					self._addProfile(profile_root,os.path.realpath(self.profile_path))
 				except ParseError as e:
 					# ugh - there was some error recursively parsing the profile...
 					writemsg(_("!!! Unable to parse profile: '%s'\n") % self.profile_path, noiselevel=-1)
@@ -638,7 +642,7 @@ class config(object):
 
 	# GLOBALS STOP
 
-	# "defaults" - MAKE.DEFAULTS / MAKE.CONF COMBINED START
+	# "defaults" - MAKE.DEFAULTS BEGIN
 
 			self.make_defaults_use = []
 			self.mygcfg = {}
@@ -1117,6 +1121,7 @@ class config(object):
 
 		abs_profile_path = os.path.join(self["PORTAGE_CONFIGROOT"],
 			PROFILE_PATH)
+
 		if (not self.profile_path or \
 			not os.path.exists(os.path.join(self.profile_path, "parent"))) and \
 			os.path.exists(os.path.join(self["PORTDIR"], "profiles")):
