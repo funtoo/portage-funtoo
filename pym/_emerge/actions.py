@@ -1924,6 +1924,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 	except OSError:
 		st = None
 
+	syncuri = settings.get("SYNC", "").strip()
 	os.umask(0o022)
 	updatecache_flg = False
 	if myaction == "metadata":
@@ -1936,7 +1937,6 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		return 1
 	updatecache_flg = True
 	if not os.path.exists(myportdir+"/.git"):
-		syncuri = settings.get("SYNC", "").strip()
 		if not syncuri:
 			writemsg_level("SYNC is undefined.\nPlease set SYNC to the remote location of the Portage repository.\n", noiselevel=-1, level=logging.ERROR)
 			return 1
@@ -1957,7 +1957,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 			print("!!! git clone error; exiting.")
 			sys.exit(1)
 	else:
-		print(">>> Starting git pull with "+syncuri+"...")
+		print(">>> Starting git pull...")
 		exitcode = portage.process.spawn_bash( "cd %s; exec git pull --no-stat" % (portage._shell_quote(myportdir),))
 		if exitcode != os.EX_OK:
 			msg = "!!! git pull error in %s." % myportdir
