@@ -382,7 +382,10 @@ class config(object):
 			
 			repo_vars = {}
 			for repo_var in [ "PORTDIR", "PORTDIR_OVERLAY" ]:
-				if repo_var in os.environ:
+				if repo_var in env:
+					# allow overrides from env dictionary - argument to __init__:
+					repo_vars[repo_var] = env[repo_var]
+				elif repo_var in os.environ:
 					repo_vars[repo_var] = os.environ[repo_var]
 				else:
 					repo_vars[repo_var] = make_conf.get(repo_var) or make_globals.get(repo_var) or ""
