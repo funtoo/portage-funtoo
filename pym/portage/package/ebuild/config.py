@@ -331,6 +331,22 @@ class config(object):
 	# ESPECIALLY TO THIS PART OF PORTAGE. DEFINE: WHAT PARTS OF CODE USE EACH VARIABLE, IF ANY. WHAT VARIABLES ARE EXPECTED TO BE DEFINED IN EACH SECTION
 	# IN "Requires: " LINES, ETC.
 
+	# ENV CONFIG BEGIN:
+
+	# set up self.backupenv as the original contents of the environment.
+	# self.reset() will reset self.configdict["env"] to the contents of backupenv, so we can always get a clean environment
+
+			# backupenv is used for calculating incremental variables.
+			if env is None:
+				env = os.environ
+
+			# Avoid potential UnicodeDecodeError exceptions later.
+			env_unicode = dict((_unicode_decode(k), _unicode_decode(v))
+				for k, v in env.items())
+
+			self.backupenv = env_unicode
+
+
 	# EARLY CONFIG BEGIN:
 
 	# Figure out config_root, typically "/etc" and where we will look for configuration.
@@ -382,11 +398,8 @@ class config(object):
 			
 			repo_vars = {}
 			for repo_var in [ "PORTDIR", "PORTDIR_OVERLAY" ]:
-				if repo_var in env:
-					# allow overrides from env dictionary - argument to __init__:
-					repo_vars[repo_var] = env[repo_var]
-				elif repo_var in os.environ:
-					repo_vars[repo_var] = os.environ[repo_var]
+				if repo_var in self.backupenv:
+					repo_vars[repo_var] = self.backupenv[repo_var]
 				else:
 					repo_vars[repo_var] = make_conf.get(repo_var) or make_globals.get(repo_var) or ""
 
@@ -599,17 +612,6 @@ class config(object):
 				# copy all the settings from profile.env into expand_map:
 
 				expand_map.update(env_d)
-
-			# backupenv is used for calculating incremental variables.
-			if env is None:
-				env = os.environ
-
-			# Avoid potential UnicodeDecodeError exceptions later.
-			env_unicode = dict((_unicode_decode(k), _unicode_decode(v))
-				for k, v in env.items())
-
-			self.backupenv = env_unicode
-
 			if env_d:
 				# Remove duplicate values so they don't override updated
 				# profile.env values later (profile.env is reloaded in each
