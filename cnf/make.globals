@@ -49,7 +49,7 @@ FETCHCOMMAND_SFTP="bash -c \"x=\\\${2#sftp://} ; host=\\\${x%%/*} ; port=\\\${ho
 FEATURES="assume-digests binpkg-logs distlocks fixpackages
           fixlafiles news parallel-fetch protect-owned
           sandbox sfperms strict unknown-features-warn unmerge-logs
-          unmerge-orphans userfetch"
+          unmerge-orphans userfetch mini-manifest"
 
 # Ignore file collisions in /lib/modules since files inside this directory
 # are never unmerged, and therefore collisions must be ignored in order for
