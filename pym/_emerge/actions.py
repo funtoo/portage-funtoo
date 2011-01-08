@@ -2453,6 +2453,14 @@ def load_emerge_config(trees=None):
 	QueryCommand._db = trees
 	return settings, trees, mtimedb
 
+def pw_grp_conv(eroot):
+	if eroot != "/":
+		return
+	if os.path.exists("/usr/sbin/pwconv"):
+		portage.process.spawn_bash("/usr/sbin/pwconv")
+	if os.path.exists("/usr/sbin/grpconv"):
+		portage.process.spawn_bash("/usr/sbin/grpconv")
+	
 def chk_updated_cfg_files(eroot, config_protect):
 	target_root = eroot
 	result = list(
