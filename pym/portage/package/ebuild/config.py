@@ -491,8 +491,7 @@ class config(object):
 					self._addProfile(profile_root,os.path.realpath(self.profile_path))
 				except ParseError as e:
 					# ugh - there was some error recursively parsing the profile...
-					writemsg(_("!!! Unable to parse profile: '%s'\n") % self.profile_path, noiselevel=-1)
-					writemsg("!!! ParseError: %s\n" % str(e), noiselevel=-1)
+					writemsg(_("Warning: profile path '%s' does not exist.\n") % self.profile_path, noiselevel=-1)
 					self.profiles = []
 
 			# we have a list of all our cascading profiles. Now we want to see if we have an /etc/portage/profile directory.
