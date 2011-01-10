@@ -746,11 +746,25 @@ Defines the location where created RPM packages will be stored.
 .br
 Defaults to ${PORTDIR}/rpm.
 .TP
-\fBSYNC\fR = \fI[RSYNC]\fR
-Insert your preferred rsync mirror here.  This rsync server
-is used to sync the local portage tree when `emerge \-\-sync` is run.
-.br
-Defaults to rsync://rsync.gentoo.org/gentoo\-portage
+\fBSYNC\fR = \fI[git-url]\fR
+SYNC is used to define the initial location from where to clone a Portage
+tree using git. For subsequent Portage tree update operations (git pulls using
+emerge --sync), this setting is ignored and the settings in the PORTDIR's .git 
+settings are used instead.
+.TP
+\fBSYNC_USER\fR = \fI[user]\fR
+Defaulting to root, SYNC_USER specifies the user account to use for performing
+git initial clone and pull (sync) operations. The user specified here will
+be the owner of all the files in the Portage tree. If using a non-root user,
+be sure that the user has permission to access (read) the parent location of
+PORTDIR. For example, if using the "portage" user with a PORTDIR of /usr/portage,
+ensure that the "portage" user can list the contents of /usr.
+.TP
+\fBSYNC_UMASK\fR = \f[umask]\fR
+Defaulting to 022, this specifies the umask to use when performing git clone or
+pull operations. The default values will allow all users to read the contents of
+the Portage tree, but only the SYNC_USER to modify these files. To prevent others
+from viewing the contents of the Portage tree, you can use a value of 077.
 .TP
 \fBUSE\fR = \fI[space delimited list of USE items]\fR
 This variable contains options that control the build behavior of several
