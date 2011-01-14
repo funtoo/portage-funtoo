@@ -160,7 +160,6 @@ class config(object):
 					raise ParseError(_( "Profile contains unsupported " "EAPI '%s': '%s'") % (eapi, os.path.realpath(eapi_file),))
 
 		# Does the parents file exist in this profile? If so, grab its contents:
-
 		if os.path.exists(parentsFile):
 			
 			parents = grabfile(parentsFile)
@@ -266,7 +265,6 @@ class config(object):
 			self.usemask = clone.usemask
 			self.useforce = clone.useforce
 			self.puse = clone.puse
-			self.user_profile_dir = clone.user_profile_dir
 			self.local_config = clone.local_config
 			self.make_defaults_use = clone.make_defaults_use
 			self.mycpv = clone.mycpv
@@ -289,7 +287,6 @@ class config(object):
 				self.configdict['pkginternal'],
 				self.configdict['globals'],
 				self.configdict['defaults'],
-				self.configdict['conf'],
 				self.configdict['pkg'],
 				self.configdict['env'],
 			]
@@ -380,13 +377,9 @@ class config(object):
 
 			abs_user_config = os.path.join(config_root, USER_CONFIG_PATH)
 		
-			# get make.conf values from /etc/make.conf:
-			
-			make_conf = getconfig( os.path.join(config_root, MAKE_CONF_FILE), tolerant=tolerant, allow_sourcing=True) or {}
+			# get make.conf values from /etc/portage/make.defaults:
 
-			# modify these values using any settings from /etc/profile/make.conf:
-
-			make_conf.update(getconfig( os.path.join(abs_user_config, 'make.conf'), tolerant=tolerant, allow_sourcing=True, expand=make_conf) or {})
+			make_conf = getconfig( os.path.join(abs_user_config, 'make.defaults'), tolerant=tolerant, allow_sourcing=True) or {}
 
 			make_globals = getconfig( os.path.join(self.global_config_path, 'make.globals'), tolerant=tolerant, allow_sourcing=True) or {}
 
@@ -457,25 +450,12 @@ class config(object):
 	# Finally, if "/etc/portage/profile" exists, tack it on the end of self.profiles so the user-defined profile has the ability to modify any settings
 	# that were defined in the profile.
 
+
+			# absolute paths in parent files will be relative to this path, typically something like /usr/portage/profiles:
 			profile_root = "%s/profiles" % self.repositories.mainRepoLocation()
 
 			if config_profile_path is None:
-				# if repoman didn't passing config_profile_path of "", then set the profile path ourselves...
-				config_profile_path = os.path.join(config_root, PROFILE_PATH)
-				# is /etc/make.profile a directory?:
-				if os.path.isdir(config_profile_path):
-					# yes - ok, use it. The "classic" approach.
-					self.profile_path = config_profile_path
-				else:
-					# no? look for /etc/portage/make.profile:
-					config_profile_path = os.path.join(abs_user_config, 'make.profile')
-					# is /etc/portage/make.profile a directory?
-					if os.path.isdir(config_profile_path):
-						# yes - ok, treat /etc/portage/make.profile as an alternative to traditional /etc/make.profile:
-						self.profile_path = config_profile_path
-					else:
-						# no - hrm. We don't have a profile directory then!
-						self.profile_path = None
+				self.profile_path = "/etc/portage"
 			else:
 				# NOTE: repoman may pass in an empty string here, in order to create an empty profile  for checking dependencies of packages with empty KEYWORDS.
 				self.profile_path = config_profile_path
@@ -494,17 +474,6 @@ class config(object):
 					writemsg(_("Warning: profile path '%s' does not exist.\n") % self.profile_path, noiselevel=-1)
 					self.profiles = []
 
-			# we have a list of all our cascading profiles. Now we want to see if we have an /etc/portage/profile directory.
-			self.user_profile_dir = None
-			if local_config and self.profiles:
-				# /etc/portage/profile:
-				custom_prof = os.path.join(config_root, CUSTOM_PROFILE_PATH)
-				if os.path.exists(custom_prof):
-					# /etc/portage/profile exists! so let's tag it at the end of our cascaded profiles then.
-					self.user_profile_dir = custom_prof
-					self.profiles.append(custom_prof)
-				del custom_prof
-
 			# ok, we now have a list of all our profiles - convert them from mutable list to immutable tuple. We're done:
 	
 			self.profiles = tuple(self.profiles)
@@ -518,7 +487,6 @@ class config(object):
 			#config_root = locations_manager.config_root
 			#self.profiles = locations_manager.profiles
 			#self.profile_path = locations_manager.profile_path
-			#self.user_profile_dir = locations_manager.user_profile_dir
 			#abs_user_config = locations_manager.abs_user_config
 
 						# set target_root using the setting from our make.conf, if it is defined:
@@ -566,8 +534,8 @@ class config(object):
 	# Note: "make.globals" hard-coded
 
 
-	# configlist has order: [ "env.d", "pkginternal", "defaults", "conf", "pkg", "env" ]
-	# lookuplist has order: [ "env", "pkg", "conf", "defaults", "pkginternal", "env.d" ]
+	# configlist has order: [ "env.d", "pkginternal", "defaults", "pkg", "env" ]
+	# lookuplist has order: [ "env", "pkg", "defaults", "pkginternal", "env.d" ]
 
 	# this means that variables will be searched in "lookuplist" order ^^ -- backupenv will be looked in first.
 
@@ -665,11 +633,6 @@ class config(object):
 
 	# "defaults" MAKE.DEFAULTS STOP
 
-	# "conf" - MAKE.CONF START
-
-			self.mygcfg = getconfig( os.path.join(config_root, MAKE_CONF_FILE), tolerant=tolerant, allow_sourcing=True, expand=expand_map) or {}
-			self.mygcfg.update(getconfig( os.path.join(abs_user_config, 'make.conf'), tolerant=tolerant, allow_sourcing=True, expand=expand_map) or {})
-
 		# PROFILE_ONLY_VARIABLES START
 
 			# Don't allow the user to override certain variables in make.conf
@@ -689,15 +652,10 @@ class config(object):
 
 			# remove any of these variables from our make.conf settings:
 
-			for k in profile_only_variables:
-				self.mygcfg.pop(k, None)
+	#		for k in profile_only_variables:
+	#			self.mygcfg.pop(k, None)
 
 		# PROFILE_ONLY_VARIBLES STOP
-
-			self.configlist.append(self.mygcfg)
-			self.configdict["conf"]=self.configlist[-1]
-
-	# "conf" - MAKE.CONF COMBINED STOP
 
 	# "pkg" START
 
@@ -768,7 +726,7 @@ class config(object):
 			self._ppropertiesdict = portage.dep.ExtendedAtomDict(dict)
 			self._penvdict = portage.dep.ExtendedAtomDict(dict)
 
-						#filling PORTDIR and PORTDIR_OVERLAY variable for compatibility
+			#filling PORTDIR and PORTDIR_OVERLAY variable for compatibility
 			main_repo = self.repositories.mainRepo()
 			if main_repo is not None:
 				main_repo = main_repo.user_location
@@ -847,16 +805,16 @@ class config(object):
 			#Initialize all USE related variables we track ourselves.
 			self.usemask = self._use_manager.getUseMask()
 			self.useforce = self._use_manager.getUseForce()
-			self.configdict["conf"]["USE"] = \
+			self.configdict["defaults"]["USE"] = \
 				self._use_manager.extract_global_USE_changes( \
-					self.configdict["conf"].get("USE", ""))
+					self.configdict["defaults"].get("USE", ""))
 
 			#Read license_groups and optionally license_groups and package.license from user config
 			self._license_manager = LicenseManager(self.profile_locations, abs_user_config, user_config=local_config)
 			#Extract '*/*' entries from package.license
-			self.configdict["conf"]["ACCEPT_LICENSE"] = \
+			self.configdict["defaults"]["ACCEPT_LICENSE"] = \
 				self._license_manager.extract_global_changes( \
-					self.configdict["conf"].get("ACCEPT_LICENSE", ""))
+					self.configdict["defaults"].get("ACCEPT_LICENSE", ""))
 
 			#Read package.mask and package.unmask from profiles and optionally from user config
 			self._mask_manager = MaskManager(self.repositories, self.profiles,
@@ -872,10 +830,10 @@ class config(object):
 					allow_repo=True, verify_eapi=False)
 				v = propdict.pop("*/*", None)
 				if v is not None:
-					if "ACCEPT_PROPERTIES" in self.configdict["conf"]:
-						self.configdict["conf"]["ACCEPT_PROPERTIES"] += " " + " ".join(v)
+					if "ACCEPT_PROPERTIES" in self.configdict["defaults"]:
+						self.configdict["defaults"]["ACCEPT_PROPERTIES"] += " " + " ".join(v)
 					else:
-						self.configdict["conf"]["ACCEPT_PROPERTIES"] = " ".join(v)
+						self.configdict["defaults"]["ACCEPT_PROPERTIES"] = " ".join(v)
 				for k, v in propdict.items():
 					self._ppropertiesdict.setdefault(k.cp, {})[k] = v
 
@@ -888,7 +846,7 @@ class config(object):
 					global_wildcard_conf = {}
 					self._grab_pkg_env(v, global_wildcard_conf)
 					incrementals = self.incrementals
-					conf_configdict = self.configdict["conf"]
+					conf_configdict = self.configdict["defaults"]
 					for k, v in global_wildcard_conf.items():
 						if k in incrementals:
 							if k in conf_configdict:
@@ -914,7 +872,7 @@ class config(object):
 
 			archlist = [grabfile(os.path.join(x, "arch.list")) for x in self.profile_and_user_locations]
 			archlist = stack_lists(archlist, incremental=1)
-			self.configdict["conf"]["PORTAGE_ARCHLIST"] = " ".join(archlist)
+			self.configdict["defaults"]["PORTAGE_ARCHLIST"] = " ".join(archlist)
 
 			pkgprovidedlines = [grabfile(os.path.join(x, "package.provided"), recursive=1) for x in self.profiles]
 			pkgprovidedlines = stack_lists(pkgprovidedlines, incremental=1)
@@ -1129,14 +1087,6 @@ class config(object):
 
 		abs_profile_path = os.path.join(self["PORTAGE_CONFIGROOT"],
 			PROFILE_PATH)
-
-		if (not self.profile_path or \
-			not os.path.exists(os.path.join(self.profile_path, "parent"))) and \
-			os.path.exists(os.path.join(self["PORTDIR"], "profiles")):
-			writemsg(_("\n\n!!! %s is not a symlink and will probably prevent most merges.\n") % abs_profile_path,
-				noiselevel=-1)
-			writemsg(_("!!! It should point into a profile within %s/profiles/\n") % self["PORTDIR"])
-			writemsg(_("!!! (You can safely ignore this message when syncing. It's harmless.)\n\n\n"))
 
 		abs_user_virtuals = os.path.join(self["PORTAGE_CONFIGROOT"],
 			USER_VIRTUALS_FILE)
