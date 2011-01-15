@@ -157,7 +157,7 @@ class config(object):
 				pass
 			else:
 				if not eapi_is_supported(eapi):
-					raise ParseError(_( "Profile contains unsupported " "EAPI '%s': '%s'") % (eapi, os.path.realpath(eapi_file),))
+					raise ParseError(_( "Profile contains unsupported " "EAPI '%s': %s") % (eapi, os.path.realpath(eapi_file),))
 
 		# Does the parents file exist in this profile? If so, grab its contents:
 		if os.path.exists(parentsFile):
@@ -167,14 +167,17 @@ class config(object):
 			# If the file was empty, throw an error:
 
 			if not parents:
-				raise ParseError( _("Empty parent file: '%s'") % parentsFile)
+				raise ParseError( _("Empty parent file: %s") % parentsFile)
 			
 			# For each line in the parents file, use the line as a relative path to modify "currentPath", our current path:
 
 			for parentPath in parents:
-				if parentPath[0] == "/":
-					# an absolute path in "parents" file means "relative to $PORTDIR/profiles" (ie. rootPath, an argument).	
-					parentPath = rootPath + parentPath
+				if parentPath[0] == ":":
+					# an ":" in "parents" file means "relative to $PORTDIR/profiles" (ie. rootPath, an argument).	
+					parentPath = rootPath + "/" + parentPath[1:]
+				elif parentPath[0] == "/":
+					# use parentPath as an absolute path, such as "/var/lib/layman"...
+					pass
 				else:
 					parentPath = normalize_path(os.path.join(currentPath, parentPath))
 
@@ -183,7 +186,7 @@ class config(object):
 				if os.path.exists(parentPath):
 					self._addProfile(rootPath, parentPath)
 				else:
-					raise ParseError( _("Parent '%s' not found: '%s'") % (parentPath, parentsFile))
+					raise ParseError( _("Parent '%s' from %s not found (did you mean '%s'?)") % (parentPath, parentsFile, ":"+parentPath[1:]))
 
 		# after recursively processing parents, add our own profile to the list:
 
@@ -470,8 +473,8 @@ class config(object):
 					# this does the recursive heavy lifting of looking at "parent" files and creating a list of profiles in self.profiles:
 					self._addProfile(profile_root,os.path.realpath(self.profile_path))
 				except ParseError as e:
-					# ugh - there was some error recursively parsing the profile...
-					writemsg(_("Warning: profile path '%s' does not exist.\n") % self.profile_path, noiselevel=-1)
+					# there was some error recursively parsing the profile: print exception value (specific error message)
+					writemsg(_("Warning: profile %s: %s\n") % ( self.profile_path, e.value ), noiselevel=-1)
 					self.profiles = []
 
 			# ok, we now have a list of all our profiles - convert them from mutable list to immutable tuple. We're done:

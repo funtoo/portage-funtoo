@@ -1267,10 +1267,7 @@ def profile_check(trees, myaction):
 			continue
 		# generate some profile related warning messages
 		validate_ebuild_environment(trees)
-		msg = "If you have just changed your profile configuration, you " + \
-			"should revert back to the previous configuration. Due to " + \
-			"your current profile being invalid, allowed actions are " + \
-			"limited to --help, --info, --sync, and --version."
+		msg = "emerge was not able to parse your profile."
 		writemsg_level("".join("!!! %s\n" % l for l in textwrap.wrap(msg, 70)),
 			level=logging.ERROR, noiselevel=-1)
 		return 1
