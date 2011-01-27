@@ -1905,7 +1905,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 			writemsg_level("!!! %s\n" % l, level=logging.ERROR, noiselevel=-1)
 		return 1
 	updatecache_flg = True
-	if not os.path.exists(myportdir+"/.git"):
+	if not os.path.exists(myportdir):
 		if not syncuri:
 			writemsg_level("SYNC is undefined.\nPlease set SYNC to the remote location of the Portage repository.\n", noiselevel=-1, level=logging.ERROR)
 			return 1
@@ -1975,8 +1975,11 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 			sys.exit(1)
 
 		# Clean up after ourselves:
-		portage.process.spawn_bash("rm -f %s" % (repo_path_tmp))
+		portage.process.spawn_bash("rm -rf %s" % (repo_path_tmp))
 	else:
+		if not os.path.exists(myportdir+"/.git"):
+			print("!!! Portage tree at %s does not appear to be a git repository. Please move out of the way or correct your PORTDIR setting and retry." % myportdir)
+			sys.exit(1)
 		if portage.process.spawn_bash("su - %s -s /bin/sh -c 'cd %s >/dev/null 2>&1'" % ( syncuser, myportdir )) != os.EX_OK:
 			print("!!! Portage tree at %s is not reachable by user %s; please adjust permissions to correct." %  ( myportdir, syncuser ))
 			sys.exit(1)
