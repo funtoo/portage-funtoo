@@ -232,7 +232,7 @@ class paren_normalize(list):
 					self._zap_parens(x, dest)
 		return dest
 
-def paren_enclose(mylist):
+def paren_enclose(mylist, unevaluated_atom=False):
 	"""
 	Convert a list to a string with sublists enclosed with parens.
 
@@ -251,6 +251,8 @@ def paren_enclose(mylist):
 		if isinstance(x, list):
 			mystrparts.append("( "+paren_enclose(x)+" )")
 		else:
+			if unevaluated_atom:
+				x = getattr(x, 'unevaluated_atom', x)
 			mystrparts.append(x)
 	return " ".join(mystrparts)
 
@@ -631,7 +633,7 @@ def flatten(mylist):
 
 _usedep_re = {
 	"0": re.compile("^(?P<prefix>[!-]?)(?P<flag>[A-Za-z0-9][A-Za-z0-9+_@-]*)(?P<default>(\(\+\)|\(\-\))?)(?P<suffix>[?=]?)$"),
-#	"4": re.compile("^(?P<prefix>[!-]?)(?P<flag>[A-Za-z0-9][A-Za-z0-9+_@.-]*)(?P<default>(\(\+\)|\(\-\))?)(?P<suffix>[?=]?)$"),
+#	"5": re.compile("^(?P<prefix>[!-]?)(?P<flag>[A-Za-z0-9][A-Za-z0-9+_@.-]*)(?P<default>(\(\+\)|\(\-\))?)(?P<suffix>[?=]?)$"),
 }
 
 def _get_usedep_re(eapi):
@@ -643,10 +645,10 @@ def _get_usedep_re(eapi):
 		given eapi. If eapi is None then the latest supported EAPI is assumed.
 	"""
 	return _usedep_re["0"]
-#	if eapi in ("0", "1", "2_pre1", "2_pre2", "2_pre3", "2", "3_pre1", "3_pre2", "3", "4_pre1"):
+#	if eapi in ("0", "1", "2", "3_pre1", "3_pre2", "3", "4_pre1", "4"):
 #		return _usedep_re["0"]
 #	else:
-#		return _usedep_re["4"]
+#		return _usedep_re["5"]
 
 class _use_dep(object):
 
@@ -1134,7 +1136,14 @@ class Atom(_atom_base):
 			without_use = Atom(m.group('without_use'), allow_repo=allow_repo)
 		else:
 			use = None
-			without_use = self
+			if unevaluated_atom is not None and \
+				unevaluated_atom.use is not None:
+				# unevaluated_atom.use is used for IUSE checks when matching
+				# packages, so it must not propagate to without_use
+				without_use = Atom(s, allow_wildcard=allow_wildcard,
+					allow_repo=allow_repo)
+			else:
+				without_use = self
 
 		self.__dict__['use'] = use
 		self.__dict__['without_use'] = without_use
@@ -1606,15 +1615,15 @@ _atom_wildcard_re = re.compile('(?P<simple>(' + _extended_cat + ')/(' + _extende
 
 _useflag_re = {
 	"0": re.compile(r'^[A-Za-z0-9][A-Za-z0-9+_@-]*$'),
-#	"4": re.compile(r'^[A-Za-z0-9][A-Za-z0-9+_@.-]*$'),
+#	"5": re.compile(r'^[A-Za-z0-9][A-Za-z0-9+_@.-]*$'),
 }
 
 def _get_useflag_re(eapi):
 	return _useflag_re["0"]
-#	if eapi in ("0", "1", "2_pre1", "2_pre2", "2_pre3", "2", "3_pre1", "3_pre2", "3", "4_pre1"):
+#	if eapi in ("0", "1", "2", "3_pre1", "3_pre2", "3", "4_pre1", "4"):
 #		return _useflag_re["0"]
 #	else:
-#		return _useflag_re["4"]
+#		return _useflag_re["5"]
 
 def isvalidatom(atom, allow_blockers=False, allow_wildcard=False, allow_repo=False):
 	"""
@@ -1975,7 +1984,7 @@ def match_from_list(mydep, candidate_list):
 	return mylist
 
 def human_readable_required_use(required_use):
-	return required_use.replace("^^", "only-one-of").replace("||", "any-of")
+	return required_use.replace("^^", "exactly-one-of").replace("||", "any-of")
 
 def get_required_use_flags(required_use):
 	"""
