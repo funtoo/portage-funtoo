@@ -380,23 +380,26 @@ class config(object):
 
 			abs_user_config = os.path.join(config_root, USER_CONFIG_PATH)
 		
-			# get make.conf values from /etc/portage/make.defaults:
-
-			make_conf = getconfig( os.path.join(abs_user_config, 'make.defaults'), tolerant=tolerant, allow_sourcing=True) or {}
-
-			make_globals = getconfig( os.path.join(self.global_config_path, 'make.globals'), tolerant=tolerant, allow_sourcing=True) or {}
-
 			# create a dictionary of initial minimal settings that our Portage repository needs to configure itself,
 			# before we have our full-blown config enabled. We are addressing a chicken-and-egg problem. We will look for 
-			# the following settings in the environment first, then in make.conf, then fall back to make.globals, and set
-			# the value to "" if not defined anywhere:
+			# the following settings in /etc/portage/portdir (which must be a file) and /etc/portage/overlays 
+			# (which can be a directory).
 			
 			repo_vars = {}
-			for repo_var in [ "PORTDIR", "PORTDIR_OVERLAY" ]:
-				if repo_var in self.backupenv:
-					repo_vars[repo_var] = self.backupenv[repo_var]
-				else:
-					repo_vars[repo_var] = make_conf.get(repo_var) or make_globals.get(repo_var) or ""
+		
+			mypath = os.path.join(abs_user_config,"portdir")
+			if os.path.exists(mypath):
+				repo_vars["PORTDIR"] = " ".join(grabfile(mypath))
+			else:
+				# portdir was unset:
+				repo_vars["PORTDIR"] = ""
+
+			mypath = os.path.join(abs_user_config,"overlays")
+			if os.path.exists(mypath):
+				repo_vars["PORTDIR_OVERLAY"] = " ".join(grabfile(mypath, recursive=1))
+			else:
+				# no overlays were specified:
+				repo_vars["PORTDIR_OVERLAY"] = ""
 
 	# EARLY CONFIG END.
 
@@ -404,12 +407,12 @@ class config(object):
 	# Requires: make_conf defined in previous section.
 	# Here, we define target_root and eroot, used later in the code.
 
-			# grab global_config_path from locations manager:
-			root_override = make_conf.get("ROOT")
-			if target_root is None and root_override is not None:
-				target_root = root_override
-				if not target_root.strip():
-					target_root = None
+			## grab global_config_path from locations manager:
+			#root_override = make_conf.get("ROOT")
+			#if target_root is None and root_override is not None:
+			#	target_root = root_override
+			#	if not target_root.strip():
+			#		target_root = None
 
 			# if target_root is still None, default to "/":
 
