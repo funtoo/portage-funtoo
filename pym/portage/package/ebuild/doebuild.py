@@ -1,4 +1,4 @@
-# Copyright 2010 Gentoo Foundation
+# Copyright 2010-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 __all__ = ['doebuild', 'doebuild_environment', 'spawn', 'spawnebuild']
@@ -37,6 +37,7 @@ from portage.const import EBUILD_SH_ENV_FILE, EBUILD_SH_ENV_DIR, \
 	EBUILD_SH_BINARY, INVALID_ENV_FILE, MISC_SH_BINARY
 from portage.data import portage_gid, portage_uid, secpass, \
 	uid, userpriv_groups
+from portage.dbapi.porttree import _parse_uri_map
 from portage.dbapi.virtual import fakedbapi
 from portage.dep import Atom, paren_enclose, use_reduce
 from portage.eapi import eapi_exports_KV, eapi_exports_merge_type, \
@@ -60,7 +61,9 @@ from _emerge.BinpkgEnvExtractor import BinpkgEnvExtractor
 from _emerge.EbuildBuildDir import EbuildBuildDir
 from _emerge.EbuildPhase import EbuildPhase
 from _emerge.EbuildSpawnProcess import EbuildSpawnProcess
+from _emerge.Package import Package
 from _emerge.PollScheduler import PollScheduler
+from _emerge.RootConfig import RootConfig
 
 _unsandboxed_phases = frozenset([
 	"clean", "cleanrm", "config",
@@ -130,6 +133,7 @@ def doebuild_environment(myebuild, mydo, myroot=None, settings=None,
 	mydbapi = db
 	ebuild_path = os.path.abspath(myebuild)
 	pkg_dir     = os.path.dirname(ebuild_path)
+	mytree = os.path.dirname(os.path.dirname(pkg_dir))
 
 	if "CATEGORY" in mysettings.configdict["pkg"]:
 		cat = mysettings.configdict["pkg"]["CATEGORY"]
@@ -197,7 +201,6 @@ def doebuild_environment(myebuild, mydo, myroot=None, settings=None,
 	mysettings["PF"]       = mypv
 
 	if hasattr(mydbapi, '_repo_info'):
-		mytree = os.path.dirname(os.path.dirname(pkg_dir))
 		repo_info = mydbapi._repo_info[mytree]
 		mysettings['PORTDIR'] = repo_info.portdir
 		mysettings['PORTDIR_OVERLAY'] = repo_info.portdir_overlay
@@ -237,6 +240,30 @@ def doebuild_environment(myebuild, mydo, myroot=None, settings=None,
 		if not eapi_is_supported(eapi):
 			# can't do anything with this.
 			raise UnsupportedAPIException(mycpv, eapi)
+
+		if hasattr(mydbapi, "getFetchMap") and \
+			("A" not in mysettings.configdict["pkg"] or \
+			"AA" not in mysettings.configdict["pkg"]):
+			src_uri, = mydbapi.aux_get(mysettings.mycpv,
+				["SRC_URI"], mytree=mytree)
+			metadata = {
+				"EAPI"    : eapi,
+				"SRC_URI" : src_uri,
+			}
+			use = frozenset(mysettings["PORTAGE_USE"].split())
+			try:
+				uri_map = _parse_uri_map(mysettings.mycpv, metadata, use=use)
+			except InvalidDependString:
+				mysettings.configdict["pkg"]["A"] = ""
+			else:
+				mysettings.configdict["pkg"]["A"] = " ".join(uri_map)
+
+			try:
+				uri_map = _parse_uri_map(mysettings.mycpv, metadata)
+			except InvalidDependString:
+				mysettings.configdict["pkg"]["AA"] = ""
+			else:
+				mysettings.configdict["pkg"]["AA"] = " ".join(uri_map)
 
 	if mysplit[2] == "r0":
 		mysettings["PVR"]=mysplit[1]
@@ -560,7 +587,7 @@ def doebuild(myebuild, mydo, myroot, mysettings, debug=0, listonly=0,
 				mypids = _spawn_phase(mydo, mysettings, returnpid=True,
 					fd_pipes=fd_pipes)
 				os.close(pw) # belongs exclusively to the child process now
-				f = os.fdopen(pr, 'rb')
+				f = os.fdopen(pr, 'rb', 0)
 				for k, v in zip(auxdbkeys,
 					(_unicode_decode(line).rstrip('\n') for line in f)):
 					dbkey[k] = v
@@ -593,7 +620,7 @@ def doebuild(myebuild, mydo, myroot, mysettings, debug=0, listonly=0,
 		# data are never installed via the ebuild command. Don't bother when
 		# returnpid == True since there's no need to do this every time emerge
 		# executes a phase.
-		if not returnpid:
+		if tree == "porttree":
 			rval = _validate_deps(mysettings, myroot, mydo, mydbapi)
 			if rval != os.EX_OK:
 				return rval
@@ -642,8 +669,10 @@ def doebuild(myebuild, mydo, myroot, mysettings, debug=0, listonly=0,
 		if eapi_exports_merge_type(mysettings["EAPI"]) and \
 			"MERGE_TYPE" not in mysettings.configdict["pkg"]:
 			if tree == "porttree":
+				mysettings.configdict["pkg"]["EMERGE_FROM"] = "ebuild"
 				mysettings.configdict["pkg"]["MERGE_TYPE"] = "source"
 			elif tree == "bintree":
+				mysettings.configdict["pkg"]["EMERGE_FROM"] = "binary"
 				mysettings.configdict["pkg"]["MERGE_TYPE"] = "binary"
 
 		if eapi_exports_replace_vars(mysettings["EAPI"]) and \
@@ -674,48 +703,41 @@ def doebuild(myebuild, mydo, myroot, mysettings, debug=0, listonly=0,
 
 		mycpv = "/".join((mysettings["CATEGORY"], mysettings["PF"]))
 
-		emerge_skip_distfiles = returnpid
-		emerge_skip_digest = returnpid
 		# Only try and fetch the files if we are going to need them ...
 		# otherwise, if user has FEATURES=noauto and they run `ebuild clean
 		# unpack compile install`, we will try and fetch 4 times :/
-		need_distfiles = not emerge_skip_distfiles and \
+		need_distfiles = tree == "porttree" and \
 			(mydo in ("fetch", "unpack") or \
 			mydo not in ("digest", "manifest") and "noauto" not in features)
-		alist = mysettings.configdict["pkg"].get("A")
-		aalist = mysettings.configdict["pkg"].get("AA")
-		if alist is None or aalist is None or \
-			(not emerge_skip_distfiles and need_distfiles):
-			# Make sure we get the correct tree in case there are overlays.
-			mytree = os.path.realpath(
-				os.path.dirname(os.path.dirname(mysettings["O"])))
-			useflags = mysettings["PORTAGE_USE"].split()
+		alist = set(mysettings.configdict["pkg"].get("A", "").split())
+		if need_distfiles:
+
+			src_uri, = mydbapi.aux_get(mysettings.mycpv,
+				["SRC_URI"], mytree=os.path.dirname(os.path.dirname(
+				os.path.dirname(myebuild))))
+			metadata = {
+				"EAPI"    : mysettings["EAPI"],
+				"SRC_URI" : src_uri,
+			}
+			use = frozenset(mysettings["PORTAGE_USE"].split())
 			try:
-				alist = mydbapi.getFetchMap(mycpv, useflags=useflags,
-					mytree=mytree)
-				aalist = mydbapi.getFetchMap(mycpv, mytree=mytree)
+				alist = _parse_uri_map(mysettings.mycpv, metadata, use=use)
+				aalist = _parse_uri_map(mysettings.mycpv, metadata)
 			except InvalidDependString as e:
 				writemsg("!!! %s\n" % str(e), noiselevel=-1)
 				writemsg(_("!!! Invalid SRC_URI for '%s'.\n") % mycpv,
 					noiselevel=-1)
 				del e
 				return 1
-			mysettings.configdict["pkg"]["A"] = " ".join(alist)
-			mysettings.configdict["pkg"]["AA"] = " ".join(aalist)
 
-			if not emerge_skip_distfiles and need_distfiles:
-				if "mirror" in features or fetchall:
-					fetchme = aalist
-				else:
-					fetchme = alist
-				if not fetch(fetchme, mysettings, listonly=listonly,
-					fetchonly=fetchonly):
-					spawn_nofetch(mydbapi, myebuild, settings=mysettings)
-					return 1
-
-		else:
-			alist = set(alist.split())
-			aalist = set(aalist.split())
+			if "mirror" in features or fetchall:
+				fetchme = aalist
+			else:
+				fetchme = alist
+			if not fetch(fetchme, mysettings, listonly=listonly,
+				fetchonly=fetchonly):
+				spawn_nofetch(mydbapi, myebuild, settings=mysettings)
+				return 1
 
 		if mydo == "fetch":
 			# Files are already checked inside fetch(),
@@ -732,7 +754,7 @@ def doebuild(myebuild, mydo, myroot, mysettings, debug=0, listonly=0,
 				return not digestgen(mysettings=mysettings, myportdb=mydbapi)
 			elif mydo == "digest":
 				return not digestgen(mysettings=mysettings, myportdb=mydbapi)
-			elif mydo != 'fetch' and not emerge_skip_digest and \
+			elif mydo != 'fetch' and \
 				"digest" in mysettings.features:
 				# Don't do this when called by emerge or when called just
 				# for fetch (especially parallel-fetch) since it's not needed
@@ -744,7 +766,7 @@ def doebuild(myebuild, mydo, myroot, mysettings, debug=0, listonly=0,
 				return 1
 
 		# See above comment about fetching only when needed
-		if not emerge_skip_distfiles and \
+		if tree == 'porttree' and \
 			not digestcheck(checkme, mysettings, "strict" in features):
 			return 1
 
@@ -752,7 +774,9 @@ def doebuild(myebuild, mydo, myroot, mysettings, debug=0, listonly=0,
 			return 0
 
 		# remove PORTAGE_ACTUAL_DISTDIR once cvs/svn is supported via SRC_URI
-		if (mydo != "setup" and "noauto" not in features) or mydo == "unpack":
+		if tree == 'porttree' and \
+			((mydo != "setup" and "noauto" not in features) \
+			or mydo == "unpack"):
 			_prepare_fake_distdir(mysettings, alist)
 
 		#initial dep checks complete; time to process main commands
@@ -995,38 +1019,27 @@ def _validate_deps(mysettings, myroot, mydo, mydbapi):
 
 	invalid_dep_exempt_phases = \
 		set(["clean", "cleanrm", "help", "prerm", "postrm"])
-	dep_keys = ["DEPEND", "RDEPEND", "PDEPEND"]
-	misc_keys = ["LICENSE", "PROPERTIES", "PROVIDE", "RESTRICT", "SRC_URI"]
-	other_keys = ["SLOT", "EAPI"]
-	all_keys = dep_keys + misc_keys + other_keys
+	all_keys = set(Package.metadata_keys)
+	all_keys.add("SRC_URI")
+	all_keys = tuple(all_keys)
 	metadata = dict(zip(all_keys,
 		mydbapi.aux_get(mysettings.mycpv, all_keys)))
 
 	class FakeTree(object):
 		def __init__(self, mydb):
 			self.dbapi = mydb
-	dep_check_trees = {myroot:{}}
-	dep_check_trees[myroot]["porttree"] = \
-		FakeTree(fakedbapi(settings=mysettings))
+
+	root_config = RootConfig(mysettings, {"porttree":FakeTree(mydbapi)}, None)
+
+	pkg = Package(built=False, cpv=mysettings.mycpv,
+		metadata=metadata, root_config=root_config,
+		type_name="ebuild")
 
 	msgs = []
-	for dep_type in dep_keys:
-		mycheck = dep_check(metadata[dep_type], None, mysettings,
-			myuse="all", myroot=myroot, trees=dep_check_trees)
-		if not mycheck[0]:
-			msgs.append("  %s: %s\n    %s\n" % (
-				dep_type, metadata[dep_type], mycheck[1]))
-
-	eapi = metadata["EAPI"]
-	for k in misc_keys:
-		try:
-			use_reduce(metadata[k], is_src_uri=(k=="SRC_URI"), eapi=eapi)
-		except InvalidDependString as e:
-			msgs.append("  %s: %s\n    %s\n" % (
-				k, metadata[k], str(e)))
-
-	if not metadata["SLOT"]:
-		msgs.append(_("  SLOT is undefined\n"))
+	if pkg.invalid:
+		for k, v in pkg.invalid.items():
+			for msg in v:
+				msgs.append("  %s\n" % (msg,))
 
 	if msgs:
 		portage.util.writemsg_level(_("Error(s) in metadata for '%s':\n") % \
@@ -1451,11 +1464,12 @@ def _post_src_install_uid_fix(mysettings, out):
 							fixlafiles_announced = True
 							writemsg("Fixing .la files\n", fd=out)
 						writemsg("   %s\n" % fpath[len(destdir):], fd=out)
-						f = open(_unicode_encode(fpath,
+						# write_atomic succeeds even in some cases in which
+						# a normal write might fail due to file permission
+						# settings on some operating systems such as HP-UX
+						write_atomic(_unicode_encode(fpath,
 							encoding=_encodings['merge'], errors='strict'),
-							mode='wb')
-						f.write(new_contents)
-						f.close()
+							new_contents, mode='wb')
 
 				mystat = os.lstat(fpath)
 				if stat.S_ISREG(mystat.st_mode) and \

@@ -1,4 +1,4 @@
-# Copyright 1999-2010 Gentoo Foundation
+# Copyright 1999-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 from _emerge.EbuildExecuter import EbuildExecuter
@@ -41,7 +41,7 @@ class EbuildBuild(CompositeTask):
 		self._tree = tree
 		portdb = root_config.trees[tree].dbapi
 		settings.setcpv(pkg)
-		settings.configdict["pkg"]["EMERGE_FROM"] = pkg.type_name
+		settings.configdict["pkg"]["EMERGE_FROM"] = "ebuild"
 		if self.opts.buildpkgonly:
 			settings.configdict["pkg"]["MERGE_TYPE"] = "buildonly"
 		else:
@@ -111,14 +111,27 @@ class EbuildBuild(CompositeTask):
 		settings = self.settings
 
 		if opts.fetchonly:
+			if opts.pretend:
 				fetcher = EbuildFetchonly(
 					fetch_all=opts.fetch_all_uri,
 					pkg=pkg, pretend=opts.pretend,
 					settings=settings)
 				retval = fetcher.execute()
 				self.returncode = retval
-				self.wait()
-				return
+			else:
+				fetcher = EbuildFetcher(
+					config_pool=self.config_pool,
+					fetchall=self.opts.fetch_all_uri,
+					fetchonly=self.opts.fetchonly,
+					background=False,
+					logfile=None,
+					pkg=self.pkg,
+					scheduler=self.scheduler)
+				fetcher.start()
+				self.returncode = fetcher.wait()
+
+			self.wait()
+			return
 
 		self._build_dir = EbuildBuildDir(
 			scheduler=self.scheduler, settings=settings)

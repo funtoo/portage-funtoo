@@ -16,6 +16,8 @@
 CFLAGS=""
 CXXFLAGS=""
 LDFLAGS=""
+FFLAGS=""
+FCFLAGS=""
 
 # Default distfiles mirrors. This rotation has multiple hosts and is reliable.
 # Approved by the mirror-admin team.

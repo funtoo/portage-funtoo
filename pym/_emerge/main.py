@@ -1,4 +1,4 @@
-# Copyright 1999-2010 Gentoo Foundation
+# Copyright 1999-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 from __future__ import print_function
@@ -38,7 +38,7 @@ from portage._global_updates import _global_updates
 
 from _emerge.actions import action_config, action_sync, action_metadata, \
 	action_regen, action_search, action_uninstall, action_info, action_build, \
-	adjust_configs, chk_updated_cfg_files, display_missing_pkg_set, \
+	adjust_configs, chk_updated_cfg_files, pw_grp_conv, display_missing_pkg_set, \
 	display_news_notification, getportageversion, load_emerge_config
 import _emerge
 from _emerge.emergelog import emergelog
@@ -362,6 +362,9 @@ def post_emerge(root_config, myopts, mtimedb, retval):
 				portage.locks.unlockdir(vdb_lock)
 
 	chk_updated_cfg_files(settings['EROOT'], config_protect)
+
+	# ensure that shadow and gshadow are updated and correct:
+	pw_grp_conv(settings['EROOT'])
 
 	display_news_notification(root_config, myopts)
 	if retval in (None, os.EX_OK) or (not "--pretend" in myopts):
@@ -937,7 +940,8 @@ def parse_opts(tmpcmdline, silent=False):
 	if myoptions.use_ebuild_visibility in true_y:
 		myoptions.use_ebuild_visibility = True
 	else:
-		myoptions.use_ebuild_visibility = None
+		# None or "n"
+		pass
 
 	if myoptions.usepkg in true_y:
 		myoptions.usepkg = True
@@ -1584,7 +1588,7 @@ def emerge_main():
 		signal.signal(signal.SIGINT, signal.SIG_IGN)
 		signal.signal(signal.SIGTERM, signal.SIG_IGN)
 		portage.util.writemsg("\n\nExiting on signal %(signal)s\n" % {"signal":signum})
-		sys.exit(100+signum)
+		sys.exit(128 + signum)
 	signal.signal(signal.SIGINT, emergeexitsig)
 	signal.signal(signal.SIGTERM, emergeexitsig)
 

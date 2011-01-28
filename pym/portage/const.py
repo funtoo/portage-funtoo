@@ -101,9 +101,9 @@ SUPPORTED_FEATURES       = frozenset([
                            "strict", "stricter", "suidctl", "test", "test-fail-continue",
                            "unknown-features-filter", "unknown-features-warn",
                            "unmerge-logs", "unmerge-orphans", "userfetch", "userpriv",
-                           "usersandbox"])
+                           "usersandbox", "localpatch"])
 
-EAPI                     = 3
+EAPI                     = 4
 
 HASHING_BLOCKSIZE        = 32768
 MANIFEST1_HASH_FUNCTIONS = ("MD5", "SHA256", "RMD160")

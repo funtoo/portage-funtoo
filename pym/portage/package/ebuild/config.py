@@ -16,7 +16,7 @@ portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.data:portage_gid',
 )
 from portage import bsd_chflags, eapi_is_supported, \
-	load_mod, os, selinux, _unicode_encode, _unicode_decode
+	load_mod, os, selinux, _encodings, _unicode_encode, _unicode_decode
 from portage.const import CACHE_PATH, CUSTOM_PROFILE_PATH, \
 	DEPCACHE_PATH, INCREMENTALS, MAKE_CONF_FILE, \
 	MODULES_FILE_PATH, PORTAGE_BIN_PATH, PORTAGE_PYM_PATH, \
@@ -1200,7 +1200,7 @@ class config(object):
 				use = frozenset(settings['PORTAGE_USE'].split())
 
 			values['ACCEPT_LICENSE'] = settings._license_manager.get_prunned_accept_license( \
-				settings.mycpv, use, settings['LICENSE'], settings['SLOT'], settings['repository'])
+				settings.mycpv, use, settings['LICENSE'], settings['SLOT'], settings.get('PORTAGE_REPO_NAME'))
 			values['PORTAGE_RESTRICT'] = self._restrict(use, settings)
 			return values
 
