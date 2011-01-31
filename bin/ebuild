@@ -132,7 +132,6 @@ ebuild_portdir = os.path.realpath(
 	os.path.dirname(os.path.dirname(os.path.dirname(ebuild))))
 ebuild = os.path.join(ebuild_portdir, *ebuild.split(os.path.sep)[-3:])
 vdb_path = os.path.realpath(os.path.join(portage.settings['EROOT'], VDB_PATH))
-
 # Make sure that portdb.findname() returns the correct ebuild.
 if ebuild_portdir != vdb_path and \
 	ebuild_portdir not in portage.portdb.porttrees:
@@ -148,8 +147,8 @@ if ebuild_portdir != vdb_path and \
 
 	print("Appending %s to PORTDIR_OVERLAY..." % ebuild_portdir)
 	portage.close_portdbapi_caches()
+	# tell the portage module to completely re-initialize itself using the updated PORTDIR_OVERLAY setting:
 	imp.reload(portage)
-
 # Constrain eclass resolution to the master(s)
 # that are specified in layout.conf (using an
 # approach similar to repoman's).

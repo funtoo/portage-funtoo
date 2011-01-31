@@ -396,7 +396,17 @@ class config(object):
 
 			mypath = os.path.join(abs_user_config,"overlays")
 			if os.path.exists(mypath):
-				repo_vars["PORTDIR_OVERLAY"] = " ".join(grabfile(mypath, recursive=1))
+				if "PORTDIR_OVERLAY" in self.backupenv:
+					
+					# /usr/bin/ebuild uses a trick if your current working directory happens to be inside a Portage
+					# tree that isn't listed in PORTDIR_OVERLAY. It updates the environment variable PORTDIR_OVERLAY,
+					# appending the Portage tree that it detected it is inside of, and then tells the portage class
+					# to re-initialize itself using the "imp.reload(portage)" call. So we *must* look for a 
+					# PORTDIR_OVERLAY setting in the environment and use it if it is found.
+
+					repo_vars["PORTDIR_OVERLAY"] = self.backupenv["PORTDIR_OVERLAY"]
+				else:
+					repo_vars["PORTDIR_OVERLAY"] = " ".join(grabfile(mypath, recursive=1))
 			else:
 				# no overlays were specified:
 				repo_vars["PORTDIR_OVERLAY"] = ""
