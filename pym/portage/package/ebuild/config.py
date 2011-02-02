@@ -379,7 +379,7 @@ class config(object):
 			# set abs_user_config to "/etc/portage":
 
 			abs_user_config = os.path.join(config_root, USER_CONFIG_PATH)
-		
+	
 			# create a dictionary of initial minimal settings that our Portage repository needs to configure itself,
 			# before we have our full-blown config enabled. We are addressing a chicken-and-egg problem. We will look for 
 			# the following settings in /etc/portage/portdir (which must be a file) and /etc/portage/overlays 
@@ -392,7 +392,7 @@ class config(object):
 				repo_vars["PORTDIR"] = " ".join(grabfile(mypath))
 			else:
 				# portdir was unset:
-				repo_vars["PORTDIR"] = ""
+				repo_vars["PORTDIR"] = "/var/src/portage"
 
 			mypath = os.path.join(abs_user_config,"overlays")
 			if os.path.exists(mypath):
