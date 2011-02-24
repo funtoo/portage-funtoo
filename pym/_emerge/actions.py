@@ -1299,6 +1299,7 @@ def headSHA1(tree):
 	print("Portage Tree: %s" % tree)
 	head = None
 	hfile = os.path.join(tree,".git/HEAD")
+	hfile2 = ""
 	if os.path.exists(hfile):
 		infile = open(hfile,"r")
 		head = infile.readline().split()[1]
