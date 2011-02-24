@@ -30,13 +30,13 @@ import os
 MAKE_CONF_FILE           = "etc/make.conf"
 USER_CONFIG_PATH         = "etc/portage"
 MODULES_FILE_PATH        = USER_CONFIG_PATH + "/modules"
-CUSTOM_PROFILE_PATH      = USER_CONFIG_PATH + "/profile"
+CUSTOM_PROFILE_PATH      = USER_CONFIG_PATH
 USER_VIRTUALS_FILE       = USER_CONFIG_PATH + "/virtuals"
 EBUILD_SH_ENV_FILE       = USER_CONFIG_PATH + "/bashrc"
 EBUILD_SH_ENV_DIR        = USER_CONFIG_PATH + "/env"
 CUSTOM_MIRRORS_FILE      = USER_CONFIG_PATH + "/mirrors"
 COLOR_MAP_FILE           = USER_CONFIG_PATH + "/color.map"
-PROFILE_PATH             = "etc/make.profile"
+PROFILE_PATH             = USER_CONFIG_PATH
 MAKE_DEFAULTS_FILE       = PROFILE_PATH + "/make.defaults"  # FIXME: not used
 DEPRECATED_PROFILE_FILE  = PROFILE_PATH + "/deprecated"
 
@@ -101,9 +101,9 @@ SUPPORTED_FEATURES       = frozenset([
                            "strict", "stricter", "suidctl", "test", "test-fail-continue",
                            "unknown-features-filter", "unknown-features-warn",
                            "unmerge-logs", "unmerge-orphans", "userfetch", "userpriv",
-                           "usersandbox"])
+                           "usersandbox", "localpatch"])
 
-EAPI                     = 3
+EAPI                     = 4
 
 HASHING_BLOCKSIZE        = 32768
 MANIFEST1_HASH_FUNCTIONS = ("MD5", "SHA256", "RMD160")

@@ -16,6 +16,8 @@
 CFLAGS=""
 CXXFLAGS=""
 LDFLAGS=""
+FFLAGS=""
+FCFLAGS=""
 
 # Default distfiles mirrors. This rotation has multiple hosts and is reliable.
 # Approved by the mirror-admin team.
@@ -28,10 +30,9 @@ ACCEPT_LICENSE="* -@EULA"
 ACCEPT_PROPERTIES="*"
 
 # Repository Paths
-PORTDIR=/usr/portage
-DISTDIR=/usr/portage/distfiles
-PKGDIR=/usr/portage/packages
-RPMDIR=/usr/portage/rpm
+DISTDIR=/var/src/distfiles
+PKGDIR=/var/cache/portage/packages
+RPMDIR=/var/cache/portage/rpm
 
 # Temporary build directory
 PORTAGE_TMPDIR=/var/tmp

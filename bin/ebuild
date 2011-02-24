@@ -1,18 +1,18 @@
 #!/usr/bin/python -O
-# Copyright 1999-2010 Gentoo Foundation
+# Copyright 1999-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 from __future__ import print_function
 
+import signal
 import sys
 # This block ensures that ^C interrupts are handled quietly.
 try:
-	import signal
 
 	def exithandler(signum,frame):
 		signal.signal(signal.SIGINT, signal.SIG_IGN)
 		signal.signal(signal.SIGTERM, signal.SIG_IGN)
-		sys.exit(1)
+		sys.exit(128 + signum)
 
 	signal.signal(signal.SIGINT, exithandler)
 	signal.signal(signal.SIGTERM, exithandler)
@@ -21,7 +21,7 @@ try:
 	signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
 except KeyboardInterrupt:
-	sys.exit(1)
+	sys.exit(128 + signal.SIGINT)
 
 def debug_signal(signum, frame):
 	import pdb
@@ -132,7 +132,6 @@ ebuild_portdir = os.path.realpath(
 	os.path.dirname(os.path.dirname(os.path.dirname(ebuild))))
 ebuild = os.path.join(ebuild_portdir, *ebuild.split(os.path.sep)[-3:])
 vdb_path = os.path.realpath(os.path.join(portage.settings['EROOT'], VDB_PATH))
-
 # Make sure that portdb.findname() returns the correct ebuild.
 if ebuild_portdir != vdb_path and \
 	ebuild_portdir not in portage.portdb.porttrees:
@@ -148,8 +147,8 @@ if ebuild_portdir != vdb_path and \
 
 	print("Appending %s to PORTDIR_OVERLAY..." % ebuild_portdir)
 	portage.close_portdbapi_caches()
+	# tell the portage module to completely re-initialize itself using the updated PORTDIR_OVERLAY setting:
 	imp.reload(portage)
-
 # Constrain eclass resolution to the master(s)
 # that are specified in layout.conf (using an
 # approach similar to repoman's).
@@ -241,7 +240,7 @@ build_dir_phases = set(["setup", "unpack", "prepare", "configure", "compile",
 # If the current metadata is invalid then force the ebuild to be
 # sourced again even if $T/environment already exists.
 ebuild_changed = False
-if build_dir_phases.intersection(pargs):
+if mytree == "porttree" and build_dir_phases.intersection(pargs):
 	metadata, st, emtime = \
 		portage.portdb._pull_valid_cache(cpv, ebuild, ebuild_portdir)
 	if metadata is None:

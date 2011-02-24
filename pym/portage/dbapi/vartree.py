@@ -1,4 +1,4 @@
-# Copyright 1998-2010 Gentoo Foundation
+# Copyright 1998-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 __all__ = [
@@ -772,7 +772,7 @@ class vardbapi(dbapi):
 		"""
 		if not hasattr(pkg, "getcontents"):
 			pkg = self._dblink(pkg)
-		root = self._eroot
+		root = self.settings['ROOT']
 		root_len = len(root) - 1
 		new_contents = pkg.getcontents().copy()
 		removed = 0
@@ -1196,7 +1196,8 @@ class dblink(object):
 	_contents_re = re.compile(r'^(' + \
 		r'(?P<dir>(dev|dir|fif) (.+))|' + \
 		r'(?P<obj>(obj) (.+) (\S+) (\d+))|' + \
-		r'(?P<sym>(sym) (.+) -> (.+) (\d+))' + \
+		r'(?P<sym>(sym) (.+) -> (.+) ((\d+)|(?P<oldsym>(' + \
+		r'\(\d+, \d+L, \d+L, \d+, \d+, \d+, \d+L, \d+, (\d+), \d+\)))))' + \
 		r')$'
 	)
 
@@ -1379,6 +1380,9 @@ class dblink(object):
 		obj_index = contents_re.groupindex['obj']
 		dir_index = contents_re.groupindex['dir']
 		sym_index = contents_re.groupindex['sym']
+		# The old symlink format may exist on systems that have packages
+		# which were installed many years ago (see bug #351814).
+		oldsym_index = contents_re.groupindex['oldsym']
 		# CONTENTS files already contain EPREFIX
 		myroot = self.settings['ROOT']
 		if myroot == os.path.sep:
@@ -1406,8 +1410,12 @@ class dblink(object):
 				data = (m.group(base+1),)
 			elif m.group(sym_index) is not None:
 				base = sym_index
+				if m.group(oldsym_index) is None:
+					mtime = m.group(base+5)
+				else:
+					mtime = m.group(base+8)
 				#format: type, mtime, dest
-				data = (m.group(base+1), m.group(base+4), m.group(base+3))
+				data = (m.group(base+1), mtime, m.group(base+3))
 			else:
 				# This won't happen as long the regular expression
 				# is written to only match valid entries.
@@ -1767,7 +1775,8 @@ class dblink(object):
 			ignored_rmdir_errnos = (
 				errno.EEXIST, errno.ENOTEMPTY,
 				errno.EBUSY, errno.ENOENT,
-				errno.ENOTDIR, errno.EISDIR)
+				errno.ENOTDIR, errno.EISDIR,
+				errno.EPERM)
 			modprotect = os.path.join(self._eroot, "lib/modules/")
 
 			def unlink(file_name, lstatobj):
@@ -3762,25 +3771,14 @@ class dblink(object):
 				# whether config protection or not, we merge the new file the
 				# same way.  Unless moveme=0 (blocking directory)
 				if moveme:
-					# Do not hardlink files unless they are in the same
-					# directory, since otherwise tar may not be able to
-					# extract a tarball of the resulting hardlinks due to
-					# 'Invalid cross-device link' errors (depends on layout of
-					# mount points). Also, don't hardlink zero-byte files since
-					# it doesn't save any space, and don't hardlink
-					# CONFIG_PROTECTed files since config files shouldn't be
-					# hardlinked to eachother (for example, shadow installs
-					# several identical config files inside /etc/pam.d/).
-					parent_dir = os.path.dirname(myrealdest)
-					hardlink_key = (parent_dir, mymd5, mystat.st_size,
-						mystat.st_mode, mystat.st_uid, mystat.st_gid)
+					# Create hardlinks only for source files that already exist
+					# as hardlinks (having identical st_dev and st_ino).
+					hardlink_key = (mystat.st_dev, mystat.st_ino)
 
-					hardlink_candidates = None
-					if not protected and mystat.st_size != 0:
-						hardlink_candidates = self._md5_merge_map.get(hardlink_key)
-						if hardlink_candidates is None:
-							hardlink_candidates = []
-							self._md5_merge_map[hardlink_key] = hardlink_candidates
+					hardlink_candidates = self._md5_merge_map.get(hardlink_key)
+					if hardlink_candidates is None:
+						hardlink_candidates = []
+						self._md5_merge_map[hardlink_key] = hardlink_candidates
 
 					mymtime = movefile(mysrc, mydest, newmtime=thismtime,
 						sstat=mystat, mysettings=self.settings,
@@ -4093,8 +4091,6 @@ def tar_contents(contents, root, tar, protect=None, onProgress=None):
 		else:
 			os = portage.os
 
-	from portage.util import normalize_path
-	import tarfile
 	root = normalize_path(root).rstrip(os.path.sep) + os.path.sep
 	id_strings = {}
 	maxval = len(contents)
@@ -4131,8 +4127,6 @@ def tar_contents(contents, root, tar, protect=None, onProgress=None):
 		tarinfo = tar.gettarinfo(live_path, arcname)
 
 		if stat.S_ISREG(lst.st_mode):
-			# break hardlinks due to bug #185305
-			tarinfo.type = tarfile.REGTYPE
 			if protect and protect(path):
 				# Create an empty file as a place holder in order to avoid
 				# potential collision-protect issues.

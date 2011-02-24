@@ -1,4 +1,4 @@
-# Copyright 1999-2010 Gentoo Foundation
+# Copyright 1999-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 from __future__ import print_function
@@ -62,7 +62,7 @@ from _emerge.show_invalid_depstring_notice import show_invalid_depstring_notice
 from _emerge.sync.getaddrinfo_validate import getaddrinfo_validate
 from _emerge.unmerge import unmerge
 from _emerge.UnmergeDepPriority import UnmergeDepPriority
-from _emerge.UseFlagDisplay import UseFlagDisplay
+from _emerge.UseFlagDisplay import pkg_use_display
 from _emerge.userquery import userquery
 
 if sys.hexversion >= 0x3000000:
@@ -143,7 +143,6 @@ def action_build(settings, trees, mtimedb,
 
 	ldpath_mtimes = mtimedb["ldpath"]
 	favorites=[]
-	merge_count = 0
 	buildpkgonly = "--buildpkgonly" in myopts
 	pretend = "--pretend" in myopts
 	fetchonly = "--fetchonly" in myopts or "--fetch-all-uri" in myopts
@@ -413,14 +412,7 @@ def action_build(settings, trees, mtimedb,
 
 		if ("--resume" in myopts):
 			favorites=mtimedb["resume"]["favorites"]
-			mergetask = Scheduler(settings, trees, mtimedb, myopts,
-				spinner, favorites=favorites,
-				graph_config=mydepgraph.schedulerGraph())
-			del mydepgraph
-			clear_caches(trees)
 
-			retval = mergetask.merge()
-			merge_count = mergetask.curval
 		else:
 			if "resume" in mtimedb and \
 			"mergelist" in mtimedb["resume"] and \
@@ -430,14 +422,15 @@ def action_build(settings, trees, mtimedb,
 				mtimedb.commit()
 
 			mydepgraph.saveNomergeFavorites()
-			mergetask = Scheduler(settings, trees, mtimedb, myopts,
-				spinner, favorites=favorites,
-				graph_config=mydepgraph.schedulerGraph())
-			del mydepgraph
-			clear_caches(trees)
 
-			retval = mergetask.merge()
-			merge_count = mergetask.curval
+		mergetask = Scheduler(settings, trees, mtimedb, myopts,
+			spinner, favorites=favorites,
+			graph_config=mydepgraph.schedulerGraph())
+
+		del mydepgraph
+		clear_caches(trees)
+
+		retval = mergetask.merge()
 
 		if retval == os.EX_OK and not (buildpkgonly or fetchonly or pretend):
 			if "yes" == settings.get("AUTOCLEAN"):
@@ -1534,60 +1527,8 @@ def action_info(settings, trees, myopts, myfiles):
 				print("\n%s (non-installed binary) was built with the following:" % \
 					colorize("INFORM", str(pkg.cpv)))
 
-			pkgsettings.setcpv(pkg)
-			forced_flags = set(chain(pkgsettings.useforce,
-				pkgsettings.usemask))
-			use = set(pkg.use.enabled)
-			use.discard(pkgsettings.get('ARCH'))
-			use_expand_flags = set()
-			use_enabled = {}
-			use_disabled = {}
-			for varname in use_expand:
-				flag_prefix = varname.lower() + "_"
-				for f in use:
-					if f.startswith(flag_prefix):
-						use_expand_flags.add(f)
-						use_enabled.setdefault(
-							varname.upper(), []).append(f[len(flag_prefix):])
-
-				for f in pkg.iuse.all:
-					if f.startswith(flag_prefix):
-						use_expand_flags.add(f)
-						if f not in use:
-							use_disabled.setdefault(
-								varname.upper(), []).append(f[len(flag_prefix):])
-
-			var_order = set(use_enabled)
-			var_order.update(use_disabled)
-			var_order = sorted(var_order)
-			var_order.insert(0, 'USE')
-			use.difference_update(use_expand_flags)
-			use_enabled['USE'] = list(use)
-			use_disabled['USE'] = []
-
-			for f in pkg.iuse.all:
-				if f not in use and \
-					f not in use_expand_flags:
-					use_disabled['USE'].append(f)
-
-			flag_displays = []
-			for varname in var_order:
-				if varname in use_expand_hidden:
-					continue
-				flags = []
-				for f in use_enabled.get(varname, []):
-					flags.append(UseFlagDisplay(f, True, f in forced_flags))
-				for f in use_disabled.get(varname, []):
-					flags.append(UseFlagDisplay(f, False, f in forced_flags))
-				if alphabetical_use:
-					flags.sort(key=UseFlagDisplay.sort_combined)
-				else:
-					flags.sort(key=UseFlagDisplay.sort_separated)
-				# Use _unicode_decode() to force unicode format string so
-				# that UseFlagDisplay.__unicode__() is called in python2.
-				flag_displays.append('%s="%s"' % (varname,
-					' '.join(_unicode_decode("%s") % (f,) for f in flags)))
-			writemsg_stdout('%s\n' % ' '.join(flag_displays), noiselevel=-1)
+			writemsg_stdout('%s\n' % pkg_use_display(pkg, myopts),
+				noiselevel=-1)
 			if pkg_type == "installed":
 				for myvar in mydesiredvars:
 					if metadata[myvar].split() != settings.get(myvar, '').split():
@@ -1877,7 +1818,34 @@ def action_regen(settings, portdb, max_jobs, max_load):
 	sys.stdout.flush()
 
 	regen = MetadataRegen(portdb, max_jobs=max_jobs, max_load=max_load)
-	regen.run()
+	received_signal = []
+
+	def emergeexitsig(signum, frame):
+		signal.signal(signal.SIGINT, signal.SIG_IGN)
+		signal.signal(signal.SIGTERM, signal.SIG_IGN)
+		portage.util.writemsg("\n\nExiting on signal %(signal)s\n" % \
+			{"signal":signum})
+		regen.terminate()
+		received_signal.append(128 + signum)
+
+	earlier_sigint_handler = signal.signal(signal.SIGINT, emergeexitsig)
+	earlier_sigterm_handler = signal.signal(signal.SIGTERM, emergeexitsig)
+
+	try:
+		regen.run()
+	finally:
+		# Restore previous handlers
+		if earlier_sigint_handler is not None:
+			signal.signal(signal.SIGINT, earlier_sigint_handler)
+		else:
+			signal.signal(signal.SIGINT, signal.SIG_DFL)
+		if earlier_sigterm_handler is not None:
+			signal.signal(signal.SIGTERM, earlier_sigterm_handler)
+		else:
+			signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+	if received_signal:
+		sys.exit(received_signal[0])
 
 	portage.writemsg_stdout("done!\n")
 	return regen.returncode
@@ -1938,7 +1906,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 			writemsg_level("!!! %s\n" % l, level=logging.ERROR, noiselevel=-1)
 		return 1
 	updatecache_flg = True
-	if not os.path.exists(myportdir+"/.git"):
+	if not os.path.exists(myportdir):
 		if not syncuri:
 			writemsg_level("SYNC is undefined.\nPlease set SYNC to the remote location of the Portage repository.\n", noiselevel=-1, level=logging.ERROR)
 			return 1
@@ -2008,8 +1976,11 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 			sys.exit(1)
 
 		# Clean up after ourselves:
-		portage.process.spawn_bash("rm -f %s" % (repo_path_tmp))
+		portage.process.spawn_bash("rm -rf %s" % (repo_path_tmp))
 	else:
+		if not os.path.exists(myportdir+"/.git"):
+			print("!!! Portage tree at %s does not appear to be a git repository. Please move out of the way or correct your PORTDIR setting and retry." % myportdir)
+			sys.exit(1)
 		if portage.process.spawn_bash("su - %s -s /bin/sh -c 'cd %s >/dev/null 2>&1'" % ( syncuser, myportdir )) != os.EX_OK:
 			print("!!! Portage tree at %s is not reachable by user %s; please adjust permissions to correct." %  ( myportdir, syncuser ))
 			sys.exit(1)

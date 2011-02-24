@@ -1,4 +1,4 @@
-# Copyright 1999-2010 Gentoo Foundation
+# Copyright 1999-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 from __future__ import print_function
@@ -940,7 +940,8 @@ def parse_opts(tmpcmdline, silent=False):
 	if myoptions.use_ebuild_visibility in true_y:
 		myoptions.use_ebuild_visibility = True
 	else:
-		myoptions.use_ebuild_visibility = None
+		# None or "n"
+		pass
 
 	if myoptions.usepkg in true_y:
 		myoptions.usepkg = True
@@ -1270,10 +1271,7 @@ def profile_check(trees, myaction):
 			continue
 		# generate some profile related warning messages
 		validate_ebuild_environment(trees)
-		msg = "If you have just changed your profile configuration, you " + \
-			"should revert back to the previous configuration. Due to " + \
-			"your current profile being invalid, allowed actions are " + \
-			"limited to --help, --info, --sync, and --version."
+		msg = "emerge was not able to parse your profile."
 		writemsg_level("".join("!!! %s\n" % l for l in textwrap.wrap(msg, 70)),
 			level=logging.ERROR, noiselevel=-1)
 		return 1
@@ -1590,7 +1588,7 @@ def emerge_main():
 		signal.signal(signal.SIGINT, signal.SIG_IGN)
 		signal.signal(signal.SIGTERM, signal.SIG_IGN)
 		portage.util.writemsg("\n\nExiting on signal %(signal)s\n" % {"signal":signum})
-		sys.exit(100+signum)
+		sys.exit(128 + signum)
 	signal.signal(signal.SIGINT, emergeexitsig)
 	signal.signal(signal.SIGTERM, emergeexitsig)
 
