@@ -164,13 +164,7 @@ class config(object):
 			
 			parents = grabfile(parentsFile)
 		
-			# If the file was empty, throw an error:
-
-			if not parents:
-				raise ParseError( _("Empty parent file: %s") % parentsFile)
-			
 			# For each line in the parents file, use the line as a relative path to modify "currentPath", our current path:
-
 			for parentPath in parents:
 				if parentPath[0] == ":":
 					# an ":" in "parents" file means "relative to $PORTDIR/profiles" (ie. rootPath, an argument).	
