@@ -29,8 +29,10 @@ from portage import digraph
 from portage import _unicode_decode
 from portage.cache.cache_errors import CacheError
 from portage.const import GLOBAL_CONFIG_PATH, NEWS_LIB_PATH
-from portage.const import _ENABLE_DYN_LINK_MAP
+from portage.const import _ENABLE_DYN_LINK_MAP, _ENABLE_SET_CONFIG
 from portage.dbapi.dep_expand import dep_expand
+from portage.dep import Atom, extended_cp_match
+from portage.exception import InvalidAtom
 from portage.output import blue, bold, colorize, create_color_func, darkgreen, \
 	red, yellow
 good = create_color_func("GOOD")
@@ -1212,25 +1214,37 @@ def action_deselect(settings, trees, opts, atoms):
 			level=logging.ERROR, noiselevel=-1)
 		return 1
 
-	vardb = root_config.trees['vartree'].dbapi
-	expanded_atoms = set(atoms)
-	from portage.dep import Atom
-	for atom in atoms:
-		if not atom.startswith(SETPREFIX):
-			for cpv in vardb.match(atom):
-				slot, = vardb.aux_get(cpv, ['SLOT'])
-				if not slot:
-					slot = '0'
-				expanded_atoms.add(Atom('%s:%s' % (portage.cpv_getkey(cpv), slot)))
-
 	pretend = '--pretend' in opts
 	locked = False
 	if not pretend and hasattr(world_set, 'lock'):
 		world_set.lock()
 		locked = True
 	try:
-		discard_atoms = set()
 		world_set.load()
+		world_atoms = world_set.getAtoms()
+		vardb = root_config.trees["vartree"].dbapi
+		expanded_atoms = set(atoms)
+
+		for atom in atoms:
+			if not atom.startswith(SETPREFIX):
+				if atom.cp.startswith("null/"):
+					# try to expand category from world set
+					null_cat, pn = portage.catsplit(atom.cp)
+					for world_atom in world_atoms:
+						cat, world_pn = portage.catsplit(world_atom.cp)
+						if pn == world_pn:
+							expanded_atoms.add(
+								Atom(atom.replace("null", cat, 1),
+								allow_repo=True, allow_wildcard=True))
+
+				for cpv in vardb.match(atom):
+					slot, = vardb.aux_get(cpv, ["SLOT"])
+					if not slot:
+						slot = "0"
+					expanded_atoms.add(Atom("%s:%s" % \
+						(portage.cpv_getkey(cpv), slot)))
+
+		discard_atoms = set()
 		for atom in world_set:
 			for arg_atom in expanded_atoms:
 				if arg_atom.startswith(SETPREFIX):
@@ -1306,9 +1320,13 @@ def headSHA1(tree):
 	print ("Portage HEAD:",head,hfile2)
 
 def action_info(settings, trees, myopts, myfiles):
+
+	root_config = trees[settings['ROOT']]['root_config']
+
 	print(getportageversion(settings["PORTDIR"], settings["ROOT"],
 		settings.profile_path, settings["CHOST"],
 		trees[settings["ROOT"]]["vartree"].dbapi))
+
 	header_width = 65
 	header_title = "System Settings"
 	if myfiles:
@@ -1382,12 +1400,20 @@ def action_info(settings, trees, myopts, myfiles):
 
 	repos = portdb.settings.repositories
 	if "--verbose" in myopts:
-		writemsg_stdout("Repositories:\n\n")
+		writemsg_stdout("Repositories:\n\n", noiselevel=-1)
 		for repo in repos:
-			writemsg_stdout(repo.info_string())
+			writemsg_stdout(repo.info_string(), noiselevel=-1)
 	else:
 		writemsg_stdout("Repositories: %s\n" % \
-			" ".join(repo.name for repo in repos))
+			" ".join(repo.name for repo in repos), noiselevel=-1)
+
+	if _ENABLE_SET_CONFIG:
+		sets_line = "Installed sets: "
+		sets_line += ", ".join(s for s in \
+			sorted(root_config.sets['selected'].getNonAtoms()) \
+			if s.startswith(SETPREFIX))
+		sets_line += "\n"
+		writemsg_stdout(sets_line, noiselevel=-1)
 
 	if "--verbose" in myopts:
 		myvars = list(settings)
@@ -1412,7 +1438,6 @@ def action_info(settings, trees, myopts, myfiles):
 	use_expand_hidden = set(
 		settings.get('USE_EXPAND_HIDDEN', '').upper().split())
 	alphabetical_use = '--alphabetical' in myopts
-	root_config = trees[settings["ROOT"]]['root_config']
 	unset_vars = []
 	myvars.sort()
 	for x in myvars:
@@ -2030,14 +2055,15 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		if os.access(postsync, os.X_OK):
 			retval = portage.process.spawn( [postsync, syncuri], env=settings.environ())
 			if retval != os.EX_OK:
-				print(red(" * ") + bold("spawn failed of " + postsync))
+				writemsg_level(
+					" %s spawn failed of %s\n" % (bad("*"), postsync,),
+					level=logging.ERROR, noiselevel=-1)
 
 	display_news_notification(root_config, myopts)
 	return os.EX_OK
 
 def action_uninstall(settings, trees, ldpath_mtimes,
 	opts, action, files, spinner):
-
 	# For backward compat, some actions do not require leading '='.
 	ignore_missing_eq = action in ('clean', 'unmerge')
 	root = settings['ROOT']
@@ -2079,6 +2105,28 @@ def action_uninstall(settings, trees, ldpath_mtimes,
 
 		elif x.startswith(SETPREFIX) and action == "deselect":
 			valid_atoms.append(x)
+
+		elif "*" in x:
+			try:
+				ext_atom = Atom(x, allow_repo=True, allow_wildcard=True)
+			except InvalidAtom:
+				msg = []
+				msg.append("'%s' is not a valid package atom." % (x,))
+				msg.append("Please check ebuild(5) for full details.")
+				writemsg_level("".join("!!! %s\n" % line for line in msg),
+					level=logging.ERROR, noiselevel=-1)
+				return 1
+
+			for cp in vardb.cp_all():
+				if extended_cp_match(ext_atom.cp, cp):
+					atom = cp
+					if ext_atom.slot:
+						atom += ":" + ext_atom.slot
+					if ext_atom.repo:
+						atom += "::" + ext_atom.repo
+
+					if vardb.match(atom):
+						valid_atoms.append(Atom(atom, allow_repo=True))
 
 		else:
 			msg = []
@@ -2145,6 +2193,13 @@ def action_uninstall(settings, trees, ldpath_mtimes,
 		spinner)
 	sched._background = sched._background_mode()
 	sched._status_display.quiet = True
+
+	if sched._background:
+		sched.settings.unlock()
+		sched.settings["PORTAGE_BACKGROUND"] = "1"
+		sched.settings.backup_changes("PORTAGE_BACKGROUND")
+		sched.settings.lock()
+		sched.pkgsettings[root] = portage.config(clone=sched.settings)
 
 	if action in ('clean', 'unmerge') or \
 		(action == 'prune' and "--nodeps" in opts):
@@ -2496,11 +2551,21 @@ def chk_updated_cfg_files(eroot, config_protect):
 		portage.util.find_updated_config_files(target_root, config_protect))
 
 	for x in result:
-		print("\n"+colorize("WARN", " * IMPORTANT:"), end=' ')
+		writemsg_level("\n %s " % (colorize("WARN", "* IMPORTANT:"),),
+			level=logging.INFO, noiselevel=-1)
 		if not x[1]: # it's a protected file
-			print("config file '%s' needs updating." % x[0])
+			writemsg_level("config file '%s' needs updating.\n" % x[0],
+				level=logging.INFO, noiselevel=-1)
 		else: # it's a protected dir
-			print("%d config files in '%s' need updating." % (len(x[1]), x[0]))
+			if len(x[1]) == 1:
+				head, tail = os.path.split(x[1][0])
+				tail = tail[len("._cfg0000_"):]
+				fpath = os.path.join(head, tail)
+				writemsg_level("config file '%s' needs updating.\n" % fpath,
+					level=logging.INFO, noiselevel=-1)
+			else:
+				writemsg_level("%d config files in '%s' need updating.\n" % \
+					(len(x[1]), x[0]), level=logging.INFO, noiselevel=-1)
 
 	if result:
 		print(" "+yellow("*")+" See the "+colorize("INFORM","CONFIGURATION FILES")\
