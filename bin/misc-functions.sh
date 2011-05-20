@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 1999-2010 Gentoo Foundation
+# Copyright 1999-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 #
 # Miscellaneous shell functions that make use of the ebuild env but don't need
@@ -103,7 +103,7 @@ prepcompress() {
 			fi
 		done
 		for g in "${exclude[@]}"; do
-			if [[ ${f} = ${g} || ${f} == "${g%/}"/* ]]; then
+			if [[ ${f} = "${g}" || ${f} == "${g%/}"/* ]]; then
 				unset include[i]
 				continue 2
 			fi
