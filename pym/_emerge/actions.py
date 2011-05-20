@@ -2009,7 +2009,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		if portage.process.spawn_bash("su - %s -s /bin/sh -c 'cd %s >/dev/null 2>&1'" % ( syncuser, myportdir )) != os.EX_OK:
 			print("!!! Portage tree at %s is not reachable by user %s; please adjust permissions to correct." %  ( myportdir, syncuser ))
 			sys.exit(1)
-		print(">>> Starting git pull...")
+		print(">>> Starting git pull in %s..." % myportdir )
 		exitcode = portage.process.spawn_bash( "su - %s -s /bin/sh -c 'umask %s && cd %s && exec git pull --no-stat'" % (syncuser, syncumask, portage._shell_quote(myportdir),))
 		if exitcode != os.EX_OK:
 			msg = "!!! git pull error in %s." % myportdir
