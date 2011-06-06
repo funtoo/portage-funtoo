@@ -50,7 +50,7 @@ if sys.hexversion >= 0x3000000:
 	long = int
 
 options=[
-"--ask",          "--alphabetical",
+"--alphabetical",
 "--ask-enter-invalid",
 "--buildpkgonly",
 "--changed-use",
@@ -65,8 +65,6 @@ options=[
 "--nodeps",       "--noreplace",
 "--nospinner",    "--oneshot",
 "--onlydeps",     "--pretend",
-"--quiet",
-"--quiet-build",
 "--quiet-unmerge-warn",
 "--resume",
 "--searchdesc",
@@ -79,7 +77,6 @@ options=[
 
 shortmapping={
 "1":"--oneshot",
-"a":"--ask",
 "B":"--buildpkgonly",
 "c":"--depclean",
 "C":"--unmerge",
@@ -91,7 +88,6 @@ shortmapping={
 "n":"--noreplace", "N":"--newuse",
 "o":"--onlydeps",  "O":"--nodeps",
 "p":"--pretend",   "P":"--prune",
-"q":"--quiet",
 "r":"--resume",
 "s":"--search",    "S":"--searchdesc",
 "t":"--tree",
@@ -118,10 +114,12 @@ def chk_updated_info_files(root, infodirs, prev_mtimes, retval):
 
 		if not regen_infodirs:
 			portage.writemsg_stdout("\n")
-			out.einfo("GNU info directory index is up-to-date.")
+			if portage.util.noiselimit >= 0:
+				out.einfo("GNU info directory index is up-to-date.")
 		else:
 			portage.writemsg_stdout("\n")
-			out.einfo("Regenerating GNU info directory index...")
+			if portage.util.noiselimit >= 0:
+				out.einfo("Regenerating GNU info directory index...")
 
 			dir_extensions = ("", ".gz", ".bz2")
 			icount=0
@@ -208,7 +206,7 @@ def chk_updated_info_files(root, infodirs, prev_mtimes, retval):
 					(icount, badcount))
 				writemsg_level(errmsg, level=logging.ERROR, noiselevel=-1)
 			else:
-				if icount > 0:
+				if icount > 0 and portage.util.noiselimit >= 0:
 					out.einfo("Processed %d info files." % (icount,))
 
 def display_preserved_libs(vardbapi, myopts):
@@ -292,7 +290,8 @@ def display_preserved_libs(vardbapi, myopts):
 					print(colorize("WARN", " * ") + "     used by %d other files" % (len(consumers) - MAX_DISPLAY))
 		print("Use " + colorize("GOOD", "emerge @preserved-rebuild") + " to rebuild packages using these libraries")
 
-def post_emerge(root_config, myopts, mtimedb, retval):
+def post_emerge(myaction, myopts, myfiles,
+	target_root, trees, mtimedb, retval):
 	"""
 	Misc. things to run at the end of a merge session.
 
@@ -303,6 +302,14 @@ def post_emerge(root_config, myopts, mtimedb, retval):
 	Display preserved libs warnings
 	Exit Emerge
 
+	@param myaction: The action returned from parse_opts()
+	@type myaction: String
+	@param myopts: emerge options
+	@type myopts: dict
+	@param myfiles: emerge arguments
+	@type myfiles: list
+	@param target_root: The target ROOT for myaction
+	@type target_root: String
 	@param trees: A dictionary mapping each ROOT to it's package databases
 	@type trees: dict
 	@param mtimedb: The mtimeDB to store data needed across merge invocations
@@ -314,8 +321,7 @@ def post_emerge(root_config, myopts, mtimedb, retval):
 	1.  Calls sys.exit(retval)
 	"""
 
-	target_root = root_config.root
-	trees = { target_root : root_config.trees }
+	root_config = trees[target_root]["root_config"]
 	vardbapi = trees[target_root]["vartree"].dbapi
 	settings = vardbapi.settings
 	info_mtimes = mtimedb["info"]
@@ -370,7 +376,29 @@ def post_emerge(root_config, myopts, mtimedb, retval):
 	if retval in (None, os.EX_OK) or (not "--pretend" in myopts):
 		display_preserved_libs(vardbapi, myopts)	
 
+	postemerge = os.path.join(settings["PORTAGE_CONFIGROOT"],
+		portage.USER_CONFIG_PATH, "bin", "post_emerge")
+	if os.access(postemerge, os.X_OK):
+		hook_retval = portage.process.spawn(
+						[postemerge], env=settings.environ())
+		if hook_retval != os.EX_OK:
+			writemsg_level(
+				" %s spawn failed of %s\n" % (bad("*"), postemerge,),
+				level=logging.ERROR, noiselevel=-1)
+
+	if "--quiet" not in myopts and \
+		myaction is None and "@world" in myfiles:
+		show_depclean_suggestion()
+
 	sys.exit(retval)
+
+def show_depclean_suggestion():
+	out = portage.output.EOutput()
+	msg = "After world updates, it is important to remove " + \
+		"obsolete packages with emerge --depclean. Refer " + \
+		"to `man emerge` for more information."
+	for line in textwrap.wrap(msg, 72):
+		out.ewarn(line)
 
 def multiple_actions(action1, action2):
 	sys.stderr.write("\n!!! Multiple actions requested... Please choose one only.\n")
@@ -398,6 +426,7 @@ def insert_optional_args(args):
 	new_args = []
 
 	default_arg_opts = {
+		'--ask'                  : y_or_n,
 		'--autounmask'           : y_or_n,
 		'--buildpkg'             : y_or_n,
 		'--complete-graph'       : y_or_n,
@@ -410,6 +439,8 @@ def insert_optional_args(args):
 		'--jobs'       : valid_integers,
 		'--keep-going'           : y_or_n,
 		'--package-moves'        : y_or_n,
+		'--quiet'                : y_or_n,
+		'--quiet-build'          : y_or_n,
 		'--rebuilt-binaries'     : y_or_n,
 		'--root-deps'  : ('rdeps',),
 		'--select'               : y_or_n,
@@ -430,11 +461,13 @@ def insert_optional_args(args):
 	# Don't make things like "-kn" expand to "-k n"
 	# since existence of -n makes it too ambiguous.
 	short_arg_opts_n = {
+		'a' : y_or_n,
 		'b' : y_or_n,
 		'g' : y_or_n,
 		'G' : y_or_n,
 		'k' : y_or_n,
 		'K' : y_or_n,
+		'q' : y_or_n,
 	}
 
 	arg_stack = args[:]
@@ -532,6 +565,13 @@ def parse_opts(tmpcmdline, silent=False):
 	true_y_or_n = ("True", "y", "n")
 	true_y = ("True", "y")
 	argument_options = {
+
+		"--ask": {
+			"shortopt" : "-a",
+			"help"    : "prompt before performing any actions",
+			"type"    : "choice",
+			"choices" : true_y_or_n
+		},
 
 		"--autounmask": {
 			"help"    : "automatically unmask packages",
@@ -670,6 +710,19 @@ def parse_opts(tmpcmdline, silent=False):
 			"choices"  : true_y_or_n
 		},
 
+		"--quiet": {
+			"shortopt" : "-q",
+			"help"     : "reduced or condensed output",
+			"type"     : "choice",
+			"choices"  : true_y_or_n
+		},
+
+		"--quiet-build": {
+			"help"     : "redirect build output to logs",
+			"type"     : "choice",
+			"choices"  : true_y_or_n
+		},
+
 		"--rebuilt-binaries": {
 			"help"     : "replace installed packages with binary " + \
 			             "packages that have been rebuilt",
@@ -767,6 +820,11 @@ def parse_opts(tmpcmdline, silent=False):
 
 	myoptions, myargs = parser.parse_args(args=tmpcmdline)
 
+	if myoptions.ask in true_y:
+		myoptions.ask = True
+	else:
+		myoptions.ask = None
+
 	if myoptions.autounmask in true_y:
 		myoptions.autounmask = True
 
@@ -841,6 +899,16 @@ def parse_opts(tmpcmdline, silent=False):
 
 	if myoptions.package_moves in true_y:
 		myoptions.package_moves = True
+
+	if myoptions.quiet in true_y:
+		myoptions.quiet = True
+	else:
+		myoptions.quiet = None
+
+	if myoptions.quiet_build in true_y:
+		myoptions.quiet_build = True
+	else:
+		myoptions.quiet_build = None
 
 	if myoptions.rebuilt_binaries in true_y:
 		myoptions.rebuilt_binaries = True
@@ -1287,11 +1355,17 @@ def check_procfs():
 		level=logging.ERROR, noiselevel=-1)
 	return 1
 
-def emerge_main():
-	global portage	# NFC why this is necessary now - genone
-	#disabled by drobbins:
+def emerge_main(args=None):
+	"""
+	@param args: command arguments (default: sys.argv[1:])
+	@type args: list
+	"""
+	if args is None:
+		args = sys.argv[1:]
+
+	#Disabled by drobbins
 	#portage._disable_legacy_globals()
-	portage._disable_legacy_globals()
+
 	portage.dep._internal_warnings = True
 	# Disable color until we're sure that it should be enabled (after
 	# EMERGE_DEFAULT_OPTS has been parsed).
@@ -1300,7 +1374,7 @@ def emerge_main():
 	# possible, such as --config-root.  They will be parsed again later,
 	# together with EMERGE_DEFAULT_OPTS (which may vary depending on the
 	# the value of --config-root).
-	myaction, myopts, myfiles = parse_opts(sys.argv[1:], silent=True)
+	myaction, myopts, myfiles = parse_opts(args, silent=True)
 	if "--debug" in myopts:
 		os.environ["PORTAGE_DEBUG"] = "1"
 	if "--config-root" in myopts:
@@ -1321,7 +1395,7 @@ def emerge_main():
 	tmpcmdline = []
 	if "--ignore-default-opts" not in myopts:
 		tmpcmdline.extend(settings["EMERGE_DEFAULT_OPTS"].split())
-	tmpcmdline.extend(sys.argv[1:])
+	tmpcmdline.extend(args)
 	myaction, myopts, myfiles = parse_opts(tmpcmdline)
 
 	if myaction not in ('help', 'info', 'version') and \
@@ -1485,11 +1559,10 @@ def emerge_main():
 
 	if settings.get("PORTAGE_DEBUG", "") == "1":
 		spinner.update = spinner.update_quiet
-		portage.debug=1
 		portage.util.noiselimit = 0
 		if "python-trace" in settings.features:
-			import portage.debug
-			portage.debug.set_trace(True)
+			import portage.debug as portage_debug
+			portage_debug.set_trace(True)
 
 	if not ("--quiet" in myopts):
 		if '--nospinner' in myopts or \
@@ -1630,7 +1703,8 @@ def emerge_main():
 		rval = action_uninstall(settings, trees, mtimedb["ldpath"],
 			myopts, myaction, myfiles, spinner)
 		if not (myaction == 'deselect' or buildpkgonly or fetchonly or pretend):
-			post_emerge(root_config, myopts, mtimedb, rval)
+			post_emerge(myaction, myopts, myfiles, settings["ROOT"],
+				trees, mtimedb, rval)
 		return rval
 
 	elif myaction == 'info':
@@ -1701,7 +1775,7 @@ def emerge_main():
 			display_news_notification(root_config, myopts)
 		retval = action_build(settings, trees, mtimedb,
 			myopts, myaction, myfiles, spinner)
-		root_config = trees[settings["ROOT"]]["root_config"]
-		post_emerge(root_config, myopts, mtimedb, retval)
+		post_emerge(myaction, myopts, myfiles, settings["ROOT"],
+			trees, mtimedb, retval)
 
 		return retval

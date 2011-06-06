@@ -295,6 +295,20 @@ class Scheduler(PollScheduler):
 
 	def _terminate_tasks(self):
 		self._status_display.quiet = True
+		# Remove running_tasks that have been added to queues but
+		# haven't been started yet, since we're going to discard
+		# them and their start/exit handlers won't be called.
+		for build in self._task_queues.jobs._task_queue:
+			self._running_tasks.remove(build.pkg)
+		if self._merge_wait_queue:
+			for merge in self._merge_wait_queue:
+				self._running_tasks.remove(merge.merge.pkg)
+			del self._merge_wait_queue[:]
+		for merge in self._task_queues.merge._task_queue:
+			# Setup phases may be scheduled in this queue, but
+			# we're only interested in the PackageMerge instances.
+			if isinstance(merge, PackageMerge):
+				self._running_tasks.remove(merge.merge.pkg)
 		for q in self._task_queues.values():
 			q.clear()
 
@@ -303,16 +317,13 @@ class Scheduler(PollScheduler):
 		Initialization structures used for dependency calculations
 		involving currently installed packages.
 		"""
-		# TODO: Replace the BlockerDB with a depgraph of installed packages
-		# that's updated incrementally with each upgrade/uninstall operation
-		# This will be useful for making quick and safe decisions with respect
-		# to aggressive parallelization discussed in bug #279623.
 		self._set_graph_config(graph_config)
 		self._blocker_db = {}
 		for root in self.trees:
 			if graph_config is None:
 				fake_vartree = FakeVartree(self.trees[root]["root_config"],
 					pkg_cache=self._pkg_cache)
+				fake_vartree.sync()
 			else:
 				fake_vartree = graph_config.trees[root]['vartree']
 			self._blocker_db[root] = BlockerDB(fake_vartree)
@@ -629,27 +640,20 @@ class Scheduler(PollScheduler):
 
 	def _find_blockers(self, new_pkg):
 		"""
-		Returns a callable which should be called only when
-		the vdb lock has been acquired.
+		Returns a callable.
 		"""
 		def get_blockers():
-			return self._find_blockers_with_lock(new_pkg, acquire_lock=0)
+			return self._find_blockers_impl(new_pkg)
 		return get_blockers
 
-	def _find_blockers_with_lock(self, new_pkg, acquire_lock=0):
+	def _find_blockers_impl(self, new_pkg):
 		if self._opts_ignore_blockers.intersection(self.myopts):
 			return None
-
-		# Call gc.collect() here to avoid heap overflow that
-		# triggers 'Cannot allocate memory' errors (reported
-		# with python-2.5).
-		gc.collect()
 
 		blocker_db = self._blocker_db[new_pkg.root]
 
 		blocker_dblinks = []
-		for blocking_pkg in blocker_db.findInstalledBlockers(
-			new_pkg, acquire_lock=acquire_lock):
+		for blocking_pkg in blocker_db.findInstalledBlockers(new_pkg):
 			if new_pkg.slot_atom == blocking_pkg.slot_atom:
 				continue
 			if new_pkg.cpv == blocking_pkg.cpv:
@@ -658,8 +662,6 @@ class Scheduler(PollScheduler):
 				blocking_pkg.category, blocking_pkg.pf, blocking_pkg.root,
 				self.pkgsettings[blocking_pkg.root], treetype="vartree",
 				vartree=self.trees[blocking_pkg.root]["vartree"]))
-
-		gc.collect()
 
 		return blocker_dblinks
 
@@ -933,7 +935,8 @@ class Scheduler(PollScheduler):
 				return True
 			elif pkg.cpv != self._running_portage.cpv or \
 				'9999' in pkg.cpv or \
-				'git' in pkg.inherited:
+				'git' in pkg.inherited or \
+				'git-2' in pkg.inherited:
 				return True
 		return False
 
@@ -1372,6 +1375,10 @@ class Scheduler(PollScheduler):
 	def _system_merge_started(self, merge):
 		"""
 		Add any unsatisfied runtime deps to self._unsatisfied_system_deps.
+		In general, this keeps track of installed system packages with
+		unsatisfied RDEPEND or PDEPEND (circular dependencies). It can be
+		a fragile situation, so we don't execute any unrelated builds until
+		the circular dependencies are built and installed.
 		"""
 		graph = self._digraph
 		if graph is None:
@@ -1435,7 +1442,7 @@ class Scheduler(PollScheduler):
 				build_dir=build_dir, build_log=build_log,
 				pkg=pkg,
 				returncode=merge.returncode))
-			if not self._terminated.is_set():
+			if not self._terminated_tasks:
 				self._failed_pkg_msg(self._failed_pkgs[-1], "install", "to")
 				self._status_display.failed = len(self._failed_pkgs)
 			return
@@ -1470,7 +1477,13 @@ class Scheduler(PollScheduler):
 		mtimedb.commit()
 
 	def _build_exit(self, build):
-		if build.returncode == os.EX_OK:
+		if build.returncode == os.EX_OK and self._terminated_tasks:
+			# We've been interrupted, so we won't
+			# add this to the merge queue.
+			self.curval += 1
+			self._running_tasks.remove(build.pkg)
+			self._deallocate_config(build.settings)
+		elif build.returncode == os.EX_OK:
 			self.curval += 1
 			merge = PackageMerge(merge=build)
 			if not build.build_opts.buildpkgonly and \
@@ -1493,7 +1506,7 @@ class Scheduler(PollScheduler):
 				build_dir=build_dir, build_log=build_log,
 				pkg=build.pkg,
 				returncode=build.returncode))
-			if not self._terminated.is_set():
+			if not self._terminated_tasks:
 				self._failed_pkg_msg(self._failed_pkgs[-1], "emerge", "for")
 				self._status_display.failed = len(self._failed_pkgs)
 			self._deallocate_config(build.settings)
@@ -1508,6 +1521,8 @@ class Scheduler(PollScheduler):
 		self._completed_tasks.add(pkg)
 		self._unsatisfied_system_deps.discard(pkg)
 		self._choose_pkg_return_early = False
+		blocker_db = self._blocker_db[pkg.root]
+		blocker_db.discardBlocker(pkg)
 
 	def _merge(self):
 
@@ -1539,10 +1554,13 @@ class Scheduler(PollScheduler):
 		self._status_display.reset()
 		self._digraph = None
 		self._task_queues.fetch.clear()
+		self._prefetchers.clear()
 
 	def _choose_pkg(self):
 		"""
-		Choose a task that has all it's dependencies satisfied.
+		Choose a task that has all its dependencies satisfied. This is used
+		for parallel build scheduling, and ensures that we don't build
+		anything with deep dependencies that have yet to be merged.
 		"""
 
 		if self._choose_pkg_return_early:
@@ -1661,18 +1679,16 @@ class Scheduler(PollScheduler):
 			self._set_max_jobs(1)
 
 		while self._schedule():
-			if self._poll_event_handlers:
-				self._poll_loop()
+			self._poll_loop()
 
 		while True:
 			self._schedule()
 			if not self._is_work_scheduled():
 				break
-			if self._poll_event_handlers:
-				self._poll_loop()
+			self._poll_loop()
 
 	def _keep_scheduling(self):
-		return bool(not self._terminated.is_set() and self._pkg_queue and \
+		return bool(not self._terminated_tasks and self._pkg_queue and \
 			not (self._failed_pkgs and not self._build_opts.fetchonly))
 
 	def _is_work_scheduled(self):
@@ -1789,7 +1805,8 @@ class Scheduler(PollScheduler):
 		pkg_to_replace = None
 		if pkg.operation != "uninstall":
 			vardb = pkg.root_config.trees["vartree"].dbapi
-			previous_cpv = vardb.match(pkg.slot_atom)
+			previous_cpv = [x for x in vardb.match(pkg.slot_atom) \
+				if portage.cpv_getkey(x) == pkg.cp]
 			if not previous_cpv and vardb.cpv_exists(pkg.cpv):
 				# same cpv, different SLOT
 				previous_cpv = [pkg.cpv]
@@ -1798,6 +1815,14 @@ class Scheduler(PollScheduler):
 				pkg_to_replace = self._pkg(previous_cpv,
 					"installed", pkg.root_config, installed=True,
 					operation="uninstall")
+
+		prefetcher = self._prefetchers.pop(pkg, None)
+		if prefetcher is not None and not prefetcher.isAlive():
+			try:
+				self._task_queues.fetch._task_queue.remove(prefetcher)
+			except ValueError:
+				pass
+			prefetcher = None
 
 		task = MergeListItem(args_set=self._args_set,
 			background=self._background, binpkg_opts=self._binpkg_opts,
@@ -1808,7 +1833,7 @@ class Scheduler(PollScheduler):
 			find_blockers=self._find_blockers(pkg), logger=self._logger,
 			mtimedb=self._mtimedb, pkg=pkg, pkg_count=self._pkg_count.copy(),
 			pkg_to_replace=pkg_to_replace,
-			prefetcher=self._prefetchers.get(pkg),
+			prefetcher=prefetcher,
 			scheduler=self._sched_iface,
 			settings=self._allocate_config(pkg.root),
 			statusMessage=self._status_msg,
