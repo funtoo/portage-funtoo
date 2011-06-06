@@ -1,5 +1,5 @@
 # getbinpkg.py -- Portage binary-package helper functions
-# Copyright 2003-2004 Gentoo Foundation
+# Copyright 2003-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 from portage.output import colorize
@@ -261,7 +261,7 @@ def make_http_request(conn, address, params={}, headers={}, dest=None):
 		try:
 			if (rc != 0):
 				conn,ignore,ignore,ignore,ignore = create_conn(address)
-			conn.request("GET", address, params, headers)
+			conn.request("GET", address, body=None, headers=headers)
 		except SystemExit as e:
 			raise
 		except Exception as e:
@@ -431,17 +431,19 @@ def file_get_metadata(baseurl,conn=None, chunk_size=3000):
 	return myid
 
 
-def file_get(baseurl,dest,conn=None,fcmd=None):
+def file_get(baseurl,dest,conn=None,fcmd=None,filename=None):
 	"""(baseurl,dest,fcmd=) -- Takes a base url to connect to and read from.
 	URI should be in the form <proto>://[user[:pass]@]<site>[:port]<path>"""
 
 	if not fcmd:
 		return file_get_lib(baseurl,dest,conn)
+	if not filename:
+		filename = os.path.basename(baseurl)
 
 	variables = {
 		"DISTDIR": dest,
 		"URI":     baseurl,
-		"FILE":    os.path.basename(baseurl)
+		"FILE":    filename
 	}
 
 	from portage.util import varexpand

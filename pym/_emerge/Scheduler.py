@@ -3,6 +3,7 @@
 
 from __future__ import print_function
 
+from collections import deque
 import gc
 import gzip
 import logging
@@ -22,7 +23,6 @@ from portage import os
 from portage import _encodings
 from portage import _unicode_decode, _unicode_encode
 from portage.cache.mappings import slot_dict_class
-from portage.const import LIBC_PACKAGE_ATOM
 from portage.elog.messages import eerror
 from portage.localization import _
 from portage.output import colorize, create_color_func, red
@@ -34,6 +34,7 @@ from portage.package.ebuild.digestcheck import digestcheck
 from portage.package.ebuild.digestgen import digestgen
 from portage.package.ebuild.prepare_build_dirs import prepare_build_dirs
 
+import _emerge
 from _emerge.BinpkgFetcher import BinpkgFetcher
 from _emerge.BinpkgPrefetcher import BinpkgPrefetcher
 from _emerge.BinpkgVerifier import BinpkgVerifier
@@ -46,7 +47,7 @@ from _emerge.DepPriority import DepPriority
 from _emerge.depgraph import depgraph, resume_depgraph
 from _emerge.EbuildFetcher import EbuildFetcher
 from _emerge.EbuildPhase import EbuildPhase
-from _emerge.emergelog import emergelog, _emerge_log_dir
+from _emerge.emergelog import emergelog
 from _emerge.FakeVartree import FakeVartree
 from _emerge._find_deep_system_runtime_deps import _find_deep_system_runtime_deps
 from _emerge._flush_elog_mod_echo import _flush_elog_mod_echo
@@ -83,11 +84,8 @@ class Scheduler(PollScheduler):
 	_bad_resume_opts = set(["--ask", "--changelog",
 		"--resume", "--skipfirst"])
 
-	_fetch_log = os.path.join(_emerge_log_dir, 'emerge-fetch.log')
-
 	class _iface_class(SlotObject):
-		__slots__ = ("dblinkEbuildPhase", "dblinkDisplayMerge",
-			"dblinkElog", "dblinkEmergeLog", "fetch",
+		__slots__ = ("fetch",
 			"output", "register", "schedule",
 			"scheduleSetup", "scheduleUnpack", "scheduleYield",
 			"unregister")
@@ -96,7 +94,7 @@ class Scheduler(PollScheduler):
 		__slots__ = ("log_file", "schedule")
 
 	_task_queues_class = slot_dict_class(
-		("merge", "jobs", "fetch", "unpack"), prefix="")
+		("merge", "jobs", "ebuild_locks", "fetch", "unpack"), prefix="")
 
 	class _build_opts_class(SlotObject):
 		__slots__ = ("buildpkg", "buildpkgonly",
@@ -177,8 +175,9 @@ class Scheduler(PollScheduler):
 
 		# Holds merges that will wait to be executed when no builds are
 		# executing. This is useful for system packages since dependencies
-		# on system packages are frequently unspecified.
-		self._merge_wait_queue = []
+		# on system packages are frequently unspecified. For example, see
+		# bug #256616.
+		self._merge_wait_queue = deque()
 		# Holds merges that have been transfered from the merge_wait_queue to
 		# the actual merge queue. They are removed from this list upon
 		# completion. Other packages can start building only when this list is
@@ -216,13 +215,11 @@ class Scheduler(PollScheduler):
 		for root in self.trees:
 			self._config_pool[root] = []
 
+		self._fetch_log = os.path.join(_emerge.emergelog._emerge_log_dir,
+			'emerge-fetch.log')
 		fetch_iface = self._fetch_iface_class(log_file=self._fetch_log,
 			schedule=self._schedule_fetch)
 		self._sched_iface = self._iface_class(
-			dblinkEbuildPhase=self._dblink_ebuild_phase,
-			dblinkDisplayMerge=self._dblink_display_merge,
-			dblinkElog=self._dblink_elog,
-			dblinkEmergeLog=self._dblink_emerge_log,
 			fetch=fetch_iface, output=self._task_output,
 			register=self._register,
 			schedule=self._schedule_wait,
@@ -295,6 +292,20 @@ class Scheduler(PollScheduler):
 
 	def _terminate_tasks(self):
 		self._status_display.quiet = True
+		# Remove running_tasks that have been added to queues but
+		# haven't been started yet, since we're going to discard
+		# them and their start/exit handlers won't be called.
+		for build in self._task_queues.jobs._task_queue:
+			self._running_tasks.remove(build.pkg)
+		if self._merge_wait_queue:
+			for merge in self._merge_wait_queue:
+				self._running_tasks.remove(merge.merge.pkg)
+			self._merge_wait_queue.clear()
+		for merge in self._task_queues.merge._task_queue:
+			# Setup phases may be scheduled in this queue, but
+			# we're only interested in the PackageMerge instances.
+			if isinstance(merge, PackageMerge):
+				self._running_tasks.remove(merge.merge.pkg)
 		for q in self._task_queues.values():
 			q.clear()
 
@@ -303,16 +314,13 @@ class Scheduler(PollScheduler):
 		Initialization structures used for dependency calculations
 		involving currently installed packages.
 		"""
-		# TODO: Replace the BlockerDB with a depgraph of installed packages
-		# that's updated incrementally with each upgrade/uninstall operation
-		# This will be useful for making quick and safe decisions with respect
-		# to aggressive parallelization discussed in bug #279623.
 		self._set_graph_config(graph_config)
 		self._blocker_db = {}
 		for root in self.trees:
 			if graph_config is None:
 				fake_vartree = FakeVartree(self.trees[root]["root_config"],
 					pkg_cache=self._pkg_cache)
+				fake_vartree.sync()
 			else:
 				fake_vartree = graph_config.trees[root]['vartree']
 			self._blocker_db[root] = BlockerDB(fake_vartree)
@@ -377,6 +385,8 @@ class Scheduler(PollScheduler):
 	def _set_max_jobs(self, max_jobs):
 		self._max_jobs = max_jobs
 		self._task_queues.jobs.max_jobs = max_jobs
+		if "parallel-install" in self.settings.features:
+			self._task_queues.merge.max_jobs = max_jobs
 
 	def _background_mode(self):
 		"""
@@ -465,7 +475,6 @@ class Scheduler(PollScheduler):
 		self._find_system_deps()
 		self._prune_digraph()
 		self._prevent_builddir_collisions()
-		self._implicit_libc_deps()
 		if '--debug' in self.myopts:
 			writemsg("\nscheduler digraph:\n\n", noiselevel=-1)
 			self._digraph.debug_print()
@@ -531,69 +540,6 @@ class Scheduler(PollScheduler):
 					priority=DepPriority(buildtime=True))
 			cpv_map[pkg.cpv].append(pkg)
 
-	def _implicit_libc_deps(self):
-		"""
-		Create implicit dependencies on libc, in order to ensure that libc
-		is installed as early as possible (see bug #303567). If the merge
-		list contains both a new-style virtual and an old-style PROVIDE
-		virtual, the new-style virtual is used.
-		"""
-		implicit_libc_roots = set([self._running_root.root])
-		libc_set = InternalPackageSet([LIBC_PACKAGE_ATOM])
-		norm_libc_pkgs = {}
-		virt_libc_pkgs = {}
-		for pkg in self._mergelist:
-			if not isinstance(pkg, Package):
-				# a satisfied blocker
-				continue
-			if pkg.installed:
-				continue
-			if pkg.root in implicit_libc_roots and \
-				pkg.operation == 'merge':
-				if libc_set.findAtomForPackage(pkg):
-					if pkg.category == 'virtual':
-						d = virt_libc_pkgs
-					else:
-						d = norm_libc_pkgs
-					if pkg.root in d:
-						raise AssertionError(
-							"found 2 libc matches: %s and %s" % \
-							(d[pkg.root], pkg))
-					d[pkg.root] = pkg
-
-		# Prefer new-style virtuals over old-style PROVIDE virtuals.
-		libc_pkg_map = norm_libc_pkgs.copy()
-		libc_pkg_map.update(virt_libc_pkgs)
-
-		# Only add a dep when the version changes.
-		for libc_pkg in list(libc_pkg_map.values()):
-			if libc_pkg.root_config.trees['vartree'].dbapi.cpv_exists(
-				libc_pkg.cpv):
-				del libc_pkg_map[pkg.root]
-
-		if not libc_pkg_map:
-			return
-
-		libc_pkgs = set(libc_pkg_map.values())
-		earlier_libc_pkgs = set()
-
-		for pkg in self._mergelist:
-			if not isinstance(pkg, Package):
-				# a satisfied blocker
-				continue
-			if pkg.installed:
-				continue
-			if pkg.root in implicit_libc_roots and \
-				pkg.operation == 'merge':
-				if pkg in libc_pkgs:
-					earlier_libc_pkgs.add(pkg)
-				else:
-					my_libc = libc_pkg_map.get(pkg.root)
-					if my_libc is not None and \
-						my_libc in earlier_libc_pkgs:
-						self._digraph.add(my_libc, pkg,
-							priority=DepPriority(buildtime=True))
-
 	class _pkg_failure(portage.exception.PortageException):
 		"""
 		An instance of this class is raised by unmerge() when
@@ -617,7 +563,16 @@ class Scheduler(PollScheduler):
 		Schedule a setup phase on the merge queue, in order to
 		serialize unsandboxed access to the live filesystem.
 		"""
-		self._task_queues.merge.add(setup_phase)
+		if self._task_queues.merge.max_jobs > 1 and \
+			"ebuild-locks" in self.settings.features:
+			# Use a separate queue for ebuild-locks when the merge
+			# queue allows more than 1 job (due to parallel-install),
+			# since the portage.locks module does not behave as desired
+			# if we try to lock the same file multiple times
+			# concurrently from the same process.
+			self._task_queues.ebuild_locks.add(setup_phase)
+		else:
+			self._task_queues.merge.add(setup_phase)
 		self._schedule()
 
 	def _schedule_unpack(self, unpack_phase):
@@ -629,27 +584,20 @@ class Scheduler(PollScheduler):
 
 	def _find_blockers(self, new_pkg):
 		"""
-		Returns a callable which should be called only when
-		the vdb lock has been acquired.
+		Returns a callable.
 		"""
 		def get_blockers():
-			return self._find_blockers_with_lock(new_pkg, acquire_lock=0)
+			return self._find_blockers_impl(new_pkg)
 		return get_blockers
 
-	def _find_blockers_with_lock(self, new_pkg, acquire_lock=0):
+	def _find_blockers_impl(self, new_pkg):
 		if self._opts_ignore_blockers.intersection(self.myopts):
 			return None
-
-		# Call gc.collect() here to avoid heap overflow that
-		# triggers 'Cannot allocate memory' errors (reported
-		# with python-2.5).
-		gc.collect()
 
 		blocker_db = self._blocker_db[new_pkg.root]
 
 		blocker_dblinks = []
-		for blocking_pkg in blocker_db.findInstalledBlockers(
-			new_pkg, acquire_lock=acquire_lock):
+		for blocking_pkg in blocker_db.findInstalledBlockers(new_pkg):
 			if new_pkg.slot_atom == blocking_pkg.slot_atom:
 				continue
 			if new_pkg.cpv == blocking_pkg.cpv:
@@ -659,70 +607,7 @@ class Scheduler(PollScheduler):
 				self.pkgsettings[blocking_pkg.root], treetype="vartree",
 				vartree=self.trees[blocking_pkg.root]["vartree"]))
 
-		gc.collect()
-
 		return blocker_dblinks
-
-	def _dblink_pkg(self, pkg_dblink):
-		cpv = pkg_dblink.mycpv
-		type_name = RootConfig.tree_pkg_map[pkg_dblink.treetype]
-		root_config = self.trees[pkg_dblink.myroot]["root_config"]
-		installed = type_name == "installed"
-		repo = pkg_dblink.settings.get("PORTAGE_REPO_NAME")
-		return self._pkg(cpv, type_name, root_config,
-			installed=installed, myrepo=repo)
-
-	def _dblink_elog(self, pkg_dblink, phase, func, msgs):
-
-		log_path = pkg_dblink.settings.get("PORTAGE_LOG_FILE")
-		out = StringIO()
-
-		for msg in msgs:
-			func(msg, phase=phase, key=pkg_dblink.mycpv, out=out)
-
-		out_str = out.getvalue()
-
-		self._task_output(out_str, log_path=log_path)
-
-	def _dblink_emerge_log(self, msg):
-		self._logger.log(msg)
-
-	def _dblink_display_merge(self, pkg_dblink, msg, level=0, noiselevel=0):
-		log_path = pkg_dblink.settings.get("PORTAGE_LOG_FILE")
-		background = self._background
-
-		if log_path is None:
-			if not (background and level < logging.WARN):
-				portage.util.writemsg_level(msg,
-					level=level, noiselevel=noiselevel)
-		else:
-			self._task_output(msg, log_path=log_path)
-
-	def _dblink_ebuild_phase(self,
-		pkg_dblink, pkg_dbapi, ebuild_path, phase):
-		"""
-		Using this callback for merge phases allows the scheduler
-		to run while these phases execute asynchronously, and allows
-		the scheduler control output handling.
-		"""
-
-		scheduler = self._sched_iface
-		settings = pkg_dblink.settings
-		background = self._background
-		log_path = settings.get("PORTAGE_LOG_FILE")
-
-		if phase in ('die_hooks', 'success_hooks'):
-			ebuild_phase = MiscFunctionsProcess(background=background,
-				commands=[phase], phase=phase,
-				scheduler=scheduler, settings=settings)
-		else:
-			ebuild_phase = EbuildPhase(background=background,
-				phase=phase, scheduler=scheduler,
-				settings=settings)
-		ebuild_phase.start()
-		ebuild_phase.wait()
-
-		return ebuild_phase.returncode
 
 	def _generate_digests(self):
 		"""
@@ -933,7 +818,8 @@ class Scheduler(PollScheduler):
 				return True
 			elif pkg.cpv != self._running_portage.cpv or \
 				'9999' in pkg.cpv or \
-				'git' in pkg.inherited:
+				'git' in pkg.inherited or \
+				'git-2' in pkg.inherited:
 				return True
 		return False
 
@@ -1372,6 +1258,10 @@ class Scheduler(PollScheduler):
 	def _system_merge_started(self, merge):
 		"""
 		Add any unsatisfied runtime deps to self._unsatisfied_system_deps.
+		In general, this keeps track of installed system packages with
+		unsatisfied RDEPEND or PDEPEND (circular dependencies). It can be
+		a fragile situation, so we don't execute any unrelated builds until
+		the circular dependencies are built and installed.
 		"""
 		graph = self._digraph
 		if graph is None:
@@ -1435,7 +1325,7 @@ class Scheduler(PollScheduler):
 				build_dir=build_dir, build_log=build_log,
 				pkg=pkg,
 				returncode=merge.returncode))
-			if not self._terminated.is_set():
+			if not self._terminated_tasks:
 				self._failed_pkg_msg(self._failed_pkgs[-1], "install", "to")
 				self._status_display.failed = len(self._failed_pkgs)
 			return
@@ -1470,7 +1360,13 @@ class Scheduler(PollScheduler):
 		mtimedb.commit()
 
 	def _build_exit(self, build):
-		if build.returncode == os.EX_OK:
+		if build.returncode == os.EX_OK and self._terminated_tasks:
+			# We've been interrupted, so we won't
+			# add this to the merge queue.
+			self.curval += 1
+			self._running_tasks.remove(build.pkg)
+			self._deallocate_config(build.settings)
+		elif build.returncode == os.EX_OK:
 			self.curval += 1
 			merge = PackageMerge(merge=build)
 			if not build.build_opts.buildpkgonly and \
@@ -1493,7 +1389,7 @@ class Scheduler(PollScheduler):
 				build_dir=build_dir, build_log=build_log,
 				pkg=build.pkg,
 				returncode=build.returncode))
-			if not self._terminated.is_set():
+			if not self._terminated_tasks:
 				self._failed_pkg_msg(self._failed_pkgs[-1], "emerge", "for")
 				self._status_display.failed = len(self._failed_pkgs)
 			self._deallocate_config(build.settings)
@@ -1508,6 +1404,8 @@ class Scheduler(PollScheduler):
 		self._completed_tasks.add(pkg)
 		self._unsatisfied_system_deps.discard(pkg)
 		self._choose_pkg_return_early = False
+		blocker_db = self._blocker_db[pkg.root]
+		blocker_db.discardBlocker(pkg)
 
 	def _merge(self):
 
@@ -1539,10 +1437,13 @@ class Scheduler(PollScheduler):
 		self._status_display.reset()
 		self._digraph = None
 		self._task_queues.fetch.clear()
+		self._prefetchers.clear()
 
 	def _choose_pkg(self):
 		"""
-		Choose a task that has all it's dependencies satisfied.
+		Choose a task that has all its dependencies satisfied. This is used
+		for parallel build scheduling, and ensures that we don't build
+		anything with deep dependencies that have yet to be merged.
 		"""
 
 		if self._choose_pkg_return_early:
@@ -1661,18 +1562,16 @@ class Scheduler(PollScheduler):
 			self._set_max_jobs(1)
 
 		while self._schedule():
-			if self._poll_event_handlers:
-				self._poll_loop()
+			self._poll_loop()
 
 		while True:
 			self._schedule()
 			if not self._is_work_scheduled():
 				break
-			if self._poll_event_handlers:
-				self._poll_loop()
+			self._poll_loop()
 
 	def _keep_scheduling(self):
-		return bool(not self._terminated.is_set() and self._pkg_queue and \
+		return bool(not self._terminated_tasks and self._pkg_queue and \
 			not (self._failed_pkgs and not self._build_opts.fetchonly))
 
 	def _is_work_scheduled(self):
@@ -1682,14 +1581,19 @@ class Scheduler(PollScheduler):
 
 		while True:
 
-			# When the number of jobs drops to zero, process all waiting merges.
-			if not self._jobs and self._merge_wait_queue:
-				for task in self._merge_wait_queue:
-					task.addExitListener(self._merge_wait_exit_handler)
-					self._task_queues.merge.add(task)
+			# When the number of jobs and merges drops to zero,
+			# process a single merge from _merge_wait_queue if
+			# it's not empty. We only process one since these are
+			# special packages and we want to ensure that
+			# parallel-install does not cause more than one of
+			# them to install at the same time.
+			if (self._merge_wait_queue and not self._jobs and
+				not self._task_queues.merge):
+				task = self._merge_wait_queue.popleft()
+				task.addExitListener(self._merge_wait_exit_handler)
+				self._task_queues.merge.add(task)
 				self._status_display.merges = len(self._task_queues.merge)
-				self._merge_wait_scheduled.extend(self._merge_wait_queue)
-				del self._merge_wait_queue[:]
+				self._merge_wait_scheduled.append(task)
 
 			self._schedule_tasks_imp()
 			self._status_display.display()
@@ -1708,7 +1612,8 @@ class Scheduler(PollScheduler):
 				state_change += 1
 
 			if not (state_change or \
-				(not self._jobs and self._merge_wait_queue)):
+				(self._merge_wait_queue and not self._jobs and
+				not self._task_queues.merge)):
 				break
 
 		return self._keep_scheduling()
@@ -1789,7 +1694,8 @@ class Scheduler(PollScheduler):
 		pkg_to_replace = None
 		if pkg.operation != "uninstall":
 			vardb = pkg.root_config.trees["vartree"].dbapi
-			previous_cpv = vardb.match(pkg.slot_atom)
+			previous_cpv = [x for x in vardb.match(pkg.slot_atom) \
+				if portage.cpv_getkey(x) == pkg.cp]
 			if not previous_cpv and vardb.cpv_exists(pkg.cpv):
 				# same cpv, different SLOT
 				previous_cpv = [pkg.cpv]
@@ -1798,6 +1704,14 @@ class Scheduler(PollScheduler):
 				pkg_to_replace = self._pkg(previous_cpv,
 					"installed", pkg.root_config, installed=True,
 					operation="uninstall")
+
+		prefetcher = self._prefetchers.pop(pkg, None)
+		if prefetcher is not None and not prefetcher.isAlive():
+			try:
+				self._task_queues.fetch._task_queue.remove(prefetcher)
+			except ValueError:
+				pass
+			prefetcher = None
 
 		task = MergeListItem(args_set=self._args_set,
 			background=self._background, binpkg_opts=self._binpkg_opts,
@@ -1808,7 +1722,7 @@ class Scheduler(PollScheduler):
 			find_blockers=self._find_blockers(pkg), logger=self._logger,
 			mtimedb=self._mtimedb, pkg=pkg, pkg_count=self._pkg_count.copy(),
 			pkg_to_replace=pkg_to_replace,
-			prefetcher=self._prefetchers.get(pkg),
+			prefetcher=prefetcher,
 			scheduler=self._sched_iface,
 			settings=self._allocate_config(pkg.root),
 			statusMessage=self._status_msg,
@@ -2037,27 +1951,11 @@ class Scheduler(PollScheduler):
 		corrupt).
 		"""
 
-		if type_name != "ebuild":
-			# For installed (and binary) packages we don't care for the repo
-			# when it comes to hashing, because there can only be one cpv.
-			# So overwrite the repo_key with type_name.
-			repo_key = type_name
-			myrepo = None
-		elif myrepo is None:
-			raise AssertionError(
-				"Scheduler._pkg() called without 'myrepo' argument")
-		else:
-			repo_key = myrepo
-
-		if operation is None:
-			if installed:
-				operation = "nomerge"
-			else:
-				operation = "merge"
-
 		# Reuse existing instance when available.
-		pkg = self._pkg_cache.get(
-			(type_name, root_config.root, cpv, operation, repo_key))
+		pkg = self._pkg_cache.get(Package._gen_hash_key(cpv=cpv,
+			type_name=type_name, repo_name=myrepo, root_config=root_config,
+			installed=installed, operation=operation))
+
 		if pkg is not None:
 			return pkg
 

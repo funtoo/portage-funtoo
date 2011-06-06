@@ -1,4 +1,4 @@
-# Copyright 1999-2009 Gentoo Foundation
+# Copyright 1999-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 from __future__ import print_function
@@ -8,8 +8,10 @@ import sys
 import textwrap
 import portage
 from portage import os
+from portage.dbapi._expand_new_virt import expand_new_virt
 from portage.output import bold, colorize, darkgreen, green
 from portage._sets import SETPREFIX
+from portage._sets.base import EditablePackageSet
 from portage.util import cmp_sort_key
 
 from _emerge.emergelog import emergelog
@@ -18,21 +20,20 @@ from _emerge.UninstallFailure import UninstallFailure
 from _emerge.userquery import userquery
 from _emerge.countdown import countdown
 
-def unmerge(root_config, myopts, unmerge_action,
-	unmerge_files, ldpath_mtimes, autoclean=0,
-	clean_world=1, clean_delay=1, ordered=0, raise_on_error=0,
-	scheduler=None, writemsg_level=portage.util.writemsg_level):
+def _unmerge_display(root_config, myopts, unmerge_action,
+	unmerge_files, clean_delay=1, ordered=0,
+	writemsg_level=portage.util.writemsg_level):
+	"""
+	Returns a tuple of (returncode, pkgmap) where returncode is
+	os.EX_OK is no errors occur, and 1 otherwise.
+	"""
 
-	if clean_world:
-		clean_world = myopts.get('--deselect') != 'n'
 	quiet = "--quiet" in myopts
-	enter_invalid = '--ask-enter-invalid' in myopts
 	settings = root_config.settings
 	sets = root_config.sets
 	vartree = root_config.trees["vartree"]
 	candidate_catpkgs=[]
 	global_unmerge=0
-	xterm_titles = "notitles" not in settings.features
 	out = portage.output.EOutput()
 	pkg_cache = {}
 	db_keys = list(vartree.dbapi._aux_cache_keys)
@@ -56,12 +57,25 @@ def unmerge(root_config, myopts, unmerge_action,
 	vdb_lock = None
 	try:
 		if os.access(vdb_path, os.W_OK):
-			vdb_lock = portage.locks.lockdir(vdb_path)
-		realsyslist = sets["system"].getAtoms()
+			vartree.dbapi.lock()
+			vdb_lock = True
+
+		realsyslist = []
+		for x in sets["system"].getAtoms():
+			for atom in expand_new_virt(vartree.dbapi, x):
+				if not atom.blocker:
+					realsyslist.append(atom)
+
 		syslist = []
 		for x in realsyslist:
-			mycp = portage.dep_getkey(x)
-			if mycp in settings.getvirtuals():
+			mycp = x.cp
+			# Since Gentoo stopped using old-style virtuals in
+			# 2011, typically it's possible to avoid getvirtuals()
+			# calls entirely. It will not be triggered here by
+			# new-style virtuals since those are expanded to
+			# non-virtual atoms above by expand_new_virt().
+			if mycp.startswith("virtual/") and \
+				mycp in settings.getvirtuals():
 				providers = []
 				for provider in settings.getvirtuals()[mycp]:
 					if vartree.dbapi.match(provider):
@@ -70,15 +84,14 @@ def unmerge(root_config, myopts, unmerge_action,
 					syslist.extend(providers)
 			else:
 				syslist.append(mycp)
-	
-		mysettings = portage.config(clone=settings)
+		syslist = frozenset(syslist)
 	
 		if not unmerge_files:
 			if unmerge_action == "unmerge":
 				print()
 				print(bold("emerge unmerge") + " can only be used with specific package names")
 				print()
-				return 0
+				return 1, {}
 			else:
 				global_unmerge = 1
 	
@@ -92,7 +105,7 @@ def unmerge(root_config, myopts, unmerge_action,
 			#we've got command-line arguments
 			if not unmerge_files:
 				print("\nNo packages to unmerge have been provided.\n")
-				return 0
+				return 1, {}
 			for x in unmerge_files:
 				arg_parts = x.split('/')
 				if x[0] not in [".","/"] and \
@@ -108,7 +121,7 @@ def unmerge(root_config, myopts, unmerge_action,
 					# ebuild and we're in "unmerge" mode, so it's ok.
 					if not os.path.exists(x):
 						print("\n!!! The path '"+x+"' doesn't exist.\n")
-						return 0
+						return 1, {}
 	
 					absx   = os.path.abspath(x)
 					sp_absx = absx.split("/")
@@ -119,14 +132,13 @@ def unmerge(root_config, myopts, unmerge_action,
 					sp_absx_len = len(sp_absx)
 	
 					vdb_path = os.path.join(settings["EROOT"], portage.VDB_PATH)
-					vdb_len  = len(vdb_path)
 	
 					sp_vdb     = vdb_path.split("/")
 					sp_vdb_len = len(sp_vdb)
 	
 					if not os.path.exists(absx+"/CONTENTS"):
 						print("!!! Not a valid db dir: "+str(absx))
-						return 0
+						return 1, {}
 	
 					if sp_absx_len <= sp_vdb_len:
 						# The Path is shorter... so it can't be inside the vdb.
@@ -134,7 +146,7 @@ def unmerge(root_config, myopts, unmerge_action,
 						print(absx)
 						print("\n!!!",x,"cannot be inside "+ \
 							vdb_path+"; aborting.\n")
-						return 0
+						return 1, {}
 	
 					for idx in range(0,sp_vdb_len):
 						if idx >= sp_absx_len or sp_vdb[idx] != sp_absx[idx]:
@@ -142,7 +154,7 @@ def unmerge(root_config, myopts, unmerge_action,
 							print(absx)
 							print("\n!!!", x, "is not inside "+\
 								vdb_path+"; aborting.\n")
-							return 0
+							return 1, {}
 	
 					print("="+"/".join(sp_absx[sp_vdb_len:]))
 					candidate_catpkgs.append(
@@ -186,7 +198,7 @@ def unmerge(root_config, myopts, unmerge_action,
 				mymatch = localtree.dep_match(x)
 			if not mymatch:
 				portage.writemsg("\n--- Couldn't find '%s' to %s.\n" % \
-					(x, unmerge_action), noiselevel=-1)
+					(x.replace("null/", ""), unmerge_action), noiselevel=-1)
 				continue
 
 			pkgmap.append(
@@ -269,20 +281,18 @@ def unmerge(root_config, myopts, unmerge_action,
 		numselected = len(all_selected)
 		if global_unmerge and not numselected:
 			portage.writemsg_stdout("\n>>> No outdated packages were found on your system.\n")
-			return 0
+			return 1, {}
 	
 		if not numselected:
 			portage.writemsg_stdout(
 				"\n>>> No packages selected for removal by " + \
 				unmerge_action + "\n")
-			return 0
+			return 1, {}
 	finally:
 		if vdb_lock:
 			vartree.dbapi.flush_cache()
-			portage.locks.unlockdir(vdb_lock)
-	
-	from portage._sets.base import EditablePackageSet
-	
+			vartree.dbapi.unlock()
+
 	# generate a list of package sets that are directly or indirectly listed in "selected",
 	# as there is no persistent list of "installed" sets
 	installed_sets = ["selected"]
@@ -314,19 +324,24 @@ def unmerge(root_config, myopts, unmerge_action,
 				# by a concurrent process.
 				continue
 
-			if unmerge_action != "clean" and \
-				root_config.root == "/" and \
-				portage.match_from_list(
-				portage.const.PORTAGE_PACKAGE_ATOM, [pkg]):
-				msg = ("Not unmerging package %s since there is no valid " + \
-				"reason for portage to unmerge itself.") % (pkg.cpv,)
-				for line in textwrap.wrap(msg, 75):
-					out.eerror(line)
-				# adjust pkgmap so the display output is correct
-				pkgmap[cp]["selected"].remove(cpv)
-				all_selected.remove(cpv)
-				pkgmap[cp]["protected"].add(cpv)
-				continue
+			if unmerge_action != "clean" and root_config.root == "/":
+				skip_pkg = False
+				if portage.match_from_list(portage.const.PORTAGE_PACKAGE_ATOM, [pkg]):
+					msg = ("Not unmerging package %s since there is no valid reason "
+						"for Portage to unmerge itself.") % (pkg.cpv,)
+					skip_pkg = True
+				elif vartree.dbapi._dblink(cpv).isowner(portage._python_interpreter):
+					msg = ("Not unmerging package %s since there is no valid reason "
+						"for Portage to unmerge currently used Python interpreter.") % (pkg.cpv,)
+					skip_pkg = True
+				if skip_pkg:
+					for line in textwrap.wrap(msg, 75):
+						out.eerror(line)
+					# adjust pkgmap so the display output is correct
+					pkgmap[cp]["selected"].remove(cpv)
+					all_selected.remove(cpv)
+					pkgmap[cp]["protected"].add(cpv)
+					continue
 
 			parents = []
 			for s in installed_sets:
@@ -388,7 +403,7 @@ def unmerge(root_config, myopts, unmerge_action,
 		writemsg_level(
 			"\n>>> No packages selected for removal by " + \
 			unmerge_action + "\n")
-		return 0
+		return 1, {}
 
 	# Unmerge order only matters in some cases
 	if not ordered:
@@ -472,6 +487,34 @@ def unmerge(root_config, myopts, unmerge_action,
 	writemsg_level(">>> " + colorize("GOOD", "'Protected'") + \
 			" and " + colorize("GOOD", "'omitted'") + \
 			" packages will not be removed.\n\n")
+
+	return os.EX_OK, pkgmap
+
+def unmerge(root_config, myopts, unmerge_action,
+	unmerge_files, ldpath_mtimes, autoclean=0,
+	clean_world=1, clean_delay=1, ordered=0, raise_on_error=0,
+	scheduler=None, writemsg_level=portage.util.writemsg_level):
+	"""
+	Returns 1 if successful, otherwise 0.
+	"""
+
+	if clean_world:
+		clean_world = myopts.get('--deselect') != 'n'
+
+	rval, pkgmap = _unmerge_display(root_config, myopts,
+		unmerge_action, unmerge_files,
+		clean_delay=clean_delay, ordered=ordered,
+		writemsg_level=writemsg_level)
+
+	if rval != os.EX_OK:
+		return 0
+
+	enter_invalid = '--ask-enter-invalid' in myopts
+	vartree = root_config.trees["vartree"]
+	sets = root_config.sets
+	settings = root_config.settings
+	mysettings = portage.config(clone=settings)
+	xterm_titles = "notitles" not in settings.features
 
 	if "--pretend" in myopts:
 		#we're done... return

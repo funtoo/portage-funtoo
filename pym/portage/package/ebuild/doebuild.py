@@ -39,9 +39,10 @@ from portage.data import portage_gid, portage_uid, secpass, \
 	uid, userpriv_groups
 from portage.dbapi.porttree import _parse_uri_map
 from portage.dbapi.virtual import fakedbapi
-from portage.dep import Atom, paren_enclose, use_reduce
+from portage.dep import Atom, check_required_use, \
+	human_readable_required_use, paren_enclose, use_reduce
 from portage.eapi import eapi_exports_KV, eapi_exports_merge_type, \
-	eapi_exports_replace_vars, \
+	eapi_exports_replace_vars, eapi_has_required_use, \
 	eapi_has_src_prepare_and_src_configure, eapi_has_pkg_pretend
 from portage.elog import elog_process
 from portage.elog.messages import eerror, eqawarn
@@ -118,6 +119,14 @@ def _spawn_phase(phase, settings, actionmap=None, **kwargs):
 def doebuild_environment(myebuild, mydo, myroot=None, settings=None,
 	debug=False, use_cache=None, db=None):
 	"""
+	Create and store environment variable in the config instance
+	that's passed in as the "settings" parameter. This will raise
+	UnsupportedAPIException if the given ebuild has an unsupported
+	EAPI. All EAPI dependent code comes last, so that essential
+	variables like PORTAGE_BUILDDIR are still initialized even in
+	cases when UnsupportedAPIException needs to be raised, which
+	can be useful when uninstalling a package that has corrupt
+	EAPI metadata.
 	The myroot and use_cache parameters are unused.
 	"""
 	myroot = None
@@ -140,7 +149,6 @@ def doebuild_environment(myebuild, mydo, myroot=None, settings=None,
 	else:
 		cat = os.path.basename(normalize_path(os.path.join(pkg_dir, "..")))
 
-	eapi = None
 	mypv = os.path.basename(ebuild_path)[:-7]
 
 	mycpv = cat+"/"+mypv
@@ -159,12 +167,12 @@ def doebuild_environment(myebuild, mydo, myroot=None, settings=None,
 			# call would lead to infinite 'depend' phase recursion.
 			mysettings.setcpv(mycpv)
 	else:
-		# If IUSE isn't in configdict['pkg'], it means that setcpv()
+		# If EAPI isn't in configdict["pkg"], it means that setcpv()
 		# hasn't been called with the mydb argument, so we have to
 		# call it here (portage code always calls setcpv properly,
 		# but api consumers might not).
 		if mycpv != mysettings.mycpv or \
-			'IUSE' not in mysettings.configdict['pkg']:
+			"EAPI" not in mysettings.configdict["pkg"]:
 			# Reload env.d variables and reset any previous settings.
 			mysettings.reload()
 			mysettings.reset()
@@ -221,6 +229,63 @@ def doebuild_environment(myebuild, mydo, myroot=None, settings=None,
 	if noiselimit < 0:
 		mysettings["PORTAGE_QUIET"] = "1"
 
+	if mysplit[2] == "r0":
+		mysettings["PVR"]=mysplit[1]
+	else:
+		mysettings["PVR"]=mysplit[1]+"-"+mysplit[2]
+
+	if "PATH" in mysettings:
+		mysplit=mysettings["PATH"].split(":")
+	else:
+		mysplit=[]
+	# Note: PORTAGE_BIN_PATH may differ from the global constant
+	# when portage is reinstalling itself.
+	portage_bin_path = mysettings["PORTAGE_BIN_PATH"]
+	if portage_bin_path not in mysplit:
+		mysettings["PATH"] = portage_bin_path + ":" + mysettings["PATH"]
+
+	# All temporary directories should be subdirectories of
+	# $PORTAGE_TMPDIR/portage, since it's common for /tmp and /var/tmp
+	# to be mounted with the "noexec" option (see bug #346899).
+	mysettings["BUILD_PREFIX"] = mysettings["PORTAGE_TMPDIR"]+"/portage"
+	mysettings["PKG_TMPDIR"]   = mysettings["BUILD_PREFIX"]+"/._unmerge_"
+
+	# Package {pre,post}inst and {pre,post}rm may overlap, so they must have separate
+	# locations in order to prevent interference.
+	if mydo in ("unmerge", "prerm", "postrm", "cleanrm"):
+		mysettings["PORTAGE_BUILDDIR"] = os.path.join(
+			mysettings["PKG_TMPDIR"],
+			mysettings["CATEGORY"], mysettings["PF"])
+	else:
+		mysettings["PORTAGE_BUILDDIR"] = os.path.join(
+			mysettings["BUILD_PREFIX"],
+			mysettings["CATEGORY"], mysettings["PF"])
+
+	mysettings["HOME"] = os.path.join(mysettings["PORTAGE_BUILDDIR"], "homedir")
+	mysettings["WORKDIR"] = os.path.join(mysettings["PORTAGE_BUILDDIR"], "work")
+	mysettings["D"] = os.path.join(mysettings["PORTAGE_BUILDDIR"], "image") + os.sep
+	mysettings["T"] = os.path.join(mysettings["PORTAGE_BUILDDIR"], "temp")
+
+	# Prefix forward compatability
+	mysettings["ED"] = mysettings["D"]
+
+	mysettings["PORTAGE_BASHRC"] = os.path.join(
+		mysettings["PORTAGE_CONFIGROOT"], EBUILD_SH_ENV_FILE)
+	mysettings["PM_EBUILD_HOOK_DIR"] = os.path.join(
+		mysettings["PORTAGE_CONFIGROOT"], EBUILD_SH_ENV_DIR)
+
+	# Allow color.map to control colors associated with einfo, ewarn, etc...
+	mycolors = []
+	for c in ("GOOD", "WARN", "BAD", "HILITE", "BRACKET"):
+		mycolors.append("%s=$'%s'" % \
+			(c, style_to_ansi_code(c)))
+	mysettings["PORTAGE_COLORMAP"] = "\n".join(mycolors)
+
+	# All EAPI dependent code comes last, so that essential variables
+	# like PORTAGE_BUILDDIR are still initialized even in cases when
+	# UnsupportedAPIException needs to be raised, which can be useful
+	# when uninstalling a package that has corrupt EAPI metadata.
+	eapi = None
 	if mydo == 'depend' and 'EAPI' not in mysettings.configdict['pkg']:
 		if eapi is None and 'parse-eapi-ebuild-head' in mysettings.features:
 			eapi = _parse_eapi_ebuild_head(
@@ -265,49 +330,6 @@ def doebuild_environment(myebuild, mydo, myroot=None, settings=None,
 			else:
 				mysettings.configdict["pkg"]["AA"] = " ".join(uri_map)
 
-	if mysplit[2] == "r0":
-		mysettings["PVR"]=mysplit[1]
-	else:
-		mysettings["PVR"]=mysplit[1]+"-"+mysplit[2]
-
-	if "PATH" in mysettings:
-		mysplit=mysettings["PATH"].split(":")
-	else:
-		mysplit=[]
-	# Note: PORTAGE_BIN_PATH may differ from the global constant
-	# when portage is reinstalling itself.
-	portage_bin_path = mysettings["PORTAGE_BIN_PATH"]
-	if portage_bin_path not in mysplit:
-		mysettings["PATH"] = portage_bin_path + ":" + mysettings["PATH"]
-
-	mysettings["BUILD_PREFIX"] = mysettings["PORTAGE_TMPDIR"]+"/portage"
-	mysettings["PKG_TMPDIR"]   = mysettings["PORTAGE_TMPDIR"]+"/binpkgs"
-	
-	# Package {pre,post}inst and {pre,post}rm may overlap, so they must have separate
-	# locations in order to prevent interference.
-	if mydo in ("unmerge", "prerm", "postrm", "cleanrm"):
-		mysettings["PORTAGE_BUILDDIR"] = os.path.join(
-			mysettings["PKG_TMPDIR"],
-			mysettings["CATEGORY"], mysettings["PF"])
-	else:
-		mysettings["PORTAGE_BUILDDIR"] = os.path.join(
-			mysettings["BUILD_PREFIX"],
-			mysettings["CATEGORY"], mysettings["PF"])
-
-	mysettings["HOME"] = os.path.join(mysettings["PORTAGE_BUILDDIR"], "homedir")
-	mysettings["WORKDIR"] = os.path.join(mysettings["PORTAGE_BUILDDIR"], "work")
-	mysettings["D"] = os.path.join(mysettings["PORTAGE_BUILDDIR"], "image") + os.sep
-	mysettings["T"] = os.path.join(mysettings["PORTAGE_BUILDDIR"], "temp")
-
-	# Prefix forward compatability
-	mysettings["ED"] = mysettings["D"]
-
-	mysettings["PORTAGE_BASHRC"] = os.path.join(
-		mysettings["PORTAGE_CONFIGROOT"], EBUILD_SH_ENV_FILE)
-	mysettings["PM_EBUILD_HOOK_DIR"] = os.path.join(
-		mysettings["PORTAGE_CONFIGROOT"], EBUILD_SH_ENV_DIR)
-
-	#set up KV variable -- DEP SPEEDUP :: Don't waste time. Keep var persistent.
 	if not eapi_exports_KV(eapi):
 		# Discard KV for EAPIs that don't support it. Cache KV is restored
 		# from the backupenv whenever config.reset() is called.
@@ -320,17 +342,10 @@ def doebuild_environment(myebuild, mydo, myroot=None, settings=None,
 			os.path.join(mysettings['EROOT'], "usr/src/linux"))
 		if mykv:
 			# Regular source tree
-			mysettings["KV"]=mykv
+			mysettings["KV"] = mykv
 		else:
-			mysettings["KV"]=""
+			mysettings["KV"] = ""
 		mysettings.backup_changes("KV")
-
-	# Allow color.map to control colors associated with einfo, ewarn, etc...
-	mycolors = []
-	for c in ("GOOD", "WARN", "BAD", "HILITE", "BRACKET"):
-		mycolors.append("%s=$'%s'" % \
-			(c, style_to_ansi_code(c)))
-	mysettings["PORTAGE_COLORMAP"] = "\n".join(mycolors)
 
 _doebuild_manifest_cache = None
 _doebuild_broken_ebuilds = set()
@@ -562,8 +577,19 @@ def doebuild(myebuild, mydo, myroot, mysettings, debug=0, listonly=0,
 			use_cache, mydbapi)
 
 		if mydo in clean_phases:
-			return _spawn_phase(mydo, mysettings,
-				fd_pipes=fd_pipes, returnpid=returnpid)
+			builddir_lock = None
+			if not returnpid and \
+				'PORTAGE_BUILDIR_LOCKED' not in mysettings:
+				builddir_lock = EbuildBuildDir(
+					scheduler=PollScheduler().sched_iface,
+					settings=mysettings)
+				builddir_lock.lock()
+			try:
+				return _spawn_phase(mydo, mysettings,
+					fd_pipes=fd_pipes, returnpid=returnpid)
+			finally:
+				if builddir_lock is not None:
+					builddir_lock.unlock()
 
 		restrict = set(mysettings.get('PORTAGE_RESTRICT', '').split())
 		# get possible slot information from the deps file
@@ -737,6 +763,12 @@ def doebuild(myebuild, mydo, myroot, mysettings, debug=0, listonly=0,
 			if not fetch(fetchme, mysettings, listonly=listonly,
 				fetchonly=fetchonly):
 				spawn_nofetch(mydbapi, myebuild, settings=mysettings)
+				if listonly:
+					# The convention for listonly mode is to report
+					# success in any case, even though fetch() may
+					# return unsuccessfully in order to trigger the
+					# nofetch phase.
+					return 0
 				return 1
 
 		if mydo == "fetch":
@@ -776,7 +808,7 @@ def doebuild(myebuild, mydo, myroot, mysettings, debug=0, listonly=0,
 		# remove PORTAGE_ACTUAL_DISTDIR once cvs/svn is supported via SRC_URI
 		if tree == 'porttree' and \
 			((mydo != "setup" and "noauto" not in features) \
-			or mydo == "unpack"):
+			or mydo in ("install", "unpack")):
 			_prepare_fake_distdir(mysettings, alist)
 
 		#initial dep checks complete; time to process main commands
@@ -1050,6 +1082,30 @@ def _validate_deps(mysettings, myroot, mydo, mydbapi):
 		if mydo not in invalid_dep_exempt_phases:
 			return 1
 
+	if not pkg.built and \
+		mydo not in ("digest", "help", "manifest") and \
+		pkg.metadata["REQUIRED_USE"] and \
+		eapi_has_required_use(pkg.metadata["EAPI"]):
+		result = check_required_use(pkg.metadata["REQUIRED_USE"],
+			pkg.use.enabled, pkg.iuse.is_valid_flag)
+		if not result:
+			reduced_noise = result.tounicode()
+			writemsg("\n  %s\n" % _("The following REQUIRED_USE flag" + \
+				" constraints are unsatisfied:"), noiselevel=-1)
+			writemsg("    %s\n" % reduced_noise,
+				noiselevel=-1)
+			normalized_required_use = \
+				" ".join(pkg.metadata["REQUIRED_USE"].split())
+			if reduced_noise != normalized_required_use:
+				writemsg("\n  %s\n" % _("The above constraints " + \
+					"are a subset of the following complete expression:"),
+					noiselevel=-1)
+				writemsg("    %s\n" % \
+					human_readable_required_use(normalized_required_use),
+					noiselevel=-1)
+			writemsg("\n", noiselevel=-1)
+			return 1
+
 	return os.EX_OK
 
 # XXX This would be to replace getstatusoutput completely.
@@ -1199,14 +1255,10 @@ _post_phase_cmds = {
 		"install_symlink_html_docs"],
 
 	"preinst" : [
-		"preinst_bsdflags",
 		"preinst_sfperms",
 		"preinst_selinux_labels",
 		"preinst_suid_scan",
-		"preinst_mask"],
-
-	"postinst" : [
-		"postinst_bsdflags"]
+		"preinst_mask"]
 }
 
 def _post_phase_userpriv_perms(mysettings):
@@ -1358,6 +1410,27 @@ _vdb_use_conditional_keys = ('DEPEND', 'LICENSE', 'PDEPEND',
 	'PROPERTIES', 'PROVIDE', 'RDEPEND', 'RESTRICT',)
 _vdb_use_conditional_atoms = frozenset(['DEPEND', 'PDEPEND', 'RDEPEND'])
 
+def _preinst_bsdflags(mysettings):
+	if bsd_chflags:
+		# Save all the file flags for restoration later.
+		os.system("mtree -c -p %s -k flags > %s" % \
+			(_shell_quote(mysettings["D"]),
+			_shell_quote(os.path.join(mysettings["T"], "bsdflags.mtree"))))
+
+		# Remove all the file flags to avoid EPERM errors.
+		os.system("chflags -R noschg,nouchg,nosappnd,nouappnd %s" % \
+			(_shell_quote(mysettings["D"]),))
+		os.system("chflags -R nosunlnk,nouunlnk %s 2>/dev/null" % \
+			(_shell_quote(mysettings["D"]),))
+
+
+def _postinst_bsdflags(mysettings):
+	if bsd_chflags:
+		# Restore all of the flags saved above.
+		os.system("mtree -e -p %s -U -k flags < %s > /dev/null" % \
+			(_shell_quote(mysettings["ROOT"]),
+			_shell_quote(os.path.join(mysettings["T"], "bsdflags.mtree"))))
+
 def _post_src_install_uid_fix(mysettings, out):
 	"""
 	Files in $D with user and group bits that match the "portage"
@@ -1372,15 +1445,7 @@ def _post_src_install_uid_fix(mysettings, out):
 	inst_uid = int(mysettings["PORTAGE_INST_UID"])
 	inst_gid = int(mysettings["PORTAGE_INST_GID"])
 
-	if bsd_chflags:
-		# Temporarily remove all of the flags in order to avoid EPERM errors.
-		os.system("mtree -c -p %s -k flags > %s" % \
-			(_shell_quote(mysettings["D"]),
-			_shell_quote(os.path.join(mysettings["T"], "bsdflags.mtree"))))
-		os.system("chflags -R noschg,nouchg,nosappnd,nouappnd %s" % \
-			(_shell_quote(mysettings["D"]),))
-		os.system("chflags -R nosunlnk,nouunlnk %s 2>/dev/null" % \
-			(_shell_quote(mysettings["D"]),))
+	_preinst_bsdflags(mysettings)
 
 	destdir = mysettings["D"]
 	unicode_errors = []

@@ -1,4 +1,4 @@
-# Copyright 1999-2010 Gentoo Foundation
+# Copyright 1999-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 import sys
@@ -38,9 +38,12 @@ class Package(Task):
 
 	_dep_keys = ('DEPEND', 'PDEPEND', 'RDEPEND',)
 	_use_conditional_misc_keys = ('LICENSE', 'PROPERTIES', 'RESTRICT')
+	UNKNOWN_REPO = "__unknown__"
 
 	def __init__(self, **kwargs):
 		Task.__init__(self, **kwargs)
+		# the SlotObject constructor assigns self.root_config from keyword args
+		# and is an instance of a '_emerge.RootConfig.RootConfig class
 		self.root = self.root_config.root
 		self._raw_metadata = _PackageMetadataWrapperBase(self.metadata)
 		self.metadata = _PackageMetadataWrapper(self, self._raw_metadata)
@@ -67,7 +70,7 @@ class Package(Task):
 			self.inherited = frozenset()
 		repo = _gen_valid_repo(self.metadata.get('repository', ''))
 		if not repo:
-			repo = '__unknown__'
+			repo = self.UNKNOWN_REPO
 		self.metadata['repository'] = repo
 
 		self._validate_deps()
@@ -78,6 +81,49 @@ class Package(Task):
 				self.operation = "nomerge"
 			else:
 				self.operation = "merge"
+
+		self._hash_key = Package._gen_hash_key(cpv=self.cpv,
+			installed=self.installed, onlydeps=self.onlydeps,
+			operation=self.operation, repo_name=repo,
+			root_config=self.root_config,
+			type_name=self.type_name)
+		self._hash_value = hash(self._hash_key)
+
+	@classmethod
+	def _gen_hash_key(cls, cpv=None, installed=None, onlydeps=None,
+		operation=None, repo_name=None, root_config=None,
+		type_name=None, **kwargs):
+
+		if operation is None:
+			if installed or onlydeps:
+				operation = "nomerge"
+			else:
+				operation = "merge"
+
+		root = None
+		if root_config is not None:
+			root = root_config.root
+		else:
+			raise TypeError("root_config argument is required")
+
+		# For installed (and binary) packages we don't care for the repo
+		# when it comes to hashing, because there can only be one cpv.
+		# So overwrite the repo_key with type_name.
+		if type_name is None:
+			raise TypeError("type_name argument is required")
+		elif type_name == "ebuild":
+			if repo_name is None:
+				raise AssertionError(
+					"Package._gen_hash_key() " + \
+					"called without 'repo_name' argument")
+			repo_key = repo_name
+		else:
+			# For installed (and binary) packages we don't care for the repo
+			# when it comes to hashing, because there can only be one cpv.
+			# So overwrite the repo_key with type_name.
+			repo_key = type_name
+
+		return (type_name, root, cpv, operation, repo_key)
 
 	def _validate_deps(self):
 		"""
@@ -113,7 +159,8 @@ class Package(Task):
 				use_reduce(v, eapi=dep_eapi, matchall=True,
 					is_valid_flag=dep_valid_flag, token_class=Atom)
 			except InvalidDependString as e:
-				self._metadata_exception(k, e)
+				self._invalid_metadata("PROVIDE.syntax",
+					_unicode_decode("%s: %s") % (k, e))
 
 		for k in self._use_conditional_misc_keys:
 			v = self.metadata.get(k)
@@ -234,6 +281,34 @@ class Package(Task):
 				return False
 
 		return True
+
+	def get_keyword_mask(self):
+		"""returns None, 'missing', or 'unstable'."""
+
+		missing = self.root_config.settings._getRawMissingKeywords(
+				self.cpv, self.metadata)
+
+		if not missing:
+			return None
+
+		if '**' in missing:
+			return 'missing'
+
+		global_accept_keywords = frozenset(
+			self.root_config.settings.get("ACCEPT_KEYWORDS", "").split())
+
+		for keyword in missing:
+			if keyword.lstrip("~") in global_accept_keywords:
+				return 'unstable'
+
+		return 'missing'
+
+	def isHardMasked(self):
+		"""returns a bool if the cpv is in the list of
+		expanded pmaskdict[cp] available ebuilds"""
+		pmask = self.root_config.settings._getRawMaskAtom(
+			self.cpv, self.metadata)
+		return pmask is not None
 
 	def _metadata_exception(self, k, e):
 
@@ -406,7 +481,7 @@ class Package(Task):
 					not self._iuse_implicit_match(flag):
 					return False
 			return True
-		
+
 		def get_missing_iuse(self, flags):
 			"""
 			@returns: A list of flags missing from IUSE.
@@ -420,19 +495,6 @@ class Package(Task):
 					missing_iuse.append(flag)
 			return missing_iuse
 
-	def _get_hash_key(self):
-		hash_key = getattr(self, "_hash_key", None)
-		if hash_key is None:
-			# For installed (and binary) packages we don't care for the repo
-			# when it comes to hashing, because there can only be one cpv.
-			# So overwrite the repo_key with type_name.
-			repo_key = self.metadata.get('repository')
-			if self.type_name != 'ebuild':
-				repo_key = self.type_name
-			self._hash_key = \
-				(self.type_name, self.root, self.cpv, self.operation, repo_key)
-		return self._hash_key
-
 	def __len__(self):
 		return 4
 
@@ -441,7 +503,7 @@ class Package(Task):
 		This is used to generate mtimedb resume mergelist entries, so we
 		limit it to 4 items for backward compatibility.
 		"""
-		return iter(self._get_hash_key()[:4])
+		return iter(self._hash_key[:4])
 
 	def __lt__(self, other):
 		if other.cp != self.cp:

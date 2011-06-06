@@ -17,6 +17,7 @@ portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.versions:best,catpkgsplit,_pkgsplit@pkgsplit,ver_regexp',
 )
 
+from portage.cache import metadata_overlay, volatile
 from portage.cache.cache_errors import CacheError
 from portage.cache.mappings import Mapping
 from portage.dbapi import dbapi
@@ -40,6 +41,7 @@ import codecs
 import logging
 import stat
 import sys
+import traceback
 import warnings
 
 if sys.hexversion >= 0x3000000:
@@ -159,24 +161,27 @@ class portdbapi(dbapi):
 			'perms'   : 0o664
 		}
 
-		if secpass < 1:
-			# portage_gid is irrelevant, so just obey umask
-			cache_kwargs['gid']   = -1
-			cache_kwargs['perms'] = -1
-
 		# XXX: REMOVE THIS ONCE UNUSED_0 IS YANKED FROM auxdbkeys
 		# ~harring
 		filtered_auxdbkeys = [x for x in auxdbkeys if not x.startswith("UNUSED_0")]
 		filtered_auxdbkeys.sort()
-		from portage.cache import metadata_overlay, volatile
-		if not depcachedir_w_ok:
+		# If secpass < 1, we don't want to write to the cache
+		# since then we won't be able to apply group permissions
+		# to the cache entries/directories.
+		if secpass < 1 or not depcachedir_w_ok:
 			for x in self.porttrees:
-				db_ro = self.auxdbmodule(self.depcachedir, x,
-					filtered_auxdbkeys, gid=portage_gid, readonly=True)
-				self.auxdb[x] = metadata_overlay.database(
-					self.depcachedir, x, filtered_auxdbkeys,
-					gid=portage_gid, db_rw=volatile.database,
-					db_ro=db_ro)
+				try:
+					db_ro = self.auxdbmodule(self.depcachedir, x,
+						filtered_auxdbkeys, readonly=True, **cache_kwargs)
+				except CacheError:
+					self.auxdb[x] = volatile.database(
+						self.depcachedir, x, filtered_auxdbkeys,
+						**cache_kwargs)
+				else:
+					self.auxdb[x] = metadata_overlay.database(
+						self.depcachedir, x, filtered_auxdbkeys,
+						db_rw=volatile.database, db_ro=db_ro,
+						**cache_kwargs)
 		else:
 			for x in self.porttrees:
 				if x in self.auxdb:
@@ -370,7 +375,12 @@ class portdbapi(dbapi):
 				metadata[k] = ""
 			metadata["EAPI"] = "-" + eapi.lstrip("-")
 
-		self.auxdb[repo_path][cpv] = metadata
+		try:
+			self.auxdb[repo_path][cpv] = metadata
+		except CacheError:
+			# Normally this shouldn't happen, so we'll show
+			# a traceback for debugging purposes.
+			traceback.print_exc()
 		return metadata
 
 	def _pull_valid_cache(self, cpv, ebuild_path, repo_path):
@@ -463,8 +473,6 @@ class portdbapi(dbapi):
 
 		if doregen:
 			if myebuild in self._broken_ebuilds:
-				raise KeyError(mycpv)
-			if not self._have_root_eclass_dir:
 				raise KeyError(mycpv)
 
 			self.doebuild_settings.setcpv(mycpv)
@@ -617,6 +625,9 @@ class portdbapi(dbapi):
 		return filesdict
 
 	def fetch_check(self, mypkg, useflags=None, mysettings=None, all=False, myrepo=None):
+		"""
+		TODO: account for PORTAGE_RO_DISTDIRS
+		"""
 		if all:
 			useflags = None
 		elif useflags is None:
@@ -782,45 +793,51 @@ class portdbapi(dbapi):
 			except KeyError:
 				pass
 
-		if not mydep:
+		if mydep is None:
 			#this stuff only runs on first call of xmatch()
 			#create mydep, mykey from origdep
 			mydep = dep_expand(origdep, mydb=self, settings=self.settings)
 			mykey = mydep.cp
 
-		if level == "match-all-cpv-only":
+		myval = None
+		mytree = None
+		if mydep.repo is not None:
+			mytree = self.treemap.get(mydep.repo)
+			if mytree is None:
+				myval = []
+
+		if myval is not None:
+			# Unknown repo, empty result.
+			pass
+		elif level == "match-all-cpv-only":
 			# match *all* packages, only against the cpv, in order
 			# to bypass unnecessary cache access for things like IUSE
 			# and SLOT.
-			myval = None
-			mytree = None
-			if mydep.repo is not None:
-				mytree = self.treemap.get(mydep.repo)
-				if mytree is None:
-					myval = []
-
-			if myval is None:
-				if mydep == mykey:
-					# Share cache with match-all/cp_list
-					# when the result is the same.
-					level = "match-all"
-					myval = self.cp_list(mykey, mytree=mytree)
-				else:
-					myval = match_from_list(mydep,
-						self.cp_list(mykey, mytree=mytree))
+			if mydep == mykey:
+				# Share cache with match-all/cp_list when the result is the
+				# same. Note that this requires that mydep.repo is None and
+				# thus mytree is also None.
+				level = "match-all"
+				myval = self.cp_list(mykey, mytree=mytree)
+			else:
+				myval = match_from_list(mydep,
+					self.cp_list(mykey, mytree=mytree))
 
 		elif level == "list-visible":
 			#a list of all visible packages, not called directly (just by xmatch())
 			#myval = self.visible(self.cp_list(mykey))
 
-			myval = self.gvisible(self.visible(self.cp_list(mykey)))
+			myval = self.gvisible(self.visible(
+				self.cp_list(mykey, mytree=mytree)))
 		elif level == "minimum-all":
 			# Find the minimum matching version. This is optimized to
 			# minimize the number of metadata accesses (improves performance
 			# especially in cases where metadata needs to be generated).
-			cpv_iter = iter(self.cp_list(mykey))
-			if mydep != mykey:
-				cpv_iter = self._iter_match(mydep, cpv_iter)
+			if mydep == mykey:
+				cpv_iter = iter(self.cp_list(mykey, mytree=mytree))
+			else:
+				cpv_iter = self._iter_match(mydep,
+					self.cp_list(mykey, mytree=mytree))
 			try:
 				myval = next(cpv_iter)
 			except StopIteration:
@@ -831,10 +848,10 @@ class portdbapi(dbapi):
 			# minimize the number of metadata accesses (improves performance
 			# especially in cases where metadata needs to be generated).
 			if mydep == mykey:
-				mylist = self.cp_list(mykey)
+				mylist = self.cp_list(mykey, mytree=mytree)
 			else:
-				mylist = match_from_list(mydep, self.cp_list(mykey,
-					mytree=self.repositories.get_location_for_name(mydep.repo)))
+				mylist = match_from_list(mydep,
+					self.cp_list(mykey, mytree=mytree))
 			myval = ""
 			settings = self.settings
 			local_config = settings.local_config
@@ -893,13 +910,14 @@ class portdbapi(dbapi):
 			#dep match -- find all visible matches
 			#get all visible packages, then get the matching ones
 			myval = list(self._iter_match(mydep,
-				self.xmatch("list-visible", mykey, mydep=mykey, mykey=mykey), myrepo=mydep.repo))
+				self.xmatch("list-visible", mykey, mydep=Atom(mykey), mykey=mykey)))
 		elif level == "match-all":
 			#match *all* visible *and* masked packages
 			if mydep == mykey:
-				myval = self.cp_list(mykey)
+				myval = self.cp_list(mykey, mytree=mytree)
 			else:
-				myval = list(self._iter_match(mydep, self.cp_list(mykey), myrepo = mydep.repo))
+				myval = list(self._iter_match(mydep,
+					self.cp_list(mykey, mytree=mytree)))
 		else:
 			raise AssertionError(
 				"Invalid level argument: '%s'" % level)

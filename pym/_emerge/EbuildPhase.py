@@ -1,10 +1,11 @@
-# Copyright 1999-2010 Gentoo Foundation
+# Copyright 1999-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 import gzip
 import sys
 import tempfile
 
+from _emerge.AsynchronousLock import AsynchronousLock
 from _emerge.BinpkgEnvExtractor import BinpkgEnvExtractor
 from _emerge.MiscFunctionsProcess import MiscFunctionsProcess
 from _emerge.EbuildProcess import EbuildProcess
@@ -17,7 +18,8 @@ portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.package.ebuild.doebuild:_check_build_log,' + \
 		'_post_phase_cmds,_post_phase_userpriv_perms,' + \
 		'_post_src_install_chost_fix,' + \
-		'_post_src_install_uid_fix'
+		'_post_src_install_uid_fix,_postinst_bsdflags,' + \
+		'_preinst_bsdflags'
 )
 from portage import os
 from portage import StringIO
@@ -27,14 +29,18 @@ from portage import _unicode_encode
 
 class EbuildPhase(CompositeTask):
 
-	__slots__ = ("actionmap", "phase", "settings")
+	__slots__ = ("actionmap", "phase", "settings") + \
+		("_ebuild_lock",)
 
 	# FEATURES displayed prior to setup phase
-	_features_display = ("ccache", "distcc", "fakeroot",
+	_features_display = ("ccache", "distcc", "distcc-pump", "fakeroot",
 		"installsources", "keeptemp", "keepwork", "nostrip",
 		"preserve-libs", "sandbox", "selinux", "sesandbox",
 		"splitdebug", "suidctl", "test", "userpriv",
 		"usersandbox")
+
+	# Locked phases
+	_locked_phases = ("setup", "preinst", "postinst", "prerm", "postrm")
 
 	def _start(self):
 
@@ -98,7 +104,7 @@ class EbuildPhase(CompositeTask):
 					os.path.join(self.settings['PKGDIR'],
 					self.settings['CATEGORY'], self.settings['PF']) + '.tbz2'
 
-		if self.phase == 'prerm':
+		if self.phase in ("pretend", "prerm"):
 			env_extractor = BinpkgEnvExtractor(background=self.background,
 				scheduler=self.scheduler, settings=self.settings)
 			if env_extractor.saved_env_exists():
@@ -107,13 +113,32 @@ class EbuildPhase(CompositeTask):
 			# If the environment.bz2 doesn't exist, then ebuild.sh will
 			# source the ebuild as a fallback.
 
-		self._start_ebuild()
+		self._start_lock()
 
 	def _env_extractor_exit(self, env_extractor):
 		if self._default_exit(env_extractor) != os.EX_OK:
 			self.wait()
 			return
 
+		self._start_lock()
+
+	def _start_lock(self):
+		if (self.phase in self._locked_phases and
+			"ebuild-locks" in self.settings.features):
+			eroot = self.settings["EROOT"]
+			lock_path = os.path.join(eroot, portage.VDB_PATH + "-ebuild")
+			if os.access(os.path.dirname(lock_path), os.W_OK):
+				self._ebuild_lock = AsynchronousLock(path=lock_path,
+					scheduler=self.scheduler)
+				self._start_task(self._ebuild_lock, self._lock_exit)
+				return
+
+		self._start_ebuild()
+
+	def _lock_exit(self, ebuild_lock):
+		if self._default_exit(ebuild_lock) != os.EX_OK:
+			self.wait()
+			return
 		self._start_ebuild()
 
 	def _start_ebuild(self):
@@ -121,9 +146,10 @@ class EbuildPhase(CompositeTask):
 		# Don't open the log file during the clean phase since the
 		# open file can result in an nfs lock on $T/build.log which
 		# prevents the clean phase from removing $T.
-		logfile = self.settings.get("PORTAGE_LOG_FILE")
-		if self.phase in ("clean", "cleanrm"):
-			logfile = None
+		logfile = None
+		if self.phase not in ("clean", "cleanrm") and \
+			self.settings.get("PORTAGE_BACKGROUND") != "subprocess":
+			logfile = self.settings.get("PORTAGE_LOG_FILE")
 
 		fd_pipes = None
 		if not self.background and self.phase == 'nofetch':
@@ -140,6 +166,10 @@ class EbuildPhase(CompositeTask):
 
 	def _ebuild_exit(self, ebuild_process):
 
+		if self._ebuild_lock is not None:
+			self._ebuild_lock.unlock()
+			self._ebuild_lock = None
+
 		fail = False
 		if self._default_exit(ebuild_process) != os.EX_OK:
 			if self.phase == "test" and \
@@ -151,13 +181,16 @@ class EbuildPhase(CompositeTask):
 		if not fail:
 			self.returncode = None
 
+		logfile = None
+		if self.settings.get("PORTAGE_BACKGROUND") != "subprocess":
+			logfile = self.settings.get("PORTAGE_LOG_FILE")
+
 		if self.phase == "install":
 			out = portage.StringIO()
 			_check_build_log(self.settings, out=out)
 			msg = _unicode_decode(out.getvalue(),
 				encoding=_encodings['content'], errors='replace')
-			self.scheduler.output(msg,
-				log_path=self.settings.get("PORTAGE_LOG_FILE"))
+			self.scheduler.output(msg, log_path=logfile)
 
 		if fail:
 			self._die_hooks()
@@ -173,12 +206,14 @@ class EbuildPhase(CompositeTask):
 			msg = _unicode_decode(out.getvalue(),
 				encoding=_encodings['content'], errors='replace')
 			if msg:
-				self.scheduler.output(msg,
-					log_path=self.settings.get("PORTAGE_LOG_FILE"))
+				self.scheduler.output(msg, log_path=logfile)
+		elif self.phase == "preinst":
+			_preinst_bsdflags(settings)
+		elif self.phase == "postinst":
+			_postinst_bsdflags(settings)
 
 		post_phase_cmds = _post_phase_cmds.get(self.phase)
 		if post_phase_cmds is not None:
-			logfile = settings.get("PORTAGE_LOG_FILE")
 			if logfile is not None and self.phase in ("install",):
 				# Log to a temporary file, since the code we are running
 				# reads PORTAGE_LOG_FILE for QA checks, and we want to
@@ -204,7 +239,10 @@ class EbuildPhase(CompositeTask):
 
 		self._assert_current(post_phase)
 
-		log_path = self.settings.get("PORTAGE_LOG_FILE")
+		log_path = None
+		if self.settings.get("PORTAGE_BACKGROUND") != "subprocess":
+			log_path = self.settings.get("PORTAGE_LOG_FILE")
+
 		if post_phase.logfile is not None and \
 			post_phase.logfile != log_path:
 			# We were logging to a temp file (see above), so append
@@ -293,5 +331,7 @@ class EbuildPhase(CompositeTask):
 		msg = _unicode_decode(out.getvalue(),
 			encoding=_encodings['content'], errors='replace')
 		if msg:
-			self.scheduler.output(msg,
-				log_path=self.settings.get("PORTAGE_LOG_FILE"))
+			log_path = None
+			if self.settings.get("PORTAGE_BACKGROUND") != "subprocess":
+				log_path = self.settings.get("PORTAGE_LOG_FILE")
+			self.scheduler.output(msg, log_path=log_path)

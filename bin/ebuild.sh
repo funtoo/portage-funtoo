@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 1999-2010 Gentoo Foundation
+# Copyright 1999-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 PORTAGE_BIN_PATH="${PORTAGE_BIN_PATH:-/usr/lib/portage/bin}"
@@ -666,15 +666,21 @@ _eapi0_src_compile() {
 }
 
 _eapi0_src_test() {
-	if emake -j1 check -n &> /dev/null; then
+	# Since we don't want emake's automatic die
+	# support (EAPI 4 and later), and we also don't
+	# want the warning messages that it produces if
+	# we call it in 'nonfatal' mode, we use emake_cmd
+	# to emulate the desired parts of emake behavior.
+	local emake_cmd="${MAKE:-make} ${MAKEOPTS} ${EXTRA_EMAKE}"
+	if $emake_cmd -j1 check -n &> /dev/null; then
 		vecho ">>> Test phase [check]: ${CATEGORY}/${PF}"
-		if ! emake -j1 check; then
+		if ! $emake_cmd -j1 check; then
 			hasq test $FEATURES && die "Make check failed. See above for details."
 			hasq test $FEATURES || eerror "Make check failed. See above for details."
 		fi
-	elif emake -j1 test -n &> /dev/null; then
+	elif $emake_cmd -j1 test -n &> /dev/null; then
 		vecho ">>> Test phase [test]: ${CATEGORY}/${PF}"
-		if ! emake -j1 test; then
+		if ! $emake_cmd -j1 test; then
 			hasq test $FEATURES && die "Make test failed. See above for details."
 			hasq test $FEATURES || eerror "Make test failed. See above for details."
 		fi
@@ -705,7 +711,7 @@ _eapi4_src_install() {
 		emake DESTDIR="${D}" install
 	fi
 
-	if [[ -z $DOCS ]] ; then
+	if ! declare -p DOCS &>/dev/null ; then
 		local d
 		for d in README* ChangeLog AUTHORS NEWS TODO CHANGES \
 				THANKS BUGS FAQ CREDITS CHANGELOG ; do
@@ -846,7 +852,7 @@ dyn_clean() {
 	# Some kernels, such as Solaris, return EINVAL when an attempt
 	# is made to remove the current working directory.
 	cd "$PORTAGE_BUILDDIR"/../..
-	rmdir "$PORTAGE_BUILDDIR" "${PORTAGE_BUILDDIR%/*}" 2>/dev/null
+	rmdir "$PORTAGE_BUILDDIR" 2>/dev/null
 
 	true
 }
@@ -950,7 +956,7 @@ docompress() {
 			f=$(strip_duplicate_slashes "${f}"); f=${f%/}
 			[[ ${f:0:1} = / ]] || f="/${f}"
 			for g in "${PORTAGE_DOCOMPRESS_SKIP[@]}"; do
-				[[ ${f} = ${g} ]] && continue 2
+				[[ ${f} = "${g}" ]] && continue 2
 			done
 			PORTAGE_DOCOMPRESS_SKIP[${#PORTAGE_DOCOMPRESS_SKIP[@]}]=${f}
 		done
@@ -959,7 +965,7 @@ docompress() {
 			f=$(strip_duplicate_slashes "${f}"); f=${f%/}
 			[[ ${f:0:1} = / ]] || f="/${f}"
 			for g in "${PORTAGE_DOCOMPRESS[@]}"; do
-				[[ ${f} = ${g} ]] && continue 2
+				[[ ${f} = "${g}" ]] && continue 2
 			done
 			PORTAGE_DOCOMPRESS[${#PORTAGE_DOCOMPRESS[@]}]=${f}
 		done
@@ -1106,6 +1112,13 @@ dyn_compile() {
 
 	trap abort_compile SIGINT SIGQUIT
 
+	if hasq distcc $FEATURES && hasq distcc-pump $FEATURES ; then
+		if [[ -z $INCLUDE_SERVER_PORT ]] || [[ ! -w $INCLUDE_SERVER_PORT ]] ; then
+			eval $(/usr/bin/pump --startup)
+			trap "/usr/bin/pump --shutdown" EXIT
+		fi
+	fi
+
 	ebuild_phase pre_src_compile
 
 	vecho ">>> Compiling source in $PWD ..."
@@ -1187,9 +1200,6 @@ dyn_install() {
 	#our custom version of libtool uses $S and $D to fix
 	#invalid paths in .la files
 	export S D
-	#some packages uses an alternative to $S to build in, cause
-	#our libtool to create problematic .la files
-	export PWORKDIR="$WORKDIR"
 
 	# Reset exeinto(), docinto(), insinto(), and into() state variables
 	# in case the user is running the install phase multiple times
@@ -1397,7 +1407,7 @@ inherit() {
 			# This is disabled in the *rm phases because they frequently give
 			# false alarms due to INHERITED in /var/db/pkg being outdated
 			# in comparison the the eclasses from the portage tree.
-			if ! hasq $ECLASS $INHERITED; then
+			if ! hasq $ECLASS $INHERITED $__INHERITED_QA_CACHE ; then
 				eqawarn "QA Notice: ECLASS '$ECLASS' inherited illegally in $CATEGORY/$PF $EBUILD_PHASE"
 			fi
 		fi
@@ -1677,6 +1687,41 @@ _ebuild_phase_funcs() {
 	esac
 }
 
+# Set given variables unless these variable have been already set (e.g. during emerge
+# invocation) to values different than values set in make.conf.
+set_unless_changed() {
+	if [[ $# -lt 1 ]]; then
+		die "${FUNCNAME}() requires at least 1 argument: VARIABLE=VALUE"
+	fi
+
+	local argument value variable
+	for argument in "$@"; do
+		if [[ ${argument} != *=* ]]; then
+			die "${FUNCNAME}(): Argument '${argument}' has incorrect syntax"
+		fi
+		variable="${argument%%=*}"
+		value="${argument#*=}"
+		if eval "[[ \${${variable}} == \$(env -u ${variable} portageq envvar ${variable}) ]]"; then
+			eval "${variable}=\"\${value}\""
+		fi
+	done
+}
+
+# Unset given variables unless these variable have been set (e.g. during emerge
+# invocation) to values different than values set in make.conf.
+unset_unless_changed() {
+	if [[ $# -lt 1 ]]; then
+		die "${FUNCNAME}() requires at least 1 argument: VARIABLE"
+	fi
+
+	local variable
+	for variable in "$@"; do
+		if eval "[[ \${${variable}} == \$(env -u ${variable} portageq envvar ${variable}) ]]"; then
+			unset ${variable}
+		fi
+	done
+}
+
 PORTAGE_BASHRCS_SOURCED=0
 
 # @FUNCTION: source_all_bashrcs
@@ -1864,14 +1909,14 @@ filter_readonly_variables() {
 # interfering with the current environment. This is useful when an existing
 # environment needs to be loaded from a binary or installed package.
 preprocess_ebuild_env() {
-	local _portage_filter_opts=""
-	if [ -f "${T}/environment.raw" ] ; then
-		# This is a signal from the python side, indicating that the
-		# environment may contain stale SANDBOX_{DENY,PREDICT,READ,WRITE}
-		# and FEATURES variables that should be filtered out. Between
-		# phases, these variables are normally preserved.
-		_portage_filter_opts+=" --filter-features --filter-locale --filter-path --filter-sandbox"
-	fi
+	local _portage_filter_opts="--filter-features --filter-locale --filter-path --filter-sandbox"
+
+	# If environment.raw is present, this is a signal from the python side,
+	# indicating that the environment may contain stale FEATURES and
+	# SANDBOX_{DENY,PREDICT,READ,WRITE} variables that should be filtered out.
+	# Otherwise, we don't need to filter the environment.
+	[ -f "${T}/environment.raw" ] || return 0
+
 	filter_readonly_variables $_portage_filter_opts < "${T}"/environment \
 		>> "$T/environment.filtered" || return $?
 	unset _portage_filter_opts
@@ -2026,11 +2071,18 @@ if ! hasq "$EBUILD_PHASE" clean cleanrm ; then
 		# during sourcing of ebuilds and eclasses.
 		source_all_bashrcs
 
+		# When EBUILD_PHASE != depend, INHERITED comes pre-initialized
+		# from cache. In order to make INHERITED content independent of
+		# EBUILD_PHASE during inherit() calls, we unset INHERITED after
+		# we make a backup copy for QA checks.
+		__INHERITED_QA_CACHE=$INHERITED
+
 		# *DEPEND and IUSE will be set during the sourcing of the ebuild.
 		# In order to ensure correct interaction between ebuilds and
 		# eclasses, they need to be unset before this process of
 		# interaction begins.
-		unset DEPEND RDEPEND PDEPEND IUSE REQUIRED_USE
+		unset DEPEND RDEPEND PDEPEND INHERITED IUSE REQUIRED_USE \
+			ECLASS E_IUSE E_REQUIRED_USE E_DEPEND E_RDEPEND E_PDEPEND
 
 		if [[ $PORTAGE_DEBUG != 1 || ${-/x/} != $- ]] ; then
 			source "$EBUILD" || die "error sourcing ebuild"
@@ -2060,7 +2112,8 @@ if ! hasq "$EBUILD_PHASE" clean cleanrm ; then
 		PDEPEND="${PDEPEND} ${E_PDEPEND}"
 		REQUIRED_USE="${REQUIRED_USE} ${E_REQUIRED_USE}"
 		
-		unset ECLASS E_IUSE E_REQUIRED_USE E_DEPEND E_RDEPEND E_PDEPEND 
+		unset ECLASS E_IUSE E_REQUIRED_USE E_DEPEND E_RDEPEND E_PDEPEND \
+			__INHERITED_QA_CACHE
 
 		# alphabetically ordered by $EBUILD_PHASE value
 		case "$EAPI" in
@@ -2288,9 +2341,6 @@ ebuild_main() {
 			#our custom version of libtool uses $S and $D to fix
 			#invalid paths in .la files
 			export S D
-			#some packages use an alternative to $S to build in, cause
-			#our libtool to create problematic .la files
-			export PWORKDIR=$WORKDIR
 
 			;;
 		esac

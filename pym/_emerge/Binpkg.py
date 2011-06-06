@@ -1,4 +1,4 @@
-# Copyright 1999-2010 Gentoo Foundation
+# Copyright 1999-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 from _emerge.EbuildPhase import EbuildPhase
@@ -77,9 +77,8 @@ class Binpkg(CompositeTask):
 		prefetcher = self.prefetcher
 		if prefetcher is None:
 			pass
-		elif not prefetcher.isAlive():
-			prefetcher.cancel()
-		elif prefetcher.poll() is None:
+		elif prefetcher.isAlive() and \
+			prefetcher.poll() is None:
 
 			waiting_msg = ("Fetching '%s' " + \
 				"in the background. " + \
@@ -115,6 +114,9 @@ class Binpkg(CompositeTask):
 			pretend=self.opts.pretend, scheduler=self.scheduler)
 		pkg_path = fetcher.pkg_path
 		self._pkg_path = pkg_path
+		# This gives bashrc users an opportunity to do various things
+		# such as remove binary packages after they're installed.
+		self.settings["PORTAGE_BINPKG_FILE"] = pkg_path
 
 		if self.opts.getbinpkg and self._bintree.isremote(pkg.cpv):
 
@@ -265,19 +267,12 @@ class Binpkg(CompositeTask):
 			self.wait()
 			return
 
-		# This gives bashrc users an opportunity to do various things
-		# such as remove binary packages after they're installed.
-		settings = self.settings
-		settings.setcpv(self.pkg)
-		settings["PORTAGE_BINPKG_FILE"] = self._pkg_path
-		settings.backup_changes("PORTAGE_BINPKG_FILE")
-
 		setup_phase = EbuildPhase(background=self.background,
 			phase="setup", scheduler=self.scheduler,
-			settings=settings)
+			settings=self.settings)
 
 		setup_phase.addExitListener(self._setup_exit)
-		self._current_task = setup_phase
+		self._task_queued(setup_phase)
 		self.scheduler.scheduleSetup(setup_phase)
 
 	def _setup_exit(self, setup_phase):
@@ -308,32 +303,23 @@ class Binpkg(CompositeTask):
 		portage.elog.elog_process(self.pkg.cpv, self.settings)
 		self._build_dir.unlock()
 
-	def install(self):
-
-		# This gives bashrc users an opportunity to do various things
-		# such as remove binary packages after they're installed.
-		settings = self.settings
-		settings["PORTAGE_BINPKG_FILE"] = self._pkg_path
-		settings.backup_changes("PORTAGE_BINPKG_FILE")
-
-		merge = EbuildMerge(find_blockers=self.find_blockers,
+	def create_install_task(self):
+		task = EbuildMerge(find_blockers=self.find_blockers,
 			ldpath_mtimes=self.ldpath_mtimes, logger=self.logger,
 			pkg=self.pkg, pkg_count=self.pkg_count,
 			pkg_path=self._pkg_path, scheduler=self.scheduler,
-			settings=settings, tree=self._tree, world_atom=self.world_atom)
+			settings=self.settings, tree=self._tree,
+			world_atom=self.world_atom)
+		task.addExitListener(self._install_exit)
+		return task
 
-		try:
-			retval = merge.execute()
-		finally:
-			settings.pop("PORTAGE_BINPKG_FILE", None)
-			self._unlock_builddir()
-
-		if retval == os.EX_OK and \
+	def _install_exit(self, task):
+		self.settings.pop("PORTAGE_BINPKG_FILE", None)
+		self._unlock_builddir()
+		if task.returncode == os.EX_OK and \
 			'binpkg-logs' not in self.settings.features and \
 			self.settings.get("PORTAGE_LOG_FILE"):
 			try:
 				os.unlink(self.settings["PORTAGE_LOG_FILE"])
 			except OSError:
 				pass
-		return retval
-

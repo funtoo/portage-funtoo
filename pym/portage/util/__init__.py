@@ -1,4 +1,4 @@
-# Copyright 2004-2010 Gentoo Foundation
+# Copyright 2004-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 __all__ = ['apply_permissions', 'apply_recursive_permissions',
@@ -28,12 +28,12 @@ import traceback
 
 import portage
 portage.proxy.lazyimport.lazyimport(globals(),
+	'pickle',
 	'portage.dep:Atom',
 	'portage.util.listdir:_ignorecvs_dirs'
 )
 from portage import StringIO
 from portage import os
-from portage import pickle
 from portage import subprocess_getstatusoutput
 from portage import _encodings
 from portage import _os_merge
@@ -125,8 +125,18 @@ def grabfile(myfilename, compat_level=0, recursive=0, remember_source_file=False
 	for x, source_file in mylines:
 		#the split/join thing removes leading and trailing whitespace, and converts any whitespace in the line
 		#into single spaces.
-		myline = _unicode_decode(' ').join(x.split())
-		if not len(myline):
+		myline = x.split()
+		if x and x[0] != "#":
+			mylinetemp = []
+			for item in myline:
+				if item[:1] != "#":
+					mylinetemp.append(item)
+				else:
+					break
+			myline = mylinetemp
+
+		myline = " ".join(myline)
+		if not myline:
 			continue
 		if myline[0]=="#":
 			# Check if we have a compat-level string. BC-integration data.
@@ -349,6 +359,13 @@ def grabdict(myfilename, juststrings=0, empty=0, recursive=0, incremental=1):
 		if x[0] == "#":
 			continue
 		myline=x.split()
+		mylinetemp = []
+		for item in myline:
+			if item[:1] != "#":
+				mylinetemp.append(item)
+			else:
+				break
+		myline = mylinetemp
 		if len(myline) < 2 and empty == 0:
 			continue
 		if len(myline) < 1 and empty == 1:
@@ -475,21 +492,14 @@ def grablines(myfilename, recursive=0, remember_source_file=False):
 def writedict(mydict,myfilename,writekey=True):
 	"""Writes out a dict to a file; writekey=0 mode doesn't write out
 	the key and assumes all values are strings, not lists."""
-	myfile = None
-	try:
-		myfile = atomic_ofstream(myfilename)
-		if not writekey:
-			for x in mydict.values():
-				myfile.write(x+"\n")
-		else:
-			for x in mydict:
-				myfile.write("%s %s\n" % (x, " ".join(mydict[x])))
-		myfile.close()
-	except IOError:
-		if myfile is not None:
-			myfile.abort()
-		return 0
-	return 1
+	lines = []
+	if not writekey:
+		for v in mydict.values():
+			lines.append(v + "\n")
+	else:
+		for k, v in mydict.items():
+			lines.append("%s %s\n" % (k, " ".join(v)))
+	write_atomic(myfilename, "".join(lines))
 
 def shlex_split(s):
 	"""
@@ -1108,9 +1118,9 @@ class atomic_ofstream(ObjectProxy):
 			except IOError as e:
 				if canonical_path == filename:
 					raise
-				writemsg(_("!!! Failed to open file: '%s'\n") % tmp_name,
-					noiselevel=-1)
-				writemsg("!!! %s\n" % str(e), noiselevel=-1)
+				# Ignore this error, since it's irrelevant
+				# and the below open call will produce a
+				# new error if necessary.
 
 		object.__setattr__(self, '_real_name', filename)
 		tmp_name = "%s.%i" % (filename, os.getpid())
@@ -1463,9 +1473,11 @@ class ConfigProtect(object):
 						masked = len(pmpath)
 		return protected > masked
 
-def new_protect_filename(mydest, newmd5=None):
+def new_protect_filename(mydest, newmd5=None, force=False):
 	"""Resolves a config-protect filename for merging, optionally
-	using the last filename if the md5 matches.
+	using the last filename if the md5 matches. If force is True,
+	then a new filename will be generated even if mydest does not
+	exist yet.
 	(dest,md5) ==> 'string'            --- path_to_target_filename
 	(dest)     ==> ('next', 'highest') --- next_target and most-recent_target
 	"""
@@ -1479,7 +1491,8 @@ def new_protect_filename(mydest, newmd5=None):
 	prot_num = -1
 	last_pfile = ""
 
-	if not os.path.exists(mydest):
+	if not force and \
+		not os.path.exists(mydest):
 		return mydest
 
 	real_filename = os.path.basename(mydest)

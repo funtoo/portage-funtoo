@@ -1,4 +1,4 @@
-# Copyright 1999-2010 Gentoo Foundation
+# Copyright 1999-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 import codecs
@@ -99,7 +99,14 @@ def fixdbentries(update_iter, dbdir):
 def grab_updates(updpath, prev_mtimes=None):
 	"""Returns all the updates from the given directory as a sorted list of
 	tuples, each containing (file_path, statobj, content).  If prev_mtimes is
-	given then only updates with differing mtimes are considered."""
+	given then updates are only returned if one or more files have different
+	mtimes. When a change is detected for a given file, updates will be
+	returned for that file and any files that come after it in the entire
+	sequence. This ensures that all relevant updates are returned for cases
+	in which the destination package of an earlier move corresponds to
+	the source package of a move that comes somewhere later in the entire
+	sequence of files.
+	"""
 	try:
 		mylist = os.listdir(updpath)
 	except OSError as oe:
@@ -122,8 +129,9 @@ def grab_updates(updpath, prev_mtimes=None):
 	for myfile in mylist:
 		file_path = os.path.join(updpath, myfile)
 		mystat = os.stat(file_path)
-		if file_path not in prev_mtimes or \
-		long(prev_mtimes[file_path]) != mystat[stat.ST_MTIME]:
+		if update_data or \
+			file_path not in prev_mtimes or \
+			long(prev_mtimes[file_path]) != mystat[stat.ST_MTIME]:
 			content = codecs.open(_unicode_encode(file_path,
 				encoding=_encodings['fs'], errors='strict'),
 				mode='r', encoding=_encodings['repo.content'], errors='replace'
@@ -302,7 +310,7 @@ def update_config_files(config_root, protect, protect_mask, update_iter, match_c
 			write_atomic(updating_file, "".join(file_contents[x]))
 		except PortageException as e:
 			writemsg("\n!!! %s\n" % str(e), noiselevel=-1)
-			writemsg(_("!!! An error occured while updating a config file:") + \
+			writemsg(_("!!! An error occurred while updating a config file:") + \
 				" '%s'\n" % updating_file, noiselevel=-1)
 			continue
 

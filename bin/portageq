@@ -21,7 +21,6 @@ except KeyboardInterrupt:
 	sys.exit(128 + signal.SIGINT)
 
 import os
-import subprocess
 import types
 
 # Avoid sandbox violations after python upgrade.
@@ -44,6 +43,10 @@ del pym_path
 
 from portage import os
 from portage.util import writemsg, writemsg_stdout
+portage.proxy.lazyimport.lazyimport(globals(),
+	'subprocess',
+	'portage.dbapi._expand_new_virt:expand_new_virt',
+)
 
 def eval_atom_use(atom):
 	if 'USE' in os.environ:
@@ -255,6 +258,8 @@ def owners(argv):
 		pass
 
 	files = []
+	orphan_abs_paths = set()
+	orphan_basenames = set()
 	for f in argv[1:]:
 		f = portage.normalize_path(f)
 		is_basename = os.sep not in f
@@ -271,8 +276,10 @@ def owners(argv):
 			return 2
 		if is_basename:
 			files.append(f)
+			orphan_basenames.add(f)
 		else:
 			files.append(f[len(root)-1:])
+			orphan_abs_paths.add(f)
 
 	owners = vardb._owners.get_owners(files)
 
@@ -281,16 +288,28 @@ def owners(argv):
 		cpv = pkg.mycpv
 		msg.append("%s\n" % cpv)
 		for f in sorted(owned_files):
-			msg.append("\t%s\n" % \
-				os.path.join(root, f.lstrip(os.path.sep)))
+			f_abs = os.path.join(root, f.lstrip(os.path.sep))
+			msg.append("\t%s\n" % (f_abs,))
+			orphan_abs_paths.discard(f_abs)
+			if orphan_basenames:
+				orphan_basenames.discard(os.path.basename(f_abs))
 
 	writemsg_stdout(''.join(msg), noiselevel=-1)
 
+	if orphan_abs_paths or orphan_basenames:
+		orphans = []
+		orphans.extend(orphan_abs_paths)
+		orphans.extend(orphan_basenames)
+		orphans.sort()
+		msg = []
+		msg.append("None of the installed packages claim these files:\n")
+		for f in orphans:
+			msg.append("\t%s\n" % (f,))
+		sys.stderr.write("".join(msg))
+		sys.stderr.flush()
+
 	if owners:
 		return 0
-
-	sys.stderr.write("None of the installed packages claim the file(s).\n")
-	sys.stderr.flush()
 	return 1
 
 owners.uses_root = True
@@ -476,6 +495,40 @@ def match(argv):
 		print(cpv)
 match.uses_root = True
 
+def expand_virtual(argv):
+	"""<root> <atom>
+	Returns a \\n separated list of atoms expanded from a
+	given virtual atom, excluding blocker atoms. Satisfied
+	virtual atoms are not included in the output, since
+	they are expanded to real atoms which are displayed.
+	Unsatisfied virtual atoms are displayed without
+	any expansion. The "match" command can be used to
+	resolve the returned atoms to specific installed
+	packages.
+	"""
+	if len(argv) != 2:
+		writemsg("ERROR: expected 2 parameters, got %d!\n" % len(argv),
+			noiselevel=-1)
+		return 2
+
+	root, atom = argv
+
+	try:
+		results = list(expand_new_virt(
+			portage.db[root]["vartree"].dbapi, atom))
+	except portage.exception.InvalidAtom:
+		writemsg("ERROR: Invalid atom: '%s'\n" % atom,
+			noiselevel=-1)
+		return 2
+
+	results.sort()
+	for x in results:
+		if not x.blocker:
+			writemsg_stdout("%s\n" % (x,))
+
+	return os.EX_OK
+
+expand_virtual.uses_root = True
 
 def vdb_path(argv):
 	"""
@@ -605,10 +658,11 @@ list_preserved_libs.uses_root = True
 if not portage.const._ENABLE_PRESERVE_LIBS:
 	del list_preserved_libs
 
-non_commands = frozenset(['elog', 'eval_atom_use', 'exithandler', 'main',
+non_commands = frozenset(['elog', 'eval_atom_use',
+	'exithandler', 'expand_new_virt', 'main',
 	'usage', 'writemsg', 'writemsg_stdout'])
 commands = sorted(k for k, v in globals().items() \
-	if type(v) is types.FunctionType and k not in non_commands)
+	if k not in non_commands and isinstance(v, types.FunctionType))
 
 def usage(argv):
 	print(">>> Portage information query tool")

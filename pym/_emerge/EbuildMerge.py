@@ -1,38 +1,45 @@
-# Copyright 1999-2009 Gentoo Foundation
+# Copyright 1999-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
-from _emerge.SlotObject import SlotObject
-import portage
+from _emerge.CompositeTask import CompositeTask
 from portage import os
+from portage.dbapi._MergeProcess import MergeProcess
 
-class EbuildMerge(SlotObject):
+class EbuildMerge(CompositeTask):
 
 	__slots__ = ("find_blockers", "logger", "ldpath_mtimes",
 		"pkg", "pkg_count", "pkg_path", "pretend",
-		"scheduler", "settings", "tree", "world_atom")
+		"settings", "tree", "world_atom")
 
-	def execute(self):
+	def _start(self):
 		root_config = self.pkg.root_config
 		settings = self.settings
-		retval = portage.merge(settings["CATEGORY"],
-			settings["PF"], settings["D"],
-			os.path.join(settings["PORTAGE_BUILDDIR"],
-			"build-info"), root_config.root, settings,
-			myebuild=settings["EBUILD"],
-			mytree=self.tree, mydbapi=root_config.trees[self.tree].dbapi,
-			vartree=root_config.trees["vartree"],
-			prev_mtimes=self.ldpath_mtimes,
-			scheduler=self.scheduler,
-			blockers=self.find_blockers)
+		mycat = settings["CATEGORY"]
+		mypkg = settings["PF"]
+		pkgloc = settings["D"]
+		infloc = os.path.join(settings["PORTAGE_BUILDDIR"], "build-info")
+		myebuild = settings["EBUILD"]
+		mydbapi = root_config.trees[self.tree].dbapi
+		vartree = root_config.trees["vartree"]
+		background = (settings.get('PORTAGE_BACKGROUND') == '1')
+		logfile = settings.get('PORTAGE_LOG_FILE')
 
-		if retval == os.EX_OK:
-			self.world_atom(self.pkg)
-			self._log_success()
+		merge_task = MergeProcess(
+			mycat=mycat, mypkg=mypkg, settings=settings,
+			treetype=self.tree, vartree=vartree, scheduler=self.scheduler,
+			background=background, blockers=self.find_blockers, pkgloc=pkgloc,
+			infloc=infloc, myebuild=myebuild, mydbapi=mydbapi,
+			prev_mtimes=self.ldpath_mtimes, logfile=logfile)
 
-		return retval
+		self._start_task(merge_task, self._merge_exit)
 
-	def _log_success(self):
+	def _merge_exit(self, merge_task):
+		if self._final_exit(merge_task) != os.EX_OK:
+			self.wait()
+			return
+
 		pkg = self.pkg
+		self.world_atom(pkg)
 		pkg_count = self.pkg_count
 		pkg_path = self.pkg_path
 		logger = self.logger
@@ -46,3 +53,4 @@ class EbuildMerge(SlotObject):
 		logger.log(" ::: completed emerge (%s of %s) %s to %s" % \
 			(pkg_count.curval, pkg_count.maxval, pkg.cpv, pkg.root))
 
+		self.wait()

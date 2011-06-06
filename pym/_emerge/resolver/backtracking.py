@@ -1,4 +1,4 @@
-# Copyright 2010 Gentoo Foundation
+# Copyright 2010-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 import copy
@@ -7,13 +7,17 @@ class BacktrackParameter(object):
 
 	__slots__ = (
 		"needed_unstable_keywords", "runtime_pkg_mask", "needed_use_config_changes", "needed_license_changes",
+		"rebuild_list", "reinstall_list", "needed_p_mask_changes"
 	)
 
 	def __init__(self):
 		self.needed_unstable_keywords = set()
+		self.needed_p_mask_changes = set()
 		self.runtime_pkg_mask = {}
 		self.needed_use_config_changes = {}
 		self.needed_license_changes = {}
+		self.rebuild_list = set()
+		self.reinstall_list = set()
 
 	def __deepcopy__(self, memo=None):
 		if memo is None:
@@ -24,17 +28,23 @@ class BacktrackParameter(object):
 		#Shallow copies are enough here, as we only need to ensure that nobody adds stuff
 		#to our sets and dicts. The existing content is immutable.
 		result.needed_unstable_keywords = copy.copy(self.needed_unstable_keywords)
+		result.needed_p_mask_changes = copy.copy(self.needed_p_mask_changes)
 		result.runtime_pkg_mask = copy.copy(self.runtime_pkg_mask)
 		result.needed_use_config_changes = copy.copy(self.needed_use_config_changes)
 		result.needed_license_changes = copy.copy(self.needed_license_changes)
+		result.rebuild_list = copy.copy(self.rebuild_list)
+		result.reinstall_list = copy.copy(self.reinstall_list)
 
 		return result
 
 	def __eq__(self, other):
 		return self.needed_unstable_keywords == other.needed_unstable_keywords and \
+			self.needed_p_mask_changes == other.needed_p_mask_changes and \
 			self.runtime_pkg_mask == other.runtime_pkg_mask and \
 			self.needed_use_config_changes == other.needed_use_config_changes and \
-			self.needed_license_changes == other.needed_license_changes
+			self.needed_license_changes == other.needed_license_changes and \
+			self.rebuild_list == other.rebuild_list and \
+			self.reinstall_list == other.reinstall_list
 
 
 class _BacktrackNode:
@@ -131,12 +141,18 @@ class Backtracker(object):
 		for change, data in changes.items():
 			if change == "needed_unstable_keywords":
 				para.needed_unstable_keywords.update(data)
+			elif change == "needed_p_mask_changes":
+				para.needed_p_mask_changes.update(data)
 			elif change == "needed_license_changes":
 				for pkg, missing_licenses in data:
 					para.needed_license_changes.setdefault(pkg, set()).update(missing_licenses)
 			elif change == "needed_use_config_changes":
 				for pkg, (new_use, new_changes) in data:
 					para.needed_use_config_changes[pkg] = (new_use, new_changes)
+			elif change == "rebuild_list":
+				para.rebuild_list.update(data)
+			elif change == "reinstall_list":
+				para.reinstall_list.update(data)
 
 		self._add(new_node, explore=explore)
 		self._current_node = new_node

@@ -29,8 +29,11 @@ from portage import digraph
 from portage import _unicode_decode
 from portage.cache.cache_errors import CacheError
 from portage.const import GLOBAL_CONFIG_PATH, NEWS_LIB_PATH
-from portage.const import _ENABLE_DYN_LINK_MAP
+from portage.const import _ENABLE_DYN_LINK_MAP, _ENABLE_SET_CONFIG
 from portage.dbapi.dep_expand import dep_expand
+from portage.dbapi._expand_new_virt import expand_new_virt
+from portage.dep import Atom, extended_cp_match
+from portage.exception import InvalidAtom
 from portage.output import blue, bold, colorize, create_color_func, darkgreen, \
 	red, yellow
 good = create_color_func("GOOD")
@@ -442,13 +445,6 @@ def action_build(settings, trees, mtimedb,
 				portage.writemsg_stdout(colorize("WARN", "WARNING:")
 					+ " AUTOCLEAN is disabled.  This can cause serious"
 					+ " problems due to overlapping packages.\n")
-			plib_registry = \
-				trees[settings["ROOT"]]["vartree"].dbapi._plib_registry
-			if plib_registry is None:
-				# preserve-libs is entirely disabled
-				pass
-			else:
-				plib_registry.pruneNonExisting()
 
 		return retval
 
@@ -563,7 +559,10 @@ def action_depclean(settings, trees, ldpath_mtimes,
 		for x in args_set:
 			if vardb.match(x):
 				matched_packages = True
-				break
+			else:
+				writemsg_level("--- Couldn't find '%s' to %s.\n" % \
+					(x.replace("null/", ""), action),
+					level=logging.WARN, noiselevel=-1)
 		if not matched_packages:
 			writemsg_level(">>> No packages selected for removal by %s\n" % \
 				action)
@@ -786,15 +785,27 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 				msg.append("  %s pulled in by:" % (atom,))
 				msg.append("    %s" % (parent,))
 				msg.append("")
-			msg.append("Have you forgotten to run " + \
-				good("`emerge --update --newuse --deep @world`") + " prior")
-			msg.append(("to %s? It may be necessary to manually " + \
-				"uninstall packages that no longer") % action)
-			msg.append("exist in the portage tree since " + \
-				"it may not be possible to satisfy their")
-			msg.append("dependencies.  Also, be aware of " + \
-				"the --with-bdeps option that is documented")
-			msg.append("in " + good("`man emerge`") + ".")
+			msg.extend(textwrap.wrap(
+				"Have you forgotten to do a complete update prior " + \
+				"to depclean? The most comprehensive command for this " + \
+				"purpose is as follows:", 65
+			))
+			msg.append("")
+			msg.append("  " + \
+				good("emerge --update --newuse --deep --with-bdeps=y @world"))
+			msg.append("")
+			msg.extend(textwrap.wrap(
+				"Note that the --with-bdeps=y option is not required in " + \
+				"many situations. Refer to the emerge manual page " + \
+				"(run `man emerge`) for more information about " + \
+				"--with-bdeps.", 65
+			))
+			msg.append("")
+			msg.extend(textwrap.wrap(
+				"Also, note that it may be necessary to manually uninstall " + \
+				"packages that no longer exist in the portage tree, since " + \
+				"it may not be possible to satisfy their dependencies.", 65
+			))
 			if action == "prune":
 				msg.append("")
 				msg.append("If you would like to ignore " + \
@@ -907,7 +918,8 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 
 	if cleanlist and \
 		real_vardb._linkmap is not None and \
-		myopts.get('--depclean-lib-check') != 'n':
+		myopts.get("--depclean-lib-check") != "n" and \
+		"preserve-libs" not in settings.features:
 
 		# Check if any of these packages are the sole providers of libraries
 		# with consumers that have not been selected for removal. If so, these
@@ -1184,7 +1196,7 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 			ignore_priority_range = [None]
 			ignore_priority_range.extend(
 				range(UnmergeDepPriority.MIN, UnmergeDepPriority.MAX + 1))
-			while not graph.empty():
+			while graph:
 				for ignore_priority in ignore_priority_range:
 					nodes = graph.root_nodes(ignore_priority=ignore_priority)
 					if nodes:
@@ -1212,25 +1224,37 @@ def action_deselect(settings, trees, opts, atoms):
 			level=logging.ERROR, noiselevel=-1)
 		return 1
 
-	vardb = root_config.trees['vartree'].dbapi
-	expanded_atoms = set(atoms)
-	from portage.dep import Atom
-	for atom in atoms:
-		if not atom.startswith(SETPREFIX):
-			for cpv in vardb.match(atom):
-				slot, = vardb.aux_get(cpv, ['SLOT'])
-				if not slot:
-					slot = '0'
-				expanded_atoms.add(Atom('%s:%s' % (portage.cpv_getkey(cpv), slot)))
-
 	pretend = '--pretend' in opts
 	locked = False
 	if not pretend and hasattr(world_set, 'lock'):
 		world_set.lock()
 		locked = True
 	try:
-		discard_atoms = set()
 		world_set.load()
+		world_atoms = world_set.getAtoms()
+		vardb = root_config.trees["vartree"].dbapi
+		expanded_atoms = set(atoms)
+
+		for atom in atoms:
+			if not atom.startswith(SETPREFIX):
+				if atom.cp.startswith("null/"):
+					# try to expand category from world set
+					null_cat, pn = portage.catsplit(atom.cp)
+					for world_atom in world_atoms:
+						cat, world_pn = portage.catsplit(world_atom.cp)
+						if pn == world_pn:
+							expanded_atoms.add(
+								Atom(atom.replace("null", cat, 1),
+								allow_repo=True, allow_wildcard=True))
+
+				for cpv in vardb.match(atom):
+					slot, = vardb.aux_get(cpv, ["SLOT"])
+					if not slot:
+						slot = "0"
+					expanded_atoms.add(Atom("%s:%s" % \
+						(portage.cpv_getkey(cpv), slot)))
+
+		discard_atoms = set()
 		for atom in world_set:
 			for arg_atom in expanded_atoms:
 				if arg_atom.startswith(SETPREFIX):
@@ -1306,9 +1330,13 @@ def headSHA1(tree):
 	print ("Portage HEAD:",head,hfile2)
 
 def action_info(settings, trees, myopts, myfiles):
+
+	root_config = trees[settings['ROOT']]['root_config']
+
 	print(getportageversion(settings["PORTDIR"], settings["ROOT"],
 		settings.profile_path, settings["CHOST"],
 		trees[settings["ROOT"]]["vartree"].dbapi))
+
 	header_width = 65
 	header_title = "System Settings"
 	if myfiles:
@@ -1337,20 +1365,43 @@ def action_info(settings, trees, myopts, myfiles):
 	myvars  = ["sys-devel/autoconf", "sys-devel/automake", "virtual/os-headers",
 	           "sys-devel/binutils", "sys-devel/libtool",  "dev-lang/python"]
 	myvars += portage.util.grabfile(settings["PORTDIR"]+"/profiles/info_pkgs")
-	myvars  = portage.util.unique_array(myvars)
-	myvars.sort()
+	atoms = []
+	vardb = trees["/"]["vartree"].dbapi
+	for x in myvars:
+		try:
+			x = Atom(x)
+		except InvalidAtom:
+			writemsg_stdout("%-20s %s\n" % (x+":", "[NOT VALID]"),
+				noiselevel=-1)
+		else:
+			for atom in expand_new_virt(vardb, x):
+				if not atom.blocker:
+					atoms.append((x, atom))
+
+	myvars = sorted(set(atoms))
 
 	portdb = trees["/"]["porttree"].dbapi
-	vardb = trees["/"]["vartree"].dbapi
 	main_repo = portdb.getRepositoryName(portdb.porttree_root)
+	cp_map = {}
+	cp_max_len = 0
 
-	for x in myvars:
-		if portage.isvalidatom(x):
+	for orig_atom, x in myvars:
 			pkg_matches = vardb.match(x)
 
 			versions = []
 			for cpv in pkg_matches:
+				matched_cp = portage.versions.cpv_getkey(cpv)
 				ver = portage.versions.cpv_getversion(cpv)
+				ver_map = cp_map.setdefault(matched_cp, {})
+				prev_match = ver_map.get(ver)
+				if prev_match is not None:
+					if prev_match.provide_suffix:
+						# prefer duplicate matches that include
+						# additional virtual provider info
+						continue
+
+				if len(matched_cp) > cp_max_len:
+					cp_max_len = len(matched_cp)
 				repo = vardb.aux_get(cpv, ["repository"])[0]
 				if repo == main_repo:
 					repo_suffix = ""
@@ -1358,36 +1409,39 @@ def action_info(settings, trees, myopts, myfiles):
 					repo_suffix = "::<unknown repository>"
 				else:
 					repo_suffix = "::" + repo
-				
-				matched_cp = portage.versions.cpv_getkey(cpv)
-				if matched_cp == x:
+
+				if matched_cp == orig_atom.cp:
 					provide_suffix = ""
 				else:
-					provide_suffix = " (%s)" % matched_cp
+					provide_suffix = " (%s)" % (orig_atom,)
 
-				versions.append(
-					_info_pkgs_ver(ver, repo_suffix, provide_suffix))
+				ver_map[ver] = _info_pkgs_ver(ver, repo_suffix, provide_suffix)
 
-			versions.sort()
-
-			if versions:
-				versions = ", ".join(ver.toString() for ver in versions)
-				writemsg_stdout("%-20s %s\n" % (x+":", versions),
-					noiselevel=-1)
-		else:
-			writemsg_stdout("%-20s %s\n" % (x+":", "[NOT VALID]"),
-				noiselevel=-1)
+	for cp in sorted(cp_map):
+		versions = sorted(cp_map[cp].values())
+		versions = ", ".join(ver.toString() for ver in versions)
+		writemsg_stdout("%s %s\n" % \
+			((cp + ":").ljust(cp_max_len + 1), versions),
+			noiselevel=-1)
 
 	libtool_vers = ",".join(trees["/"]["vartree"].dbapi.match("sys-devel/libtool"))
 
 	repos = portdb.settings.repositories
 	if "--verbose" in myopts:
-		writemsg_stdout("Repositories:\n\n")
+		writemsg_stdout("Repositories:\n\n", noiselevel=-1)
 		for repo in repos:
-			writemsg_stdout(repo.info_string())
+			writemsg_stdout(repo.info_string(), noiselevel=-1)
 	else:
 		writemsg_stdout("Repositories: %s\n" % \
-			" ".join(repo.name for repo in repos))
+			" ".join(repo.name for repo in repos), noiselevel=-1)
+
+	if _ENABLE_SET_CONFIG:
+		sets_line = "Installed sets: "
+		sets_line += ", ".join(s for s in \
+			sorted(root_config.sets['selected'].getNonAtoms()) \
+			if s.startswith(SETPREFIX))
+		sets_line += "\n"
+		writemsg_stdout(sets_line, noiselevel=-1)
 
 	if "--verbose" in myopts:
 		myvars = list(settings)
@@ -1412,7 +1466,6 @@ def action_info(settings, trees, myopts, myfiles):
 	use_expand_hidden = set(
 		settings.get('USE_EXPAND_HIDDEN', '').upper().split())
 	alphabetical_use = '--alphabetical' in myopts
-	root_config = trees[settings["ROOT"]]['root_config']
 	unset_vars = []
 	myvars.sort()
 	for x in myvars:
@@ -2030,14 +2083,15 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		if os.access(postsync, os.X_OK):
 			retval = portage.process.spawn( [postsync, syncuri], env=settings.environ())
 			if retval != os.EX_OK:
-				print(red(" * ") + bold("spawn failed of " + postsync))
+				writemsg_level(
+					" %s spawn failed of %s\n" % (bad("*"), postsync,),
+					level=logging.ERROR, noiselevel=-1)
 
 	display_news_notification(root_config, myopts)
 	return os.EX_OK
 
 def action_uninstall(settings, trees, ldpath_mtimes,
 	opts, action, files, spinner):
-
 	# For backward compat, some actions do not require leading '='.
 	ignore_missing_eq = action in ('clean', 'unmerge')
 	root = settings['ROOT']
@@ -2079,6 +2133,28 @@ def action_uninstall(settings, trees, ldpath_mtimes,
 
 		elif x.startswith(SETPREFIX) and action == "deselect":
 			valid_atoms.append(x)
+
+		elif "*" in x:
+			try:
+				ext_atom = Atom(x, allow_repo=True, allow_wildcard=True)
+			except InvalidAtom:
+				msg = []
+				msg.append("'%s' is not a valid package atom." % (x,))
+				msg.append("Please check ebuild(5) for full details.")
+				writemsg_level("".join("!!! %s\n" % line for line in msg),
+					level=logging.ERROR, noiselevel=-1)
+				return 1
+
+			for cp in vardb.cp_all():
+				if extended_cp_match(ext_atom.cp, cp):
+					atom = cp
+					if ext_atom.slot:
+						atom += ":" + ext_atom.slot
+					if ext_atom.repo:
+						atom += "::" + ext_atom.repo
+
+					if vardb.match(atom):
+						valid_atoms.append(Atom(atom, allow_repo=True))
 
 		else:
 			msg = []
@@ -2145,6 +2221,13 @@ def action_uninstall(settings, trees, ldpath_mtimes,
 		spinner)
 	sched._background = sched._background_mode()
 	sched._status_display.quiet = True
+
+	if sched._background:
+		sched.settings.unlock()
+		sched.settings["PORTAGE_BACKGROUND"] = "1"
+		sched.settings.backup_changes("PORTAGE_BACKGROUND")
+		sched.settings.lock()
+		sched.pkgsettings[root] = portage.config(clone=sched.settings)
 
 	if action in ('clean', 'unmerge') or \
 		(action == 'prune' and "--nodeps" in opts):
@@ -2304,24 +2387,22 @@ def getportageversion(portdir, target_root, profile, chost, vardb):
 	if profilever is None:
 		profilever = "unavailable"
 
-	libcver=[]
-	libclist  = vardb.match("virtual/libc")
-	libclist += vardb.match("virtual/glibc")
-	libclist  = portage.util.unique_array(libclist)
-	for x in libclist:
-		xs=portage.catpkgsplit(x)
-		if libcver:
-			libcver+=","+"-".join(xs[1:])
-		else:
-			libcver="-".join(xs[1:])
-	if libcver==[]:
-		libcver="unavailable"
+	libcver = []
+	libclist = set()
+	for atom in expand_new_virt(vardb, portage.const.LIBC_PACKAGE_ATOM):
+		if not atom.blocker:
+			libclist.update(vardb.match(atom))
+	if libclist:
+		for cpv in sorted(libclist):
+			libcver.append("-".join(portage.catpkgsplit(cpv)[1:]))
+	else:
+		libcver = ["unavailable"]
 
 	gccver = getgccversion(chost)
 	unameout=platform.release()+" "+platform.machine()
 
 	return "Portage %s (%s, %s, %s, %s)" % \
-		(portage.VERSION, profilever, gccver, libcver, unameout)
+		(portage.VERSION, profilever, gccver, ",".join(libcver), unameout)
 
 def git_sync_timestamps(settings, portdir):
 	"""
@@ -2496,11 +2577,21 @@ def chk_updated_cfg_files(eroot, config_protect):
 		portage.util.find_updated_config_files(target_root, config_protect))
 
 	for x in result:
-		print("\n"+colorize("WARN", " * IMPORTANT:"), end=' ')
+		writemsg_level("\n %s " % (colorize("WARN", "* IMPORTANT:"),),
+			level=logging.INFO, noiselevel=-1)
 		if not x[1]: # it's a protected file
-			print("config file '%s' needs updating." % x[0])
+			writemsg_level("config file '%s' needs updating.\n" % x[0],
+				level=logging.INFO, noiselevel=-1)
 		else: # it's a protected dir
-			print("%d config files in '%s' need updating." % (len(x[1]), x[0]))
+			if len(x[1]) == 1:
+				head, tail = os.path.split(x[1][0])
+				tail = tail[len("._cfg0000_"):]
+				fpath = os.path.join(head, tail)
+				writemsg_level("config file '%s' needs updating.\n" % fpath,
+					level=logging.INFO, noiselevel=-1)
+			else:
+				writemsg_level("%d config files in '%s' need updating.\n" % \
+					(len(x[1]), x[0]), level=logging.INFO, noiselevel=-1)
 
 	if result:
 		print(" "+yellow("*")+" See the "+colorize("INFORM","CONFIGURATION FILES")\
@@ -2519,10 +2610,6 @@ def display_news_notification(root_config, myopts):
 	update = "--pretend" not in myopts
 	if "news" not in settings.features:
 		return
-
-	# Populate these using our existing vartree, to avoid
-	# having a temporary one instantiated.
-	settings._populate_treeVirtuals_if_needed(trees["vartree"])
 
 	for repo in portdb.getRepositories():
 		unreadItems = checkUpdatedNewsItems(

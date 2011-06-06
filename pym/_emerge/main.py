@@ -45,12 +45,13 @@ from _emerge.emergelog import emergelog
 from _emerge._flush_elog_mod_echo import _flush_elog_mod_echo
 from _emerge.is_valid_package_atom import is_valid_package_atom
 from _emerge.stdout_spinner import stdout_spinner
+from _emerge.userquery import userquery
 
 if sys.hexversion >= 0x3000000:
 	long = int
 
 options=[
-"--ask",          "--alphabetical",
+"--alphabetical",
 "--ask-enter-invalid",
 "--buildpkgonly",
 "--changed-use",
@@ -65,8 +66,6 @@ options=[
 "--nodeps",       "--noreplace",
 "--nospinner",    "--oneshot",
 "--onlydeps",     "--pretend",
-"--quiet",
-"--quiet-build",
 "--quiet-unmerge-warn",
 "--resume",
 "--searchdesc",
@@ -79,7 +78,6 @@ options=[
 
 shortmapping={
 "1":"--oneshot",
-"a":"--ask",
 "B":"--buildpkgonly",
 "c":"--depclean",
 "C":"--unmerge",
@@ -91,7 +89,6 @@ shortmapping={
 "n":"--noreplace", "N":"--newuse",
 "o":"--onlydeps",  "O":"--nodeps",
 "p":"--pretend",   "P":"--prune",
-"q":"--quiet",
 "r":"--resume",
 "s":"--search",    "S":"--searchdesc",
 "t":"--tree",
@@ -118,10 +115,12 @@ def chk_updated_info_files(root, infodirs, prev_mtimes, retval):
 
 		if not regen_infodirs:
 			portage.writemsg_stdout("\n")
-			out.einfo("GNU info directory index is up-to-date.")
+			if portage.util.noiselimit >= 0:
+				out.einfo("GNU info directory index is up-to-date.")
 		else:
 			portage.writemsg_stdout("\n")
-			out.einfo("Regenerating GNU info directory index...")
+			if portage.util.noiselimit >= 0:
+				out.einfo("Regenerating GNU info directory index...")
 
 			dir_extensions = ("", ".gz", ".bz2")
 			icount=0
@@ -208,7 +207,7 @@ def chk_updated_info_files(root, infodirs, prev_mtimes, retval):
 					(icount, badcount))
 				writemsg_level(errmsg, level=logging.ERROR, noiselevel=-1)
 			else:
-				if icount > 0:
+				if icount > 0 and portage.util.noiselimit >= 0:
 					out.einfo("Processed %d info files." % (icount,))
 
 def display_preserved_libs(vardbapi, myopts):
@@ -219,8 +218,9 @@ def display_preserved_libs(vardbapi, myopts):
 		# preserve-libs is entirely disabled
 		return
 
-	# Ensure the registry is consistent with existing files.
-	vardbapi._plib_registry.pruneNonExisting()
+	# Explicitly load and prune the PreservedLibsRegistry in order
+	# to ensure that we do not display stale data.
+	vardbapi._plib_registry.load()
 
 	if vardbapi._plib_registry.hasEntries():
 		if "--quiet" in myopts:
@@ -292,7 +292,8 @@ def display_preserved_libs(vardbapi, myopts):
 					print(colorize("WARN", " * ") + "     used by %d other files" % (len(consumers) - MAX_DISPLAY))
 		print("Use " + colorize("GOOD", "emerge @preserved-rebuild") + " to rebuild packages using these libraries")
 
-def post_emerge(root_config, myopts, mtimedb, retval):
+def post_emerge(myaction, myopts, myfiles,
+	target_root, trees, mtimedb, retval):
 	"""
 	Misc. things to run at the end of a merge session.
 
@@ -303,6 +304,14 @@ def post_emerge(root_config, myopts, mtimedb, retval):
 	Display preserved libs warnings
 	Exit Emerge
 
+	@param myaction: The action returned from parse_opts()
+	@type myaction: String
+	@param myopts: emerge options
+	@type myopts: dict
+	@param myfiles: emerge arguments
+	@type myfiles: list
+	@param target_root: The target ROOT for myaction
+	@type target_root: String
 	@param trees: A dictionary mapping each ROOT to it's package databases
 	@type trees: dict
 	@param mtimedb: The mtimeDB to store data needed across merge invocations
@@ -314,8 +323,7 @@ def post_emerge(root_config, myopts, mtimedb, retval):
 	1.  Calls sys.exit(retval)
 	"""
 
-	target_root = root_config.root
-	trees = { target_root : root_config.trees }
+	root_config = trees[target_root]["root_config"]
 	vardbapi = trees[target_root]["vartree"].dbapi
 	settings = vardbapi.settings
 	info_mtimes = mtimedb["info"]
@@ -349,7 +357,8 @@ def post_emerge(root_config, myopts, mtimedb, retval):
 	portage.util.ensure_dirs(vdb_path)
 	vdb_lock = None
 	if os.access(vdb_path, os.W_OK) and not "--pretend" in myopts:
-		vdb_lock = portage.locks.lockdir(vdb_path)
+		vardbapi.lock()
+		vdb_lock = True
 
 	if vdb_lock:
 		try:
@@ -359,7 +368,7 @@ def post_emerge(root_config, myopts, mtimedb, retval):
 			mtimedb.commit()
 		finally:
 			if vdb_lock:
-				portage.locks.unlockdir(vdb_lock)
+				vardbapi.unlock()
 
 	chk_updated_cfg_files(settings['EROOT'], config_protect)
 
@@ -370,7 +379,29 @@ def post_emerge(root_config, myopts, mtimedb, retval):
 	if retval in (None, os.EX_OK) or (not "--pretend" in myopts):
 		display_preserved_libs(vardbapi, myopts)	
 
+	postemerge = os.path.join(settings["PORTAGE_CONFIGROOT"],
+		portage.USER_CONFIG_PATH, "bin", "post_emerge")
+	if os.access(postemerge, os.X_OK):
+		hook_retval = portage.process.spawn(
+						[postemerge], env=settings.environ())
+		if hook_retval != os.EX_OK:
+			writemsg_level(
+				" %s spawn failed of %s\n" % (bad("*"), postemerge,),
+				level=logging.ERROR, noiselevel=-1)
+
+	if "--quiet" not in myopts and \
+		myaction is None and "@world" in myfiles:
+		show_depclean_suggestion()
+
 	sys.exit(retval)
+
+def show_depclean_suggestion():
+	out = portage.output.EOutput()
+	msg = "After world updates, it is important to remove " + \
+		"obsolete packages with emerge --depclean. Refer " + \
+		"to `man emerge` for more information."
+	for line in textwrap.wrap(msg, 72):
+		out.ewarn(line)
 
 def multiple_actions(action1, action2):
 	sys.stderr.write("\n!!! Multiple actions requested... Please choose one only.\n")
@@ -398,7 +429,9 @@ def insert_optional_args(args):
 	new_args = []
 
 	default_arg_opts = {
+		'--ask'                  : y_or_n,
 		'--autounmask'           : y_or_n,
+		'--autounmask-write'     : y_or_n,
 		'--buildpkg'             : y_or_n,
 		'--complete-graph'       : y_or_n,
 		'--deep'       : valid_integers,
@@ -410,6 +443,11 @@ def insert_optional_args(args):
 		'--jobs'       : valid_integers,
 		'--keep-going'           : y_or_n,
 		'--package-moves'        : y_or_n,
+		'--quiet'                : y_or_n,
+		'--quiet-build'          : y_or_n,
+		'--rebuild-if-new-rev'   : y_or_n,
+		'--rebuild-if-new-ver'   : y_or_n,
+		'--rebuild-if-unbuilt'   : y_or_n,
 		'--rebuilt-binaries'     : y_or_n,
 		'--root-deps'  : ('rdeps',),
 		'--select'               : y_or_n,
@@ -430,11 +468,13 @@ def insert_optional_args(args):
 	# Don't make things like "-kn" expand to "-k n"
 	# since existence of -n makes it too ambiguous.
 	short_arg_opts_n = {
+		'a' : y_or_n,
 		'b' : y_or_n,
 		'g' : y_or_n,
 		'G' : y_or_n,
 		'k' : y_or_n,
 		'K' : y_or_n,
+		'q' : y_or_n,
 	}
 
 	arg_stack = args[:]
@@ -514,6 +554,23 @@ def insert_optional_args(args):
 
 	return new_args
 
+def _find_bad_atoms(atoms):
+	bad_atoms = []
+	for x in ' '.join(atoms).split():
+		bad_atom = False
+		try:
+			atom = portage.dep.Atom(x, allow_wildcard=True)
+		except portage.exception.InvalidAtom:
+			try:
+				atom = portage.dep.Atom("*/"+x, allow_wildcard=True)
+			except portage.exception.InvalidAtom:
+				bad_atom = True
+
+		if bad_atom or atom.operator or atom.blocker or atom.use:
+			bad_atoms.append(x)
+	return bad_atoms
+
+
 def parse_opts(tmpcmdline, silent=False):
 	myaction=None
 	myopts = {}
@@ -533,8 +590,21 @@ def parse_opts(tmpcmdline, silent=False):
 	true_y = ("True", "y")
 	argument_options = {
 
+		"--ask": {
+			"shortopt" : "-a",
+			"help"    : "prompt before performing any actions",
+			"type"    : "choice",
+			"choices" : true_y_or_n
+		},
+
 		"--autounmask": {
 			"help"    : "automatically unmask packages",
+			"type"    : "choice",
+			"choices" : true_y_or_n
+		},
+
+		"--autounmask-write": {
+			"help"    : "write changes made by --autounmask to disk",
 			"type"    : "choice",
 			"choices" : true_y_or_n
 		},
@@ -632,6 +702,12 @@ def parse_opts(tmpcmdline, silent=False):
 			"action" : "store"
 		},
 
+		"--misspell-suggestions": {
+			"help"    : "enable package name misspell suggestions",
+			"type"    : "choice",
+			"choices" : ("y", "n")
+		},
+
 		"--with-bdeps": {
 			"help":"include unnecessary build time dependencies",
 			"type":"choice",
@@ -641,6 +717,14 @@ def parse_opts(tmpcmdline, silent=False):
 			"help":"specify conditions to trigger package reinstallation",
 			"type":"choice",
 			"choices":["changed-use"]
+		},
+
+		"--reinstall-atoms": {
+			"help"   :"A space separated list of package names or slot atoms. " + \
+				"Emerge will treat matching packages as if they are not " + \
+				"installed, and reinstall them if necessary. Implies --deep.",
+
+			"action" : "append",
 		},
 
 		"--binpkg-respect-use": {
@@ -664,8 +748,69 @@ def parse_opts(tmpcmdline, silent=False):
 			"choices"  : true_y_or_n
 		},
 
+		"--usepkg-exclude": {
+			"help"   :"A space separated list of package names or slot atoms. " + \
+				"Emerge will ignore matching binary packages. ",
+
+			"action" : "append",
+		},
+
+		"--rebuild-exclude": {
+			"help"   :"A space separated list of package names or slot atoms. " + \
+				"Emerge will not rebuild these packages due to the " + \
+				"--rebuild flag. ",
+
+			"action" : "append",
+		},
+
+		"--rebuild-ignore": {
+			"help"   :"A space separated list of package names or slot atoms. " + \
+				"Emerge will not rebuild packages that depend on matching " + \
+				"packages due to the --rebuild flag. ",
+
+			"action" : "append",
+		},
+
 		"--package-moves": {
 			"help"     : "perform package moves when necessary",
+			"type"     : "choice",
+			"choices"  : true_y_or_n
+		},
+
+		"--quiet": {
+			"shortopt" : "-q",
+			"help"     : "reduced or condensed output",
+			"type"     : "choice",
+			"choices"  : true_y_or_n
+		},
+
+		"--quiet-build": {
+			"help"     : "redirect build output to logs",
+			"type"     : "choice",
+			"choices"  : true_y_or_n
+		},
+
+		"--rebuild-if-new-rev": {
+			"help"     : "Rebuild packages when dependencies that are " + \
+				"used at both build-time and run-time are built, " + \
+				"if the dependency is not already installed with the " + \
+				"same version and revision.",
+			"type"     : "choice",
+			"choices"  : true_y_or_n
+		},
+
+		"--rebuild-if-new-ver": {
+			"help"     : "Rebuild packages when dependencies that are " + \
+				"used at both build-time and run-time are built, " + \
+				"if the dependency is not already installed with the " + \
+				"same version. Revision numbers are ignored.",
+			"type"     : "choice",
+			"choices"  : true_y_or_n
+		},
+
+		"--rebuild-if-unbuilt": {
+			"help"     : "Rebuild packages when dependencies that are " + \
+				"used at both build-time and run-time are built.",
 			"type"     : "choice",
 			"choices"  : true_y_or_n
 		},
@@ -712,6 +857,13 @@ def parse_opts(tmpcmdline, silent=False):
 			"help"     : "use unbuilt ebuild metadata for visibility checks on built packages",
 			"type"     : "choice",
 			"choices"  : true_y_or_n
+		},
+
+		"--useoldpkg-atoms": {
+			"help"   :"A space separated list of package names or slot atoms. " + \
+				"Emerge will prefer matching binary packages over newer unbuilt packages. ",
+
+			"action" : "append",
 		},
 
 		"--usepkg": {
@@ -767,8 +919,16 @@ def parse_opts(tmpcmdline, silent=False):
 
 	myoptions, myargs = parser.parse_args(args=tmpcmdline)
 
+	if myoptions.ask in true_y:
+		myoptions.ask = True
+	else:
+		myoptions.ask = None
+
 	if myoptions.autounmask in true_y:
 		myoptions.autounmask = True
+
+	if myoptions.autounmask_write in true_y:
+		myoptions.autounmask_write = True
 
 	if myoptions.buildpkg in true_y:
 		myoptions.buildpkg = True
@@ -797,28 +957,39 @@ def parse_opts(tmpcmdline, silent=False):
 			myoptions.depclean_lib_check = True
 
 	if myoptions.exclude:
-		exclude = []
-		bad_atoms = []
-		for x in ' '.join(myoptions.exclude).split():
-			bad_atom = False
-			try:
-				atom = portage.dep.Atom(x, allow_wildcard=True)
-			except portage.exception.InvalidAtom:
-				try:
-					atom = portage.dep.Atom("*/"+x, allow_wildcard=True)
-				except portage.exception.InvalidAtom:
-					bad_atom = True
-			
-			if bad_atom:
-				bad_atoms.append(x)
-			else:
-				if atom.operator or atom.blocker or atom.use:
-					bad_atoms.append(x)
-				else:
-					exclude.append(atom)
-
+		bad_atoms = _find_bad_atoms(myoptions.exclude)
 		if bad_atoms and not silent:
 			parser.error("Invalid Atom(s) in --exclude parameter: '%s' (only package names and slot atoms (with wildcards) allowed)\n" % \
+				(",".join(bad_atoms),))
+
+	if myoptions.reinstall_atoms:
+		bad_atoms = _find_bad_atoms(myoptions.reinstall_atoms)
+		if bad_atoms and not silent:
+			parser.error("Invalid Atom(s) in --reinstall-atoms parameter: '%s' (only package names and slot atoms (with wildcards) allowed)\n" % \
+				(",".join(bad_atoms),))
+
+	if myoptions.rebuild_exclude:
+		bad_atoms = _find_bad_atoms(myoptions.rebuild_exclude)
+		if bad_atoms and not silent:
+			parser.error("Invalid Atom(s) in --rebuild-exclude parameter: '%s' (only package names and slot atoms (with wildcards) allowed)\n" % \
+				(",".join(bad_atoms),))
+
+	if myoptions.rebuild_ignore:
+		bad_atoms = _find_bad_atoms(myoptions.rebuild_ignore)
+		if bad_atoms and not silent:
+			parser.error("Invalid Atom(s) in --rebuild-ignore parameter: '%s' (only package names and slot atoms (with wildcards) allowed)\n" % \
+				(",".join(bad_atoms),))
+
+	if myoptions.usepkg_exclude:
+		bad_atoms = _find_bad_atoms(myoptions.usepkg_exclude)
+		if bad_atoms and not silent:
+			parser.error("Invalid Atom(s) in --usepkg-exclude parameter: '%s' (only package names and slot atoms (with wildcards) allowed)\n" % \
+				(",".join(bad_atoms),))
+
+	if myoptions.useoldpkg_atoms:
+		bad_atoms = _find_bad_atoms(myoptions.useoldpkg_atoms)
+		if bad_atoms and not silent:
+			parser.error("Invalid Atom(s) in --useoldpkg-atoms parameter: '%s' (only package names and slot atoms (with wildcards) allowed)\n" % \
 				(",".join(bad_atoms),))
 
 	if myoptions.fail_clean in true_y:
@@ -841,6 +1012,34 @@ def parse_opts(tmpcmdline, silent=False):
 
 	if myoptions.package_moves in true_y:
 		myoptions.package_moves = True
+
+	if myoptions.quiet in true_y:
+		myoptions.quiet = True
+	else:
+		myoptions.quiet = None
+
+	if myoptions.quiet_build in true_y:
+		myoptions.quiet_build = True
+	else:
+		myoptions.quiet_build = None
+
+	if myoptions.rebuild_if_new_ver in true_y:
+		myoptions.rebuild_if_new_ver = True
+	else:
+		myoptions.rebuild_if_new_ver = None
+
+	if myoptions.rebuild_if_new_rev in true_y:
+		myoptions.rebuild_if_new_rev = True
+		myoptions.rebuild_if_new_ver = None
+	else:
+		myoptions.rebuild_if_new_rev = None
+
+	if myoptions.rebuild_if_unbuilt in true_y:
+		myoptions.rebuild_if_unbuilt = True
+		myoptions.rebuild_if_new_rev = None
+		myoptions.rebuild_if_new_ver = None
+	else:
+		myoptions.rebuild_if_unbuilt = None
 
 	if myoptions.rebuilt_binaries in true_y:
 		myoptions.rebuilt_binaries = True
@@ -1154,7 +1353,7 @@ def expand_set_arguments(myfiles, myaction, root_config):
 
 	sets = setconfig.getSets()
 
-	# display errors that occured while loading the SetConfig instance
+	# display errors that occurred while loading the SetConfig instance
 	for e in setconfig.errors:
 		print(colorize("BAD", "Error during set creation: %s" % e))
 
@@ -1287,11 +1486,16 @@ def check_procfs():
 		level=logging.ERROR, noiselevel=-1)
 	return 1
 
-def emerge_main():
-	global portage	# NFC why this is necessary now - genone
+def emerge_main(args=None):
+	"""
+	@param args: command arguments (default: sys.argv[1:])
+	@type args: list
+	"""
+	if args is None:
+		args = sys.argv[1:]
+
 	#disabled by drobbins:
 	#portage._disable_legacy_globals()
-	portage._disable_legacy_globals()
 	portage.dep._internal_warnings = True
 	# Disable color until we're sure that it should be enabled (after
 	# EMERGE_DEFAULT_OPTS has been parsed).
@@ -1300,7 +1504,7 @@ def emerge_main():
 	# possible, such as --config-root.  They will be parsed again later,
 	# together with EMERGE_DEFAULT_OPTS (which may vary depending on the
 	# the value of --config-root).
-	myaction, myopts, myfiles = parse_opts(sys.argv[1:], silent=True)
+	myaction, myopts, myfiles = parse_opts(args, silent=True)
 	if "--debug" in myopts:
 		os.environ["PORTAGE_DEBUG"] = "1"
 	if "--config-root" in myopts:
@@ -1321,7 +1525,7 @@ def emerge_main():
 	tmpcmdline = []
 	if "--ignore-default-opts" not in myopts:
 		tmpcmdline.extend(settings["EMERGE_DEFAULT_OPTS"].split())
-	tmpcmdline.extend(sys.argv[1:])
+	tmpcmdline.extend(args)
 	myaction, myopts, myfiles = parse_opts(tmpcmdline)
 
 	if myaction not in ('help', 'info', 'version') and \
@@ -1485,11 +1689,10 @@ def emerge_main():
 
 	if settings.get("PORTAGE_DEBUG", "") == "1":
 		spinner.update = spinner.update_quiet
-		portage.debug=1
 		portage.util.noiselimit = 0
 		if "python-trace" in settings.features:
-			import portage.debug
-			portage.debug.set_trace(True)
+			import portage.debug as portage_debug
+			portage_debug.set_trace(True)
 
 	if not ("--quiet" in myopts):
 		if '--nospinner' in myopts or \
@@ -1528,12 +1731,15 @@ def emerge_main():
 				# access is required but the user is not in the portage group.
 				from portage.data import portage_group_warning
 				if "--ask" in myopts:
-					myopts["--pretend"] = True
-					del myopts["--ask"]
-					print(("%s access is required... " + \
-						"adding --pretend to options\n") % access_desc)
+					writemsg_stdout("This action requires %s access...\n" % \
+						(access_desc,), noiselevel=-1)
 					if portage.secpass < 1 and not need_superuser:
 						portage_group_warning()
+					if userquery("Would you like to add --pretend to options?",
+						"--ask-enter-invalid" in myopts) == "No":
+						return 1
+					myopts["--pretend"] = True
+					del myopts["--ask"]
 				else:
 					sys.stderr.write(("emerge: %s access is required\n") \
 						% access_desc)
@@ -1541,6 +1747,9 @@ def emerge_main():
 						portage_group_warning()
 					return 1
 
+	# Disable emergelog for everything except build or unmerge operations.
+	# This helps minimize parallel emerge.log entries that can confuse log
+	# parsers like genlop.
 	disable_emergelog = False
 	for x in ("--pretend", "--fetchonly", "--fetch-all-uri"):
 		if x in myopts:
@@ -1548,14 +1757,10 @@ def emerge_main():
 			break
 	if myaction in ("search", "info"):
 		disable_emergelog = True
-	if disable_emergelog:
-		""" Disable emergelog for everything except build or unmerge
-		operations.  This helps minimize parallel emerge.log entries that can
-		confuse log parsers.  We especially want it disabled during
-		parallel-fetch, which uses --resume --fetchonly."""
-		_emerge.emergelog._disable = True
 
-	else:
+	_emerge.emergelog._disable = disable_emergelog
+
+	if not disable_emergelog:
 		if 'EMERGE_LOG_DIR' in settings:
 			try:
 				# At least the parent needs to exist for the lock file.
@@ -1566,8 +1771,7 @@ def emerge_main():
 					(settings['EMERGE_LOG_DIR'], e),
 					noiselevel=-1, level=logging.ERROR)
 			else:
-				global _emerge_log_dir
-				_emerge_log_dir = settings['EMERGE_LOG_DIR']
+				_emerge.emergelog._emerge_log_dir = settings["EMERGE_LOG_DIR"]
 
 	if not "--pretend" in myopts:
 		emergelog(xterm_titles, "Started emerge on: "+\
@@ -1630,7 +1834,8 @@ def emerge_main():
 		rval = action_uninstall(settings, trees, mtimedb["ldpath"],
 			myopts, myaction, myfiles, spinner)
 		if not (myaction == 'deselect' or buildpkgonly or fetchonly or pretend):
-			post_emerge(root_config, myopts, mtimedb, rval)
+			post_emerge(myaction, myopts, myfiles, settings["ROOT"],
+				trees, mtimedb, rval)
 		return rval
 
 	elif myaction == 'info':
@@ -1701,7 +1906,7 @@ def emerge_main():
 			display_news_notification(root_config, myopts)
 		retval = action_build(settings, trees, mtimedb,
 			myopts, myaction, myfiles, spinner)
-		root_config = trees[settings["ROOT"]]["root_config"]
-		post_emerge(root_config, myopts, mtimedb, retval)
+		post_emerge(myaction, myopts, myfiles, settings["ROOT"],
+			trees, mtimedb, retval)
 
 		return retval

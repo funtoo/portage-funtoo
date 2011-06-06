@@ -57,8 +57,8 @@ class BinpkgFetcher(SpawnProcess):
 			rel_uri = bintree._remotepkgs[pkg.cpv].get("PATH")
 			if not rel_uri:
 				rel_uri = pkg.cpv + ".tbz2"
-			uri = bintree._remote_base_uri.rstrip("/") + \
-				"/" + rel_uri.lstrip("/")
+			remote_base_uri = bintree._remotepkgs[pkg.cpv]["BASE_URI"]
+			uri = remote_base_uri.rstrip("/") + "/" + rel_uri.lstrip("/")
 		else:
 			uri = settings["PORTAGE_BINHOST"].rstrip("/") + \
 				"/" + pkg.pf + ".tbz2"
@@ -158,7 +158,12 @@ class BinpkgFetcher(SpawnProcess):
 		async_lock = AsynchronousLock(path=self.pkg_path,
 			scheduler=self.scheduler)
 		async_lock.start()
-		async_lock.wait()
+
+		if async_lock.wait() != os.EX_OK:
+			# TODO: Use CompositeTask for better handling, like in EbuildPhase.
+			raise AssertionError("AsynchronousLock failed with returncode %s" \
+				% (async_lock.returncode,))
+
 		self._lock_obj = async_lock
 		self.locked = True
 

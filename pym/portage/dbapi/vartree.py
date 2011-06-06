@@ -13,8 +13,9 @@ portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.dbapi._MergeProcess:MergeProcess',
 	'portage.dep:dep_getkey,isjustname,match_from_list,' + \
 	 	'use_reduce,_slot_re',
-	'portage.elog:elog_process,_preload_elog_modules',
-	'portage.locks:lockdir,unlockdir',
+	'portage.elog:collect_ebuild_messages,collect_messages,' + \
+		'elog_process,_merge_logentries',
+	'portage.locks:lockdir,unlockdir,lockfile,unlockfile',
 	'portage.output:bold,colorize',
 	'portage.package.ebuild.doebuild:doebuild_environment,' + \
 		'_spawn_phase',
@@ -38,7 +39,7 @@ from portage.const import _ENABLE_DYN_LINK_MAP, _ENABLE_PRESERVE_LIBS
 from portage.dbapi import dbapi
 from portage.dep import _slot_separator
 from portage.exception import CommandNotFound, \
-	InvalidData, InvalidPackageName, \
+	InvalidData, InvalidLocation, InvalidPackageName, \
 	FileNotFound, PermissionDenied, UnsupportedAPIException
 from portage.localization import _
 from portage.util.movefile import movefile
@@ -55,6 +56,8 @@ from portage import _unicode_encode
 
 from _emerge.AsynchronousLock import AsynchronousLock
 from _emerge.EbuildBuildDir import EbuildBuildDir
+from _emerge.EbuildPhase import EbuildPhase
+from _emerge.emergelog import emergelog
 from _emerge.PollScheduler import PollScheduler
 from _emerge.MiscFunctionsProcess import MiscFunctionsProcess
 
@@ -106,6 +109,11 @@ class vardbapi(dbapi):
 		# have been added or removed.
 		self._pkgs_changed = False
 
+		# The _aux_cache_threshold doesn't work as designed
+		# if the cache is flushed from a subprocess, so we
+		# use this to avoid waste vdb cache updates.
+		self._flush_cache_enabled = True
+
 		#cache for category directory mtimes
 		self.mtdircache = {}
 
@@ -129,6 +137,14 @@ class vardbapi(dbapi):
 				DeprecationWarning, stacklevel=2)
 
 		self._eroot = settings['EROOT']
+		self._dbroot = self._eroot + VDB_PATH
+		self._lock = None
+		self._lock_count = 0
+
+		self._conf_mem_file = self._eroot + CONFIG_MEMORY_FILE
+		self._fs_lock_obj = None
+		self._fs_lock_count = 0
+
 		if vartree is None:
 			vartree = portage.db[self.root]["vartree"]
 		self.vartree = vartree
@@ -146,18 +162,16 @@ class vardbapi(dbapi):
 
 		self._plib_registry = None
 		if _ENABLE_PRESERVE_LIBS:
-			try:
-				self._plib_registry = PreservedLibsRegistry(self.root,
-					os.path.join(self._eroot, PRIVATE_PATH,
-					"preserved_libs_registry"))
-			except PermissionDenied:
-				# apparently this user isn't allowed to access PRIVATE_PATH
-				pass
+			self._plib_registry = PreservedLibsRegistry(self.root,
+				os.path.join(self._eroot, PRIVATE_PATH,
+				"preserved_libs_registry"))
 
 		self._linkmap = None
 		if _ENABLE_DYN_LINK_MAP:
 			self._linkmap = LinkageMap(self)
 		self._owners = self._owners_db(self)
+
+		self._cached_counter = None
 
 	def getpath(self, mykey, filename=None):
 		# This is an optimized hotspot, so don't use unicode-wrapped
@@ -168,6 +182,64 @@ class vardbapi(dbapi):
 			# rValue += _os.sep + filename
 			rValue = _os.path.join(rValue, filename)
 		return rValue
+
+	def lock(self):
+		"""
+		Acquire a reentrant lock, blocking, for cooperation with concurrent
+		processes. State is inherited by subprocesses, allowing subprocesses
+		to reenter a lock that was acquired by a parent process. However,
+		a lock can be released only by the same process that acquired it.
+		"""
+		if self._lock_count:
+			self._lock_count += 1
+		else:
+			if self._lock is not None:
+				raise AssertionError("already locked")
+			# At least the parent needs to exist for the lock file.
+			ensure_dirs(self._dbroot)
+			self._lock = lockdir(self._dbroot)
+			self._lock_count += 1
+
+	def unlock(self):
+		"""
+		Release a lock, decrementing the recursion level. Each unlock() call
+		must be matched with a prior lock() call, or else an AssertionError
+		will be raised if unlock() is called while not locked.
+		"""
+		if self._lock_count > 1:
+			self._lock_count -= 1
+		else:
+			if self._lock is None:
+				raise AssertionError("not locked")
+			self._lock_count = 0
+			unlockdir(self._lock)
+			self._lock = None
+
+	def _fs_lock(self):
+		"""
+		Acquire a reentrant lock, blocking, for cooperation with concurrent
+		processes.
+		"""
+		if self._fs_lock_count < 1:
+			if self._fs_lock_obj is not None:
+				raise AssertionError("already locked")
+			try:
+				self._fs_lock_obj = lockfile(self._conf_mem_file)
+			except InvalidLocation:
+				self.settings._init_dirs()
+				self._fs_lock_obj = lockfile(self._conf_mem_file)
+		self._fs_lock_count += 1
+
+	def _fs_unlock(self):
+		"""
+		Release a lock, decrementing the recursion level.
+		"""
+		if self._fs_lock_count <= 1:
+			if self._fs_lock_obj is None:
+				raise AssertionError("not locked")
+			unlockfile(self._fs_lock_obj)
+			self._fs_lock_obj = None
+		self._fs_lock_count -= 1
 
 	def _bump_mtime(self, cpv):
 		"""
@@ -433,7 +505,8 @@ class vardbapi(dbapi):
 		superuser privileges (since that's required to obtain a lock), but all
 		users have read access and benefit from faster metadata lookups (as
 		long as at least part of the cache is still valid)."""
-		if self._aux_cache is not None and \
+		if self._flush_cache_enabled and \
+			self._aux_cache is not None and \
 			len(self._aux_cache["modified"]) >= self._aux_cache_threshold and \
 			secpass >= 2:
 			self._owners.populate() # index any unindexed contents
@@ -684,17 +757,6 @@ class vardbapi(dbapi):
 		@param myroot: ignored, self._eroot is used instead
 		"""
 		myroot = None
-		cp_list = self.cp_list
-		max_counter = 0
-		for cp in self.cp_all():
-			for cpv in cp_list(cp):
-				try:
-					counter = int(self.aux_get(cpv, ["COUNTER"])[0])
-				except (KeyError, OverflowError, ValueError):
-					continue
-				if counter > max_counter:
-					max_counter = counter
-
 		new_vdb = False
 		counter = -1
 		try:
@@ -722,16 +784,25 @@ class vardbapi(dbapi):
 				writemsg("!!! %s\n" % str(e), noiselevel=-1)
 				del e
 
-		# We must ensure that we return a counter
-		# value that is at least as large as the
-		# highest one from the installed packages,
-		# since having a corrupt value that is too low
-		# can trigger incorrect AUTOCLEAN behavior due
-		# to newly installed packages having lower
-		# COUNTERs than the previous version in the
-		# same slot.
-		if counter > max_counter:
+		if self._cached_counter == counter:
 			max_counter = counter
+		else:
+			# We must ensure that we return a counter
+			# value that is at least as large as the
+			# highest one from the installed packages,
+			# since having a corrupt value that is too low
+			# can trigger incorrect AUTOCLEAN behavior due
+			# to newly installed packages having lower
+			# COUNTERs than the previous version in the
+			# same slot.
+			max_counter = counter
+			for cpv in self.cpv_all():
+				try:
+					pkg_counter = int(self.aux_get(cpv, ["COUNTER"])[0])
+				except (KeyError, OverflowError, ValueError):
+					continue
+				if pkg_counter > max_counter:
+					max_counter = pkg_counter
 
 		if counter < 0 and not new_vdb:
 			writemsg(_("!!! Initializing COUNTER to " \
@@ -742,20 +813,40 @@ class vardbapi(dbapi):
 	def counter_tick_core(self, myroot=None, incrementing=1, mycpv=None):
 		"""
 		This method will grab the next COUNTER value and record it back
-		to the global file.  Returns new counter value.
+		to the global file. Note that every package install must have
+		a unique counter, since a slotmove update can move two packages
+		into the same SLOT and in that case it's important that both
+		packages have different COUNTER metadata.
 
 		@param myroot: ignored, self._eroot is used instead
+		@param mycpv: ignored
+		@rtype: int
+		@returns: new counter value
 		"""
 		myroot = None
-		counter = self.get_counter_tick_core(mycpv=mycpv) - 1
-		if incrementing:
-			#increment counter
-			counter += 1
-			# use same permissions as config._init_dirs()
-			ensure_dirs(os.path.dirname(self._counter_path),
-				gid=portage_gid, mode=0o2750, mask=0o2)
-			# update new global counter file
-			write_atomic(self._counter_path, str(counter))
+		mycpv = None
+		self.lock()
+		try:
+			counter = self.get_counter_tick_core() - 1
+			if incrementing:
+				#increment counter
+				counter += 1
+				# update new global counter file
+				try:
+					write_atomic(self._counter_path, str(counter))
+				except InvalidLocation:
+					self.settings._init_dirs()
+					write_atomic(self._counter_path, str(counter))
+			self._cached_counter = counter
+
+			# Since we hold a lock, this is a good opportunity
+			# to flush the cache. Note that this will only
+			# flush the cache periodically in the main process
+			# when _aux_cache_threshold is exceeded.
+			self.flush_cache()
+		finally:
+			self.unlock()
+
 		return counter
 
 	def _dblink(self, cpv):
@@ -817,14 +908,16 @@ class vardbapi(dbapi):
 			self._vardb = vardb
 
 		def add(self, cpv):
-			root_len = len(self._vardb._eroot)
+			eroot_len = len(self._vardb._eroot)
 			contents = self._vardb._dblink(cpv).getcontents()
 			pkg_hash = self._hash_pkg(cpv)
 			if not contents:
 				# Empty path is a code used to represent empty contents.
 				self._add_path("", pkg_hash)
+
 			for x in contents:
-				self._add_path(x[root_len:], pkg_hash)
+				self._add_path(x[eroot_len:], pkg_hash)
+
 			self._vardb._aux_cache["modified"].add(cpv)
 
 		def _add_path(self, path, pkg_hash):
@@ -874,7 +967,7 @@ class vardbapi(dbapi):
 		def populate(self):
 			self._populate()
 
-		def _populate(self, scheduler=None):
+		def _populate(self):
 			owners_cache = vardbapi._owners_cache(self._vardb)
 			cached_hashes = set()
 			base_names = self._vardb._aux_cache["owners"]["base_names"]
@@ -898,10 +991,6 @@ class vardbapi(dbapi):
 
 			# Cache any missing packages.
 			for cpv in uncached_pkgs:
-
-				if scheduler is not None:
-					scheduler.scheduleYield()
-
 				owners_cache.add(cpv)
 
 			# Delete any stale cache.
@@ -915,12 +1004,12 @@ class vardbapi(dbapi):
 
 			return owners_cache
 
-		def get_owners(self, path_iter, scheduler=None):
+		def get_owners(self, path_iter):
 			"""
 			@return the owners as a dblink -> set(files) mapping.
 			"""
 			owners = {}
-			for owner, f in self.iter_owners(path_iter, scheduler=scheduler):
+			for owner, f in self.iter_owners(path_iter):
 				owned_files = owners.get(owner)
 				if owned_files is None:
 					owned_files = set()
@@ -940,7 +1029,7 @@ class vardbapi(dbapi):
 					owner_set.add(pkg_dblink)
 			return file_owners
 
-		def iter_owners(self, path_iter, scheduler=None):
+		def iter_owners(self, path_iter):
 			"""
 			Iterate over tuples of (dblink, path). In order to avoid
 			consuming too many resources for too much time, resources
@@ -952,15 +1041,7 @@ class vardbapi(dbapi):
 
 			if not isinstance(path_iter, list):
 				path_iter = list(path_iter)
-
-			if len(path_iter) > 10:
-				for x in self._iter_owners_low_mem(path_iter,
-					scheduler=scheduler):
-					yield x
-				return
-
-			owners_cache = self._populate(scheduler=scheduler)
-
+			owners_cache = self._populate()
 			vardb = self._vardb
 			root = vardb._eroot
 			hash_pkg = owners_cache._hash_pkg
@@ -1019,23 +1100,19 @@ class vardbapi(dbapi):
 								if dblink(cpv).isowner(path):
 									owners.append((cpv, path))
 
-							if scheduler is not None:
-								scheduler.scheduleYield()
-
 					except StopIteration:
 						path_iter.append(path)
 						del owners[:]
 						dblink_cache.clear()
 						gc.collect()
-						for x in self._iter_owners_low_mem(path_iter,
-							scheduler=scheduler):
+						for x in self._iter_owners_low_mem(path_iter):
 							yield x
 						return
 					else:
 						for cpv, p in owners:
 							yield (dblink(cpv), p)
 
-		def _iter_owners_low_mem(self, path_list, scheduler=None):
+		def _iter_owners_low_mem(self, path_list):
 			"""
 			This implemention will make a short-lived dblink instance (and
 			parse CONTENTS) for every single installed package. This is
@@ -1057,10 +1134,6 @@ class vardbapi(dbapi):
 
 			root = self._vardb._eroot
 			for cpv in self._vardb.cpv_all():
-
-				if scheduler is not None:
-					scheduler.scheduleYield()
-
 				dblnk =  self._vardb._dblink(cpv)
 
 				for path, name, is_basename in path_info_list:
@@ -1201,12 +1274,8 @@ class dblink(object):
 		r')$'
 	)
 
-	# When looping over files for merge/unmerge, temporarily yield to the
-	# scheduler each time this many files are processed.
-	_file_merge_yield_interval = 20
-
 	def __init__(self, cat, pkg, myroot=None, settings=None, treetype=None,
-		vartree=None, blockers=None, scheduler=None):
+		vartree=None, blockers=None, scheduler=None, pipe=None):
 		"""
 		Creates a DBlink object for a given CPV.
 		The given CPV may not be present in the database already.
@@ -1250,9 +1319,6 @@ class dblink(object):
 		self.dbpkgdir = self.dbcatdir+"/"+pkg
 		self.dbtmpdir = self.dbcatdir+"/-MERGING-"+pkg
 		self.dbdir = self.dbpkgdir
-
-		self._lock_vdb = None
-
 		self.settings = mysettings
 		self._verbose = self.settings.get("PORTAGE_VERBOSE") == "1"
 
@@ -1265,6 +1331,7 @@ class dblink(object):
 		self._md5_merge_map = {}
 		self._hash_key = (self.myroot, self.mycpv)
 		self._protect_obj = None
+		self._pipe = pipe
 
 	def __hash__(self):
 		return hash(self._hash_key)
@@ -1291,26 +1358,10 @@ class dblink(object):
 		self._get_protect_obj().updateprotect()
 
 	def lockdb(self):
-		if self._lock_vdb:
-			raise AssertionError("Lock already held.")
-		# At least the parent needs to exist for the lock file.
-		ensure_dirs(self.dbroot)
-		if self._scheduler is None:
-			self._lock_vdb = lockdir(self.dbroot)
-		else:
-			async_lock = AsynchronousLock(path=self.dbroot,
-				scheduler=self._scheduler)
-			async_lock.start()
-			async_lock.wait()
-			self._lock_vdb = async_lock
+		self.vartree.dbapi.lock()
 
 	def unlockdb(self):
-		if self._lock_vdb is not None:
-			if isinstance(self._lock_vdb, AsynchronousLock):
-				self._lock_vdb.unlock()
-			else:
-				unlockdir(self._lock_vdb)
-			self._lock_vdb = None
+		self.vartree.dbapi.unlock()
 
 	def getpath(self):
 		"return path to location of db information (for >>> informational display)"
@@ -1345,8 +1396,12 @@ class dblink(object):
 		"""
 		For a given db entry (self), erase the CONTENTS values.
 		"""
-		if os.path.exists(self.dbdir+"/CONTENTS"):
-			os.unlink(self.dbdir+"/CONTENTS")
+		self.lockdb()
+		try:
+			if os.path.exists(self.dbdir+"/CONTENTS"):
+				os.unlink(self.dbdir+"/CONTENTS")
+		finally:
+			self.unlockdb()
 
 	def _clear_contents_cache(self):
 		self.contentscache = None
@@ -1387,6 +1442,9 @@ class dblink(object):
 		myroot = self.settings['ROOT']
 		if myroot == os.path.sep:
 			myroot = None
+		# used to generate parent dir entries
+		dir_entry = (_unicode_decode("dir"),)
+		eroot_split_len = len(self.settings["EROOT"].split(os.sep)) - 1
 		pos = 0
 		errors = []
 		for pos, line in enumerate(mylines):
@@ -1431,6 +1489,19 @@ class dblink(object):
 			if myroot is not None:
 				path = os.path.join(myroot, path.lstrip(os.path.sep))
 
+			# Implicitly add parent directories, since we can't necessarily
+			# assume that they are explicitly listed in CONTENTS, and it's
+			# useful for callers if they can rely on parent directory entries
+			# being generated here (crucial for things like dblink.isowner()).
+			path_split = path.split(os.sep)
+			path_split.pop()
+			while len(path_split) > eroot_split_len:
+				parent = os.sep.join(path_split)
+				if parent in pkgfiles:
+					break
+				pkgfiles[parent] = dir_entry
+				path_split.pop()
+
 			pkgfiles[path] = data
 
 		if errors:
@@ -1440,8 +1511,78 @@ class dblink(object):
 		self.contentscache = pkgfiles
 		return pkgfiles
 
+	def _prune_plib_registry(self, unmerge=False,
+		needed=None, preserve_paths=None):
+		# remove preserved libraries that don't have any consumers left
+		if not (self._linkmap_broken or
+			self.vartree.dbapi._linkmap is None or
+			self.vartree.dbapi._plib_registry is None):
+			self.vartree.dbapi._fs_lock()
+			plib_registry = self.vartree.dbapi._plib_registry
+			plib_registry.lock()
+			try:
+				plib_registry.load()
+
+				unmerge_with_replacement = \
+					unmerge and preserve_paths is not None
+				if unmerge_with_replacement:
+					# If self.mycpv is about to be unmerged and we
+					# have a replacement package, we want to exclude
+					# the irrelevant NEEDED data that belongs to
+					# files which are being unmerged now.
+					exclude_pkgs = (self.mycpv,)
+				else:
+					exclude_pkgs = None
+
+				self._linkmap_rebuild(exclude_pkgs=exclude_pkgs,
+					include_file=needed, preserve_paths=preserve_paths)
+
+				if unmerge:
+					unmerge_preserve = None
+					if not unmerge_with_replacement:
+						unmerge_preserve = \
+							self._find_libs_to_preserve(unmerge=True)
+					counter = self.vartree.dbapi.cpv_counter(self.mycpv)
+					plib_registry.unregister(self.mycpv,
+						self.settings["SLOT"], counter)
+					if unmerge_preserve:
+						for path in sorted(unmerge_preserve):
+							contents_key = self._match_contents(path)
+							if not contents_key:
+								continue
+							obj_type = self.getcontents()[contents_key][0]
+							self._display_merge(_(">>> needed   %s %s\n") % \
+								(obj_type, contents_key), noiselevel=-1)
+						plib_registry.register(self.mycpv,
+							self.settings["SLOT"], counter, unmerge_preserve)
+						# Remove the preserved files from our contents
+						# so that they won't be unmerged.
+						self.vartree.dbapi.removeFromContents(self,
+							unmerge_preserve)
+
+				unmerge_no_replacement = \
+					unmerge and not unmerge_with_replacement
+				cpv_lib_map = self._find_unused_preserved_libs(
+					unmerge_no_replacement)
+				if cpv_lib_map:
+					self._remove_preserved_libs(cpv_lib_map)
+					self.vartree.dbapi.lock()
+					try:
+						for cpv, removed in cpv_lib_map.items():
+							if not self.vartree.dbapi.cpv_exists(cpv):
+								continue
+							self.vartree.dbapi.removeFromContents(cpv, removed)
+					finally:
+						self.vartree.dbapi.unlock()
+
+				plib_registry.store()
+			finally:
+				plib_registry.unlock()
+				self.vartree.dbapi._fs_unlock()
+
 	def unmerge(self, pkgfiles=None, trimworld=None, cleanup=True,
-		ldpath_mtimes=None, others_in_slot=None):
+		ldpath_mtimes=None, others_in_slot=None, needed=None,
+		preserve_paths=None):
 		"""
 		Calls prerm
 		Unmerges a given package (CPV)
@@ -1459,14 +1600,17 @@ class dblink(object):
 		@type ldpath_mtimes: Dictionary
 		@param others_in_slot: all dblink instances in this slot, excluding self
 		@type others_in_slot: list
+		@param needed: Filename containing libraries needed after unmerge.
+		@type needed: String
+		@param preserve_paths: Libraries preserved by a package instance that
+			is currently being merged. They need to be explicitly passed to the
+			LinkageMap, since they are not registered in the
+			PreservedLibsRegistry yet.
+		@type preserve_paths: set
 		@rtype: Integer
 		@returns:
 		1. os.EX_OK if everything went well.
 		2. return code of the failed phase (for prerm, postrm, cleanrm)
-		
-		Notes:
-		The caller must ensure that lockdb() and unlockdb() are called
-		before and after this method.
 		"""
 
 		if trimworld is not None:
@@ -1474,6 +1618,23 @@ class dblink(object):
 				"portage.dbapi.vartree.dblink.unmerge()" + \
 				" method is now unused.",
 				DeprecationWarning, stacklevel=2)
+
+		background = False
+		log_path = self.settings.get("PORTAGE_LOG_FILE")
+		if self._scheduler is None:
+			# We create a scheduler instance and use it to
+			# log unmerge output separately from merge output.
+			self._scheduler = PollScheduler().sched_iface
+		if self.settings.get("PORTAGE_BACKGROUND") == "subprocess":
+			if self.settings.get("PORTAGE_BACKGROUND_UNMERGE") == "1":
+				self.settings["PORTAGE_BACKGROUND"] = "1"
+				self.settings.backup_changes("PORTAGE_BACKGROUND")
+				background = True
+			elif self.settings.get("PORTAGE_BACKGROUND_UNMERGE") == "0":
+				self.settings["PORTAGE_BACKGROUND"] = "0"
+				self.settings.backup_changes("PORTAGE_BACKGROUND")
+		elif self.settings.get("PORTAGE_BACKGROUND") == "1":
+			background = True
 
 		self.vartree.dbapi._bump_mtime(self.mycpv)
 		showMessage = self._display_merge
@@ -1492,7 +1653,7 @@ class dblink(object):
 					continue
 				others_in_slot.append(dblink(self.cat, catsplit(cur_cpv)[1],
 					settings=self.settings, vartree=self.vartree,
-					treetype="vartree"))
+					treetype="vartree", pipe=self._pipe))
 
 			retval = self._security_check([self] + others_in_slot)
 			if retval:
@@ -1501,13 +1662,12 @@ class dblink(object):
 		contents = self.getcontents()
 		# Now, don't assume that the name of the ebuild is the same as the
 		# name of the dir; the package may have been moved.
-		myebuildpath = None
+		myebuildpath = os.path.join(self.dbdir, self.pkg + ".ebuild")
+		failures = 0
 		ebuild_phase = "prerm"
-		log_path = None
 		mystuff = os.listdir(self.dbdir)
 		for x in mystuff:
 			if x.endswith(".ebuild"):
-				myebuildpath = os.path.join(self.dbdir, self.pkg + ".ebuild")
 				if x[:-7] != self.pkg:
 					# Clean up after vardbapi.move_ent() breakage in
 					# portage versions before 2.1.2
@@ -1515,104 +1675,84 @@ class dblink(object):
 					write_atomic(os.path.join(self.dbdir, "PF"), self.pkg+"\n")
 				break
 
-		self.settings.setcpv(self.mycpv, mydb=self.vartree.dbapi)
-		if myebuildpath:
-			try:
-				doebuild_environment(myebuildpath, "prerm",
-					settings=self.settings, db=self.vartree.dbapi)
-			except UnsupportedAPIException as e:
-				# Sometimes this happens due to corruption of the EAPI file.
-				writemsg(_("!!! FAILED prerm: %s\n") % \
-					os.path.join(self.dbdir, "EAPI"), noiselevel=-1)
-				writemsg("%s\n" % str(e), noiselevel=-1)
-				myebuildpath = None
+		if self.mycpv != self.settings.mycpv or \
+			"EAPI" not in self.settings.configdict["pkg"]:
+			# We avoid a redundant setcpv call here when
+			# the caller has already taken care of it.
+			self.settings.setcpv(self.mycpv, mydb=self.vartree.dbapi)
+
+		eapi_unsupported = False
+		try:
+			doebuild_environment(myebuildpath, "prerm",
+				settings=self.settings, db=self.vartree.dbapi)
+		except UnsupportedAPIException as e:
+			eapi_unsupported = e
+
+		self._prune_plib_registry(unmerge=True, needed=needed,
+			preserve_paths=preserve_paths)
 
 		builddir_lock = None
 		scheduler = self._scheduler
 		retval = os.EX_OK
-		failures = 0
 		try:
-			if myebuildpath:
+			# Only create builddir_lock if the caller
+			# has not already acquired the lock.
+			if "PORTAGE_BUILDIR_LOCKED" not in self.settings:
 				builddir_lock = EbuildBuildDir(
-					scheduler=(scheduler or PollScheduler().sched_iface),
+					scheduler=scheduler,
 					settings=self.settings)
 				builddir_lock.lock()
-
 				prepare_build_dirs(settings=self.settings, cleanup=True)
 				log_path = self.settings.get("PORTAGE_LOG_FILE")
 
-				if scheduler is None:
-					retval = _spawn_phase('prerm', self.settings)
-				else:
-					retval = scheduler.dblinkEbuildPhase(
-						self, self.vartree.dbapi, myebuildpath, ebuild_phase)
+			# Log the error after PORTAGE_LOG_FILE is initialized
+			# by prepare_build_dirs above.
+			if eapi_unsupported:
+				# Sometimes this happens due to corruption of the EAPI file.
+				failures += 1
+				showMessage(_("!!! FAILED prerm: %s\n") % \
+					os.path.join(self.dbdir, "EAPI"),
+					level=logging.ERROR, noiselevel=-1)
+				showMessage(_unicode_decode("%s\n") % (eapi_unsupported,),
+					level=logging.ERROR, noiselevel=-1)
+			elif os.path.isfile(myebuildpath):
+				phase = EbuildPhase(background=background,
+					phase=ebuild_phase, scheduler=scheduler,
+					settings=self.settings)
+				phase.start()
+				retval = phase.wait()
 
 				# XXX: Decide how to handle failures here.
 				if retval != os.EX_OK:
 					failures += 1
-					writemsg(_("!!! FAILED prerm: %s\n") % retval, noiselevel=-1)
+					showMessage(_("!!! FAILED prerm: %s\n") % retval,
+						level=logging.ERROR, noiselevel=-1)
 
-			self._unmerge_pkgfiles(pkgfiles, others_in_slot)
+			self.vartree.dbapi._fs_lock()
+			try:
+				self._unmerge_pkgfiles(pkgfiles, others_in_slot)
+			finally:
+				self.vartree.dbapi._fs_unlock()
 			self._clear_contents_cache()
 
-			# Remove the registration of preserved libs for this pkg instance
-			plib_registry = self.vartree.dbapi._plib_registry
-			if plib_registry is None:
-				# preserve-libs is entirely disabled
-				pass
-			else:
-				plib_registry.unregister(self.mycpv, self.settings["SLOT"],
-					self.vartree.dbapi.cpv_counter(self.mycpv))
-
-			if myebuildpath:
+			if not eapi_unsupported and os.path.isfile(myebuildpath):
 				ebuild_phase = "postrm"
-				if scheduler is None:
-					retval = _spawn_phase(ebuild_phase, self.settings)
-				else:
-					retval = scheduler.dblinkEbuildPhase(
-						self, self.vartree.dbapi, myebuildpath, ebuild_phase)
+				phase = EbuildPhase(background=background,
+					phase=ebuild_phase, scheduler=scheduler,
+					settings=self.settings)
+				phase.start()
+				retval = phase.wait()
 
 				# XXX: Decide how to handle failures here.
 				if retval != os.EX_OK:
 					failures += 1
-					writemsg(_("!!! FAILED postrm: %s\n") % retval, noiselevel=-1)
-
-			# Skip this if another package in the same slot has just been
-			# merged on top of this package, since the other package has
-			# already called LinkageMap.rebuild() and passed it's NEEDED file
-			# in as an argument.
-			if not others_in_slot:
-				self._linkmap_rebuild(exclude_pkgs=(self.mycpv,))
-
-			# remove preserved libraries that don't have any consumers left
-			cpv_lib_map = self._find_unused_preserved_libs()
-			if cpv_lib_map:
-				self._remove_preserved_libs(cpv_lib_map)
-				for cpv, removed in cpv_lib_map.items():
-					if not self.vartree.dbapi.cpv_exists(cpv):
-						for dblnk in others_in_slot:
-							if dblnk.mycpv == cpv:
-								# This one just got merged so it doesn't
-								# register with cpv_exists() yet.
-								self.vartree.dbapi.removeFromContents(
-									dblnk, removed)
-								break
-						continue
-					self.vartree.dbapi.removeFromContents(cpv, removed)
-			else:
-				# Prune any preserved libs that may have
-				# been unmerged with this package.
-				if plib_registry is None:
-					# preserve-libs is entirely disabled
-					pass
-				else:
-					plib_registry.pruneNonExisting()
+					showMessage(_("!!! FAILED postrm: %s\n") % retval,
+						level=logging.ERROR, noiselevel=-1)
 
 		finally:
 			self.vartree.dbapi._bump_mtime(self.mycpv)
-			if builddir_lock:
-				try:
-					if myebuildpath:
+			try:
+					if not eapi_unsupported and os.path.isfile(myebuildpath):
 						if retval != os.EX_OK:
 							msg_lines = []
 							msg = _("The '%(ebuild_phase)s' "
@@ -1651,25 +1791,20 @@ class dblink(object):
 
 							self._eerror(ebuild_phase, msg_lines)
 
-						# process logs created during pre/postrm
-						elog_process(self.mycpv, self.settings,
-							phasefilter=('prerm', 'postrm'))
+					self._elog_process(phasefilter=("prerm", "postrm"))
 
 					if retval == os.EX_OK:
-						# myebuildpath might be None, so ensure
-						# it has a sane value for the clean phase,
-						# even though it won't really be sourced.
-						myebuildpath = os.path.join(self.dbdir,
-							self.pkg + ".ebuild")
-						doebuild_environment(myebuildpath, "cleanrm",
-							settings=self.settings, db=self.vartree.dbapi)
-						if scheduler is None:
-							_spawn_phase("cleanrm", self.settings)
-						else:
-							scheduler.dblinkEbuildPhase(
-								self, self.vartree.dbapi,
-								myebuildpath, "cleanrm")
-				finally:
+						try:
+							doebuild_environment(myebuildpath, "cleanrm",
+								settings=self.settings, db=self.vartree.dbapi)
+						except UnsupportedAPIException:
+							pass
+						phase = EbuildPhase(background=background,
+							phase="cleanrm", scheduler=scheduler,
+							settings=self.settings)
+						phase.start()
+						retval = phase.wait()
+			finally:
 					if builddir_lock is not None:
 						builddir_lock.unlock()
 
@@ -1702,20 +1837,37 @@ class dblink(object):
 		else:
 			self.settings.pop("PORTAGE_LOG_FILE", None)
 
-		env_update(target_root=self.settings['ROOT'],
-			prev_mtimes=ldpath_mtimes,
-			contents=contents, env=self.settings.environ(),
-			writemsg_level=self._display_merge)
+		# Lock the config memory file to prevent symlink creation
+		# in merge_contents from overlapping with env-update.
+		self.vartree.dbapi._fs_lock()
+		try:
+			env_update(target_root=self.settings['ROOT'],
+				prev_mtimes=ldpath_mtimes,
+				contents=contents, env=self.settings.environ(),
+				writemsg_level=self._display_merge)
+		finally:
+			self.vartree.dbapi._fs_unlock()
+
 		return os.EX_OK
 
 	def _display_merge(self, msg, level=0, noiselevel=0):
 		if not self._verbose and noiselevel >= 0 and level < logging.WARN:
 			return
-		if self._scheduler is not None:
-			self._scheduler.dblinkDisplayMerge(self, msg,
-				level=level, noiselevel=noiselevel)
-			return
-		writemsg_level(msg, level=level, noiselevel=noiselevel)
+		if self._scheduler is None:
+			writemsg_level(msg, level=level, noiselevel=noiselevel)
+		else:
+			log_path = None
+			if self.settings.get("PORTAGE_BACKGROUND") != "subprocess":
+				log_path = self.settings.get("PORTAGE_LOG_FILE")
+			background = self.settings.get("PORTAGE_BACKGROUND") == "1"
+
+			if background and log_path is None:
+				if level >= logging.WARN:
+					writemsg_level(msg, level=level, noiselevel=noiselevel)
+			else:
+				self._scheduler.output(msg,
+					log_path=log_path, background=background,
+					level=level, noiselevel=noiselevel)
 
 	def _unmerge_pkgfiles(self, pkgfiles, others_in_slot):
 		"""
@@ -1733,7 +1885,6 @@ class dblink(object):
 		os = _os_merge
 		perf_md5 = perform_md5
 		showMessage = self._display_merge
-		scheduler = self._scheduler
 
 		if not pkgfiles:
 			showMessage(_("No package files given... Grabbing a set.\n"))
@@ -1749,13 +1900,12 @@ class dblink(object):
 					continue
 				others_in_slot.append(dblink(self.cat, catsplit(cur_cpv)[1],
 					settings=self.settings,
-					vartree=self.vartree, treetype="vartree"))
+					vartree=self.vartree, treetype="vartree", pipe=self._pipe))
 
 		dest_root = self._eroot
 		dest_root_len = len(dest_root) - 1
 
-		conf_mem_file = os.path.join(dest_root, CONFIG_MEMORY_FILE)
-		cfgfiledict = grabdict(conf_mem_file)
+		cfgfiledict = grabdict(self.vartree.dbapi._conf_mem_file)
 		stale_confmem = []
 
 		unmerge_orphans = "unmerge-orphans" in self.settings.features
@@ -1768,7 +1918,7 @@ class dblink(object):
 			mykeys.reverse()
 
 			#process symlinks second-to-last, directories last.
-			mydirs = []
+			mydirs = set()
 			ignored_unlink_errnos = (
 				errno.EBUSY, errno.ENOENT,
 				errno.ENOTDIR, errno.EISDIR)
@@ -1831,12 +1981,9 @@ class dblink(object):
 
 			real_root = self.settings['ROOT']
 			real_root_len = len(real_root) - 1
+			eroot_split_len = len(self.settings["EROOT"].split(os.sep)) - 1
 
 			for i, objkey in enumerate(mykeys):
-
-				if scheduler is not None and \
-					0 == i % self._file_merge_yield_interval:
-					scheduler.scheduleYield()
 
 				obj = normalize_path(objkey)
 				if os is _os_merge:
@@ -1924,7 +2071,7 @@ class dblink(object):
 					if lstatobj is None or not stat.S_ISDIR(lstatobj.st_mode):
 						show_unmerge("---", unmerge_desc["!dir"], file_type, obj)
 						continue
-					mydirs.append(obj)
+					mydirs.add(obj)
 				elif pkgfiles[objkey][0] == "sym":
 					if not islink:
 						show_unmerge("---", unmerge_desc["!sym"], file_type, obj)
@@ -1976,7 +2123,7 @@ class dblink(object):
 				elif pkgfiles[objkey][0] == "dev":
 					show_unmerge("---", "", file_type, obj)
 
-			mydirs.sort()
+			mydirs = sorted(mydirs)
 			mydirs.reverse()
 
 			for obj in mydirs:
@@ -2009,7 +2156,7 @@ class dblink(object):
 		if stale_confmem:
 			for filename in stale_confmem:
 				del cfgfiledict[filename]
-			writedict(cfgfiledict, conf_mem_file)
+			writedict(cfgfiledict, self.vartree.dbapi._conf_mem_file)
 
 		#remove self from vartree database so that our own virtual gets zapped if we're the last node
 		self.vartree.zap(self.mycpv)
@@ -2212,21 +2359,26 @@ class dblink(object):
 				"due to error: Command Not Found: %s\n") % (e,),
 				level=logging.ERROR, noiselevel=-1)
 
-	def _find_libs_to_preserve(self):
+	def _find_libs_to_preserve(self, unmerge=False):
 		"""
-		Get set of relative paths for libraries to be preserved. The file
-		paths are selected from self._installed_instance.getcontents().
+		Get set of relative paths for libraries to be preserved. When
+		unmerge is False, file paths to preserve are selected from
+		self._installed_instance. Otherwise, paths are selected from
+		self.
 		"""
 		if self._linkmap_broken or \
 			self.vartree.dbapi._linkmap is None or \
 			self.vartree.dbapi._plib_registry is None or \
-			self._installed_instance is None or \
+			(not unmerge and self._installed_instance is None) or \
 			"preserve-libs" not in self.settings.features:
-			return None
+			return set()
 
 		os = _os_merge
 		linkmap = self.vartree.dbapi._linkmap
-		installed_instance = self._installed_instance
+		if unmerge:
+			installed_instance = self
+		else:
+			installed_instance = self._installed_instance
 		old_contents = installed_instance.getcontents()
 		root = self.settings['ROOT']
 		root_len = len(root) - 1
@@ -2236,7 +2388,7 @@ class dblink(object):
 		def path_to_node(path):
 			node = path_node_map.get(path)
 			if node is None:
-				node = LinkageMap._LibGraphNode(path, root)
+				node = LinkageMap._LibGraphNode(linkmap._obj_key(path))
 				alt_path_node = lib_graph.get(node)
 				if alt_path_node is not None:
 					node = alt_path_node
@@ -2266,7 +2418,9 @@ class dblink(object):
 						os = portage.os
 
 			f = f_abs[root_len:]
-			if self.isowner(f):
+			if not unmerge and self.isowner(f):
+				# We have an indentically named replacement file,
+				# so we don't try to preserve the old copy.
 				continue
 			try:
 				consumers = linkmap.findConsumers(f)
@@ -2283,8 +2437,6 @@ class dblink(object):
 		# Note that consumers can also be providers.
 		for provider_node, consumers in consumer_map.items():
 			for c in consumers:
-				if self.isowner(c):
-					continue
 				consumer_node = path_to_node(c)
 				if installed_instance.isowner(c) and \
 					consumer_node not in provider_nodes:
@@ -2377,7 +2529,7 @@ class dblink(object):
 		outfile.close()
 		self._clear_contents_cache()
 
-	def _find_unused_preserved_libs(self):
+	def _find_unused_preserved_libs(self, unmerge_no_replacement):
 		"""
 		Find preserved libraries that don't have any consumers left.
 		"""
@@ -2391,6 +2543,7 @@ class dblink(object):
 		# Since preserved libraries can be consumers of other preserved
 		# libraries, use a graph to track consumer relationships.
 		plib_dict = self.vartree.dbapi._plib_registry.getPreservedLibs()
+		linkmap = self.vartree.dbapi._linkmap
 		lib_graph = digraph()
 		preserved_nodes = set()
 		preserved_paths = set()
@@ -2401,7 +2554,7 @@ class dblink(object):
 		def path_to_node(path):
 			node = path_node_map.get(path)
 			if node is None:
-				node = LinkageMap._LibGraphNode(path, root)
+				node = LinkageMap._LibGraphNode(linkmap._obj_key(path))
 				alt_path_node = lib_graph.get(node)
 				if alt_path_node is not None:
 					node = alt_path_node
@@ -2409,7 +2562,6 @@ class dblink(object):
 				path_node_map[path] = node
 			return node
 
-		linkmap = self.vartree.dbapi._linkmap
 		for cpv, plibs in plib_dict.items():
 			for f in plibs:
 				path_cpv_map[f] = cpv
@@ -2430,12 +2582,26 @@ class dblink(object):
 		# installed library that is not preserved. This eliminates
 		# libraries that are erroneously preserved due to a move from one
 		# directory to another.
+		# Also eliminate consumers that are going to be unmerged if
+		# unmerge_no_replacement is True.
 		provider_cache = {}
 		for preserved_node in preserved_nodes:
 			soname = linkmap.getSoname(preserved_node)
 			for consumer_node in lib_graph.parent_nodes(preserved_node):
 				if consumer_node in preserved_nodes:
 					continue
+				if unmerge_no_replacement:
+					will_be_unmerged = True
+					for path in consumer_node.alt_paths:
+						if not self.isowner(path):
+							will_be_unmerged = False
+							break
+					if will_be_unmerged:
+						# This consumer is not preserved and it is
+						# being unmerged, so drop this edge.
+						lib_graph.remove_edge(preserved_node, consumer_node)
+						continue
+
 				providers = provider_cache.get(consumer_node)
 				if providers is None:
 					providers = linkmap.findProviders(consumer_node)
@@ -2457,7 +2623,7 @@ class dblink(object):
 					break
 
 		cpv_lib_map = {}
-		while not lib_graph.empty():
+		while lib_graph:
 			root_nodes = preserved_nodes.intersection(lib_graph.root_nodes())
 			if not root_nodes:
 				break
@@ -2558,7 +2724,6 @@ class dblink(object):
 			plib_collisions = {}
 
 			showMessage = self._display_merge
-			scheduler = self._scheduler
 			stopmerge = False
 			collisions = []
 			destroot = self.settings['ROOT']
@@ -2567,10 +2732,6 @@ class dblink(object):
 			for i, f in enumerate(mycontents):
 				if i % 1000 == 0 and i != 0:
 					showMessage(_("%d files checked ...\n") % i)
-
-				if scheduler is not None and \
-					0 == i % self._file_merge_yield_interval:
-					scheduler.scheduleYield()
 
 				dest_path = normalize_path(
 					os.path.join(destroot, f.lstrip(os.path.sep)))
@@ -2680,7 +2841,6 @@ class dblink(object):
 		os = _os_merge
 
 		showMessage = self._display_merge
-		scheduler = self._scheduler
 
 		file_paths = set()
 		for dblnk in installed_instances:
@@ -2688,10 +2848,6 @@ class dblink(object):
 		inode_map = {}
 		real_paths = set()
 		for i, path in enumerate(file_paths):
-
-			if scheduler is not None and \
-				0 == i % self._file_merge_yield_interval:
-				scheduler.scheduleYield()
 
 			if os is _os_merge:
 				try:
@@ -2752,39 +2908,62 @@ class dblink(object):
 		return 1
 
 	def _eqawarn(self, phase, lines):
-		from portage.elog.messages import eqawarn as _eqawarn
-		if self._scheduler is None:
-			for l in lines:
-				_eqawarn(l, phase=phase, key=self.settings.mycpv)
-		else:
-			self._scheduler.dblinkElog(self,
-				phase, _eqawarn, lines)
+		self._elog("eqawarn", phase, lines)
 
 	def _eerror(self, phase, lines):
-		from portage.elog.messages import eerror as _eerror
+		self._elog("eerror", phase, lines)
+
+	def _elog(self, funcname, phase, lines):
+		func = getattr(portage.elog.messages, funcname)
 		if self._scheduler is None:
 			for l in lines:
-				_eerror(l, phase=phase, key=self.settings.mycpv)
+				func(l, phase=phase, key=self.mycpv)
 		else:
-			self._scheduler.dblinkElog(self,
-				phase, _eerror, lines)
+			background = self.settings.get("PORTAGE_BACKGROUND") == "1"
+			log_path = None
+			if self.settings.get("PORTAGE_BACKGROUND") != "subprocess":
+				log_path = self.settings.get("PORTAGE_LOG_FILE")
+			out = portage.StringIO()
+			for line in lines:
+				func(line, phase=phase, key=self.mycpv, out=out)
+			msg = out.getvalue()
+			self._scheduler.output(msg,
+				background=background, log_path=log_path)
 
-	def _elog_subprocess(self, funcname, phase, lines):
-		"""
-		Subprocesses call this in order to create elog messages in
-		$T, for collection by the main process.
-		"""
-		cmd = "source %s/isolated-functions.sh ; " % \
-			portage._shell_quote(self.settings["PORTAGE_BIN_PATH"])
-		for line in lines:
-			cmd += "%s %s ; " % (funcname, portage._shell_quote(line))
-		env = self.settings.environ()
-		env['EBUILD_PHASE'] = phase
-		subprocess.call([portage.const.BASH_BINARY, "-c", cmd],
-			env=env)
+	def _elog_process(self, phasefilter=None):
+		cpv = self.mycpv
+		if self._pipe is None:
+			elog_process(cpv, self.settings, phasefilter=phasefilter)
+		else:
+			logdir = os.path.join(self.settings["T"], "logging")
+			ebuild_logentries = collect_ebuild_messages(logdir)
+			py_logentries = collect_messages(key=cpv).get(cpv, {})
+			logentries = _merge_logentries(py_logentries, ebuild_logentries)
+			funcnames = {
+				"INFO": "einfo",
+				"LOG": "elog",
+				"WARN": "ewarn",
+				"QA": "eqawarn",
+				"ERROR": "eerror"
+			}
+			str_buffer = []
+			for phase, messages in logentries.items():
+				for key, lines in messages:
+					funcname = funcnames[key]
+					if isinstance(lines, basestring):
+						lines = [lines]
+					for line in lines:
+						fields = (funcname, phase, cpv, line.rstrip('\n'))
+						str_buffer.append(' '.join(fields))
+						str_buffer.append('\n')
+			if str_buffer:
+				os.write(self._pipe, _unicode_encode(''.join(str_buffer)))
+
+	def _emerge_log(self, msg):
+		emergelog(False, msg)
 
 	def treewalk(self, srcroot, destroot, inforoot, myebuild, cleanup=0,
-		mydbapi=None, prev_mtimes=None):
+		mydbapi=None, prev_mtimes=None, counter=None):
 		"""
 		
 		This function does the following:
@@ -2796,7 +2975,6 @@ class dblink(object):
 		unmerges old version (if required)
 		calls doebuild(mydo=pkg_postinst)
 		calls env_update
-		calls elog_process
 		
 		@param srcroot: Typically this is ${D}
 		@type srcroot: String (Path)
@@ -2830,8 +3008,6 @@ class dblink(object):
 			encoding=_encodings['content'], errors='strict')
 
 		showMessage = self._display_merge
-		scheduler = self._scheduler
-
 		srcroot = normalize_path(srcroot).rstrip(os.path.sep) + os.path.sep
 
 		if not os.path.isdir(srcroot):
@@ -2903,10 +3079,13 @@ class dblink(object):
 		for cur_cpv in slot_matches:
 			# Clone the config in case one of these has to be unmerged since
 			# we need it to have private ${T} etc... for things like elog.
+			settings_clone = config(clone=self.settings)
+			settings_clone.pop("PORTAGE_BUILDIR_LOCKED", None)
+			settings_clone.reset()
 			others_in_slot.append(dblink(self.cat, catsplit(cur_cpv)[1],
-				settings=config(clone=self.settings),
+				settings=settings_clone,
 				vartree=self.vartree, treetype="vartree",
-				scheduler=self._scheduler))
+				scheduler=self._scheduler, pipe=self._pipe))
 
 		retval = self._security_check(others_in_slot)
 		if retval:
@@ -3052,11 +3231,7 @@ class dblink(object):
 				return 1
 
 		# check for package collisions
-		blockers = None
-		if self._blockers is not None:
-			# This is only supposed to be called when
-			# the vdb is locked, like it is here.
-			blockers = self._blockers()
+		blockers = self._blockers
 		if blockers is None:
 			blockers = []
 		collisions, plib_collisions = \
@@ -3131,9 +3306,12 @@ class dblink(object):
 					# get_owners is slow for large numbers of files, so
 					# don't look them all up.
 					collisions = collisions[:20]
-				owners = self.vartree.dbapi._owners.get_owners(collisions,
-					scheduler=self._scheduler)
-				self.vartree.dbapi.flush_cache()
+				self.lockdb()
+				try:
+					owners = self.vartree.dbapi._owners.get_owners(collisions)
+					self.vartree.dbapi.flush_cache()
+				finally:
+					self.unlockdb()
 
 				for pkg, owned_files in owners.items():
 					cpv = pkg.mycpv
@@ -3184,12 +3362,12 @@ class dblink(object):
 		ensure_dirs(self.dbtmpdir)
 
 		# run preinst script
-		if scheduler is None:
-			showMessage(_(">>> Merging %(cpv)s to %(destroot)s\n") % {"cpv":self.mycpv, "destroot":destroot})
-			a = _spawn_phase("preinst", self.settings)
-		else:
-			a = scheduler.dblinkEbuildPhase(
-				self, mydbapi, myebuild, "preinst")
+		showMessage(_(">>> Merging %(cpv)s to %(destroot)s\n") % \
+			{"cpv":self.mycpv, "destroot":destroot})
+		phase = EbuildPhase(background=False, phase="preinst",
+			scheduler=self._scheduler, settings=self.settings)
+		phase.start()
+		a = phase.wait()
 
 		# XXX: Decide how to handle failures here.
 		if a != os.EX_OK:
@@ -3202,7 +3380,8 @@ class dblink(object):
 			self.copyfile(inforoot+"/"+x)
 
 		# write local package counter for recording
-		counter = self.vartree.dbapi.counter_tick(mycpv=self.mycpv)
+		if counter is None:
+			counter = self.vartree.dbapi.counter_tick(mycpv=self.mycpv)
 		codecs.open(_unicode_encode(os.path.join(self.dbtmpdir, 'COUNTER'),
 			encoding=_encodings['fs'], errors='strict'),
 			'w', encoding=_encodings['repo.content'], errors='backslashreplace'
@@ -3211,34 +3390,28 @@ class dblink(object):
 		self.updateprotect()
 
 		#if we have a file containing previously-merged config file md5sums, grab it.
-		conf_mem_file = os.path.join(self._eroot, CONFIG_MEMORY_FILE)
-		cfgfiledict = grabdict(conf_mem_file)
-		if "NOCONFMEM" in self.settings:
-			cfgfiledict["IGNORE"]=1
-		else:
-			cfgfiledict["IGNORE"]=0
+		self.vartree.dbapi._fs_lock()
+		try:
+			cfgfiledict = grabdict(self.vartree.dbapi._conf_mem_file)
+			if "NOCONFMEM" in self.settings:
+				cfgfiledict["IGNORE"]=1
+			else:
+				cfgfiledict["IGNORE"]=0
 
-		# Always behave like --noconfmem is enabled for downgrades
-		# so that people who don't know about this option are less
-		# likely to get confused when doing upgrade/downgrade cycles.
-		pv_split = catpkgsplit(self.mycpv)[1:]
-		for other in others_in_slot:
-			if pkgcmp(pv_split, catpkgsplit(other.mycpv)[1:]) < 0:
-				cfgfiledict["IGNORE"] = 1
-				break
+			# Always behave like --noconfmem is enabled for downgrades
+			# so that people who don't know about this option are less
+			# likely to get confused when doing upgrade/downgrade cycles.
+			pv_split = catpkgsplit(self.mycpv)[1:]
+			for other in others_in_slot:
+				if pkgcmp(pv_split, catpkgsplit(other.mycpv)[1:]) < 0:
+					cfgfiledict["IGNORE"] = 1
+					break
 
-		merge_task = MergeProcess(
-			background=(self.settings.get('PORTAGE_BACKGROUND') == '1'),
-			cfgfiledict=cfgfiledict, conf_mem_file=conf_mem_file, dblink=self,
-			destroot=destroot,
-			logfile=self.settings.get('PORTAGE_LOG_FILE'),
-			scheduler=(scheduler or PollScheduler().sched_iface),
-			srcroot=srcroot)
-
-		merge_task.start()
-		rval = merge_task.wait()
-		if rval != os.EX_OK:
-			return rval
+			rval = self._merge_contents(srcroot, destroot, cfgfiledict)
+			if rval != os.EX_OK:
+				return rval
+		finally:
+			self.vartree.dbapi._fs_unlock()
 
 		# These caches are populated during collision-protect and the data
 		# they contain is now invalid. It's very important to invalidate
@@ -3250,15 +3423,34 @@ class dblink(object):
 		self._clear_contents_cache()
 
 		linkmap = self.vartree.dbapi._linkmap
-		if linkmap is None:
-			# preserve-libs is entirely disabled
-			preserve_paths = None
-		else:
-			self._linkmap_rebuild(include_file=os.path.join(inforoot,
-				linkmap._needed_aux_key))
+		plib_registry = self.vartree.dbapi._plib_registry
+		# We initialize preserve_paths to an empty set rather
+		# than None here because it plays an important role
+		# in prune_plib_registry logic by serving to indicate
+		# that we have a replacement for a package that's
+		# being unmerged.
 
-			# Preserve old libs if they are still in use
-			preserve_paths = self._find_libs_to_preserve()
+		preserve_paths = set()
+		needed = None
+		if not (self._linkmap_broken or linkmap is None or
+			plib_registry is None):
+			self.vartree.dbapi._fs_lock()
+			plib_registry.lock()
+			try:
+				plib_registry.load()
+				needed = os.path.join(inforoot, linkmap._needed_aux_key)
+				self._linkmap_rebuild(include_file=needed)
+
+				# Preserve old libs if they are still in use
+				# TODO: Handle cases where the previous instance
+				# has already been uninstalled but it still has some
+				# preserved libraries in the registry that we may
+				# want to preserve here.
+				preserve_paths = self._find_libs_to_preserve()
+			finally:
+				plib_registry.unlock()
+				self.vartree.dbapi._fs_unlock()
+
 			if preserve_paths:
 				self._add_preserve_libs_to_contents(preserve_paths)
 
@@ -3270,13 +3462,14 @@ class dblink(object):
 			match_from_list(PORTAGE_PACKAGE_ATOM, [self.mycpv]):
 			reinstall_self = True
 
-		if scheduler is None:
-			def emerge_log(msg):
-				pass
-		else:
-			emerge_log = scheduler.dblinkEmergeLog
+		emerge_log = self._emerge_log
 
-		autoclean = self.settings.get("AUTOCLEAN", "yes") == "yes"
+		# If we have any preserved libraries then autoclean
+		# is forced so that preserve-libs logic doesn't have
+		# to account for the additional complexity of the
+		# AUTOCLEAN=no mode.
+		autoclean = self.settings.get("AUTOCLEAN", "yes") == "yes" \
+			or preserve_paths
 
 		if autoclean:
 			emerge_log(_(" >>> AUTOCLEAN: %s") % (slot_atom,))
@@ -3294,7 +3487,8 @@ class dblink(object):
 			dblnk.settings["REPLACED_BY_VERSION"] = portage.versions.cpv_getversion(self.mycpv)
 			dblnk.settings.backup_changes("REPLACED_BY_VERSION")
 			unmerge_rval = dblnk.unmerge(ldpath_mtimes=prev_mtimes,
-				others_in_slot=others_in_slot)
+				others_in_slot=others_in_slot, needed=needed,
+				preserve_paths=preserve_paths)
 			dblnk.settings.pop("REPLACED_BY_VERSION", None)
 
 			if unmerge_rval == os.EX_OK:
@@ -3302,8 +3496,12 @@ class dblink(object):
 			else:
 				emerge_log(_(" !!! unmerge FAILURE: %s") % (dblnk.mycpv,))
 
-			# TODO: Check status and abort if necessary.
-			dblnk.delete()
+			self.lockdb()
+			try:
+				# TODO: Check status and abort if necessary.
+				dblnk.delete()
+			finally:
+				self.unlockdb()
 			showMessage(_(">>> Original instance of package unmerged safely.\n"))
 
 		if len(others_in_slot) > 1:
@@ -3314,14 +3512,12 @@ class dblink(object):
 
 		# We hold both directory locks.
 		self.dbdir = self.dbpkgdir
-		self.delete()
-		_movefile(self.dbtmpdir, self.dbpkgdir, mysettings=self.settings)
-
-		# keep track of the libs we preserved
-		if self.vartree.dbapi._plib_registry is not None and \
-			preserve_paths:
-			self.vartree.dbapi._plib_registry.register(self.mycpv,
-				slot, counter, sorted(preserve_paths))
+		self.lockdb()
+		try:
+			self.delete()
+			_movefile(self.dbtmpdir, self.dbpkgdir, mysettings=self.settings)
+		finally:
+			self.unlockdb()
 
 		# Check for file collisions with blocking packages
 		# and remove any colliding files from their CONTENTS
@@ -3329,31 +3525,79 @@ class dblink(object):
 		self._clear_contents_cache()
 		contents = self.getcontents()
 		destroot_len = len(destroot) - 1
-		for blocker in blockers:
-			self.vartree.dbapi.removeFromContents(blocker, iter(contents),
-				relative_paths=False)
+		self.lockdb()
+		try:
+			for blocker in blockers:
+				self.vartree.dbapi.removeFromContents(blocker, iter(contents),
+					relative_paths=False)
+		finally:
+			self.unlockdb()
 
-		# Unregister any preserved libs that this package has overwritten
-		# and update the contents of the packages that owned them.
 		plib_registry = self.vartree.dbapi._plib_registry
-		if plib_registry is None:
-			# preserve-libs is entirely disabled
-			pass
-		else:
-			plib_dict = plib_registry.getPreservedLibs()
-			for cpv, paths in plib_collisions.items():
-				if cpv not in plib_dict:
-					continue
-				if cpv == self.mycpv:
-					continue
-				try:
-					slot, counter = self.vartree.dbapi.aux_get(
-						cpv, ["SLOT", "COUNTER"])
-				except KeyError:
-					continue
-				remaining = [f for f in plib_dict[cpv] if f not in paths]
-				plib_registry.register(cpv, slot, counter, remaining)
-				self.vartree.dbapi.removeFromContents(cpv, paths)
+		if plib_registry:
+			self.vartree.dbapi._fs_lock()
+			plib_registry.lock()
+			try:
+				plib_registry.load()
+
+				if preserve_paths:
+					# keep track of the libs we preserved
+					plib_registry.register(self.mycpv, slot, counter,
+						sorted(preserve_paths))
+
+				# Unregister any preserved libs that this package has overwritten
+				# and update the contents of the packages that owned them.
+				plib_dict = plib_registry.getPreservedLibs()
+				for cpv, paths in plib_collisions.items():
+					if cpv not in plib_dict:
+						continue
+					has_vdb_entry = False
+					if cpv != self.mycpv:
+						# If we've replaced another instance with the
+						# same cpv then the vdb entry no longer belongs
+						# to it, so we'll have to get the slot and counter
+						# from plib_registry._data instead.
+						self.vartree.dbapi.lock()
+						try:
+							try:
+								slot, counter = self.vartree.dbapi.aux_get(
+									cpv, ["SLOT", "COUNTER"])
+							except KeyError:
+								pass
+							else:
+								has_vdb_entry = True
+								self.vartree.dbapi.removeFromContents(
+									cpv, paths)
+						finally:
+							self.vartree.dbapi.unlock()
+
+					if not has_vdb_entry:
+						# It's possible for previously unmerged packages
+						# to have preserved libs in the registry, so try
+						# to retrieve the slot and counter from there.
+						has_registry_entry = False
+						for plib_cps, (plib_cpv, plib_counter, plib_paths) in \
+							plib_registry._data.items():
+							if plib_cpv != cpv:
+								continue
+							try:
+								cp, slot = plib_cps.split(":", 1)
+							except ValueError:
+								continue
+							counter = plib_counter
+							has_registry_entry = True
+							break
+
+						if not has_registry_entry:
+							continue
+
+					remaining = [f for f in plib_dict[cpv] if f not in paths]
+					plib_registry.register(cpv, slot, counter, remaining)
+
+				plib_registry.store()
+			finally:
+				plib_registry.unlock()
+				self.vartree.dbapi._fs_unlock()
 
 		self.vartree.dbapi._add(self)
 		contents = self.getcontents()
@@ -3363,13 +3607,12 @@ class dblink(object):
 			os.path.join(self.dbpkgdir, "environment.bz2")
 		self.settings.backup_changes("PORTAGE_UPDATE_ENV")
 		try:
-			if scheduler is None:
-				a = _spawn_phase("postinst", self.settings)
-				if a == os.EX_OK:
-					showMessage(_(">>> %s merged.\n") % self.mycpv)
-			else:
-				a = scheduler.dblinkEbuildPhase(
-					self, mydbapi, myebuild, "postinst")
+			phase = EbuildPhase(background=False, phase="postinst",
+				scheduler=self._scheduler, settings=self.settings)
+			phase.start()
+			a = phase.wait()
+			if a == os.EX_OK:
+				showMessage(_(">>> %s merged.\n") % self.mycpv)
 		finally:
 			self.settings.pop("PORTAGE_UPDATE_ENV", None)
 
@@ -3384,22 +3627,21 @@ class dblink(object):
 			if pkgcmp(catpkgsplit(self.pkg)[1:], catpkgsplit(v)[1:]) < 0:
 				downgrade = True
 
-		#update environment settings, library paths. DO NOT change symlinks.
-		env_update(makelinks=(not downgrade),
-			target_root=self.settings['ROOT'], prev_mtimes=prev_mtimes,
-			contents=contents, env=self.settings.environ(),
-			writemsg_level=self._display_merge)
+		# Lock the config memory file to prevent symlink creation
+		# in merge_contents from overlapping with env-update.
+		self.vartree.dbapi._fs_lock()
+		try:
+			#update environment settings, library paths. DO NOT change symlinks.
+			env_update(makelinks=(not downgrade),
+				target_root=self.settings['ROOT'], prev_mtimes=prev_mtimes,
+				contents=contents, env=self.settings.environ(),
+				writemsg_level=self._display_merge)
+		finally:
+			self.vartree.dbapi._fs_unlock()
 
 		# For gcc upgrades, preserved libs have to be removed after the
 		# the library path has been updated.
-		self._linkmap_rebuild()
-		cpv_lib_map = self._find_unused_preserved_libs()
-		if cpv_lib_map:
-			self._remove_preserved_libs(cpv_lib_map)
-			for cpv, removed in cpv_lib_map.items():
-				if not self.vartree.dbapi.cpv_exists(cpv):
-					continue
-				self.vartree.dbapi.removeFromContents(cpv, removed)
+		self._prune_plib_registry()
 
 		return os.EX_OK
 
@@ -3423,7 +3665,7 @@ class dblink(object):
 
 		return backup_p
 
-	def _merge_process(self, srcroot, destroot, cfgfiledict, conf_mem_file):
+	def _merge_contents(self, srcroot, destroot, cfgfiledict):
 
 		cfgfiledict_orig = cfgfiledict.copy()
 
@@ -3485,9 +3727,11 @@ class dblink(object):
 		# write out our collection of md5sums
 		if cfgfiledict != cfgfiledict_orig:
 			cfgfiledict.pop("IGNORE", None)
-			ensure_dirs(os.path.dirname(conf_mem_file),
-				gid=portage_gid, mode=0o2750, mask=0o2)
-			writedict(cfgfiledict, conf_mem_file)
+			try:
+				writedict(cfgfiledict, self.vartree.dbapi._conf_mem_file)
+			except InvalidLocation:
+				self.settings._init_dirs()
+				writedict(cfgfiledict, self.vartree.dbapi._conf_mem_file)
 
 		return os.EX_OK
 
@@ -3652,7 +3896,7 @@ class dblink(object):
 						msg.append(_("This file will be renamed to a different name:"))
 						msg.append("  '%s'" % backup_dest)
 						msg.append("")
-						self._elog_subprocess("eerror", "preinst", msg)
+						self._eerror("preinst", msg)
 						if movefile(mydest, backup_dest,
 							mysettings=self.settings,
 							encoding=_encodings['merge']) is None:
@@ -3730,7 +3974,7 @@ class dblink(object):
 						msg.append(_("This file will be merged with a different name:"))
 						msg.append("  '%s'" % newdest)
 						msg.append("")
-						self._elog_subprocess("eerror", "preinst", msg)
+						self._eerror("preinst", msg)
 						mydest = newdest
 
 					elif stat.S_ISREG(mydmode) or (stat.S_ISLNK(mydmode) and os.path.exists(mydest) and stat.S_ISREG(os.stat(mydest)[stat.ST_MODE])):
@@ -3812,83 +4056,26 @@ class dblink(object):
 				showMessage(zing + " " + mydest + "\n")
 
 	def merge(self, mergeroot, inforoot, myroot=None, myebuild=None, cleanup=0,
-		mydbapi=None, prev_mtimes=None):
-		"""
-		If portage is reinstalling itself, create temporary
-		copies of PORTAGE_BIN_PATH and PORTAGE_PYM_PATH in order
-		to avoid relying on the new versions which may be
-		incompatible. Register an atexit hook to clean up the
-		temporary directories. Pre-load elog modules here since
-		we won't be able to later if they get unmerged (happens
-		when namespace changes).
-
-		@param myroot: ignored, self._eroot is used instead
-		"""
-		myroot = None
-		if self.vartree.dbapi._categories is not None:
-			self.vartree.dbapi._categories = None
-		if self.myroot == "/" and \
-			match_from_list(PORTAGE_PACKAGE_ATOM, [self.mycpv]) and \
-			(not self.vartree.dbapi.cpv_exists(self.mycpv) or \
-			'9999' in self.mycpv or \
-			'git' in self.settings.get('INHERITED', '').split()):
-			# Load lazily referenced portage submodules into memory,
-			# so imports won't fail during portage upgrade/downgrade.
-			portage.proxy.lazyimport._preload_portage_submodules()
-			settings = self.settings
-			base_path_orig = os.path.dirname(settings["PORTAGE_BIN_PATH"])
-			from tempfile import mkdtemp
-
-			# Make the temp directory inside PORTAGE_TMPDIR since, unlike
-			# /tmp, it can't be mounted with the "noexec" option.
-			base_path_tmp = mkdtemp("", "._portage_reinstall_.",
-				settings["PORTAGE_TMPDIR"])
-			from portage.process import atexit_register
-			atexit_register(shutil.rmtree, base_path_tmp)
-			dir_perms = 0o755
-			for subdir in "bin", "pym":
-				var_name = "PORTAGE_%s_PATH" % subdir.upper()
-				var_orig = settings[var_name]
-				var_new = os.path.join(base_path_tmp, subdir)
-				settings[var_name] = var_new
-				settings.backup_changes(var_name)
-				shutil.copytree(var_orig, var_new, symlinks=True)
-				os.chmod(var_new, dir_perms)
-			portage._bin_path = settings['PORTAGE_BIN_PATH']
-			portage._pym_path = settings['PORTAGE_PYM_PATH']
-			os.chmod(base_path_tmp, dir_perms)
-			# This serves so pre-load the modules.
-			_preload_elog_modules(self.settings)
-
-		return self._merge(mergeroot, inforoot,
-				myebuild=myebuild, cleanup=cleanup,
-				mydbapi=mydbapi, prev_mtimes=prev_mtimes)
-
-	def _merge(self, mergeroot, inforoot, myroot=None, myebuild=None, cleanup=0,
-		mydbapi=None, prev_mtimes=None):
+		mydbapi=None, prev_mtimes=None, counter=None):
 		"""
 		@param myroot: ignored, self._eroot is used instead
 		"""
 		myroot = None
 		retval = -1
-		self.lockdb()
+		parallel_install = "parallel-install" in self.settings.features
+		if not parallel_install:
+			self.lockdb()
 		self.vartree.dbapi._bump_mtime(self.mycpv)
+		if self._scheduler is None:
+			self._scheduler = PollScheduler().sched_iface
 		try:
-			plib_registry = self.vartree.dbapi._plib_registry
-			if plib_registry is None:
-				# preserve-libs is entirely disabled
-				pass
-			else:
-				plib_registry.load()
-				plib_registry.pruneNonExisting()
-
 			retval = self.treewalk(mergeroot, myroot, inforoot, myebuild,
-				cleanup=cleanup, mydbapi=mydbapi, prev_mtimes=prev_mtimes)
+				cleanup=cleanup, mydbapi=mydbapi, prev_mtimes=prev_mtimes,
+				counter=counter)
 
 			# If PORTAGE_BUILDDIR doesn't exist, then it probably means
 			# fail-clean is enabled, and the success/die hooks have
-			# already been called by _emerge.EbuildPhase (via
-			# self._scheduler.dblinkEbuildPhase) prior to cleaning.
+			# already been called by EbuildPhase.
 			if os.path.isdir(self.settings['PORTAGE_BUILDDIR']):
 
 				if retval == os.EX_OK:
@@ -3896,19 +4083,12 @@ class dblink(object):
 				else:
 					phase = 'die_hooks'
 
-				if self._scheduler is None:
-					ebuild_phase = MiscFunctionsProcess(
-						background=False,
-						commands=[phase],
-						scheduler=PollScheduler().sched_iface,
-						settings=self.settings)
-					ebuild_phase.start()
-					ebuild_phase.wait()
-				else:
-					self._scheduler.dblinkEbuildPhase(
-						self, mydbapi, myebuild, phase)
-
-				elog_process(self.mycpv, self.settings)
+				ebuild_phase = MiscFunctionsProcess(
+					background=False, commands=[phase],
+					scheduler=self._scheduler, settings=self.settings)
+				ebuild_phase.start()
+				ebuild_phase.wait()
+				self._elog_process()
 
 				if 'noclean' not in self.settings.features and \
 					(retval == os.EX_OK or \
@@ -3918,12 +4098,10 @@ class dblink(object):
 
 					doebuild_environment(myebuild, "clean",
 						settings=self.settings, db=mydbapi)
-					if self._scheduler is None:
-						_spawn_phase("clean", self.settings)
-					else:
-						self._scheduler.dblinkEbuildPhase(
-							self, mydbapi, myebuild, "clean")
-
+					phase = EbuildPhase(background=False, phase="clean",
+						scheduler=self._scheduler, settings=self.settings)
+					phase.start()
+					phase.wait()
 		finally:
 			self.settings.pop('REPLACING_VERSIONS', None)
 			if self.vartree.dbapi._linkmap is None:
@@ -3931,8 +4109,9 @@ class dblink(object):
 				pass
 			else:
 				self.vartree.dbapi._linkmap._clear_cache()
-			self.unlockdb()
 			self.vartree.dbapi._bump_mtime(self.mycpv)
+			if not parallel_install:
+				self.unlockdb()
 		return retval
 
 	def getstring(self,name):
@@ -4008,10 +4187,17 @@ def merge(mycat, mypkg, pkgloc, infloc,
 		writemsg(_("Permission denied: access('%s', W_OK)\n") % settings['EROOT'],
 			noiselevel=-1)
 		return errno.EACCES
-	mylink = dblink(mycat, mypkg, settings=settings, treetype=mytree,
-		vartree=vartree, blockers=blockers, scheduler=scheduler)
-	return mylink.merge(pkgloc, infloc, myebuild=myebuild,
-		mydbapi=mydbapi, prev_mtimes=prev_mtimes)
+	background = (settings.get('PORTAGE_BACKGROUND') == '1')
+	merge_task = MergeProcess(
+		mycat=mycat, mypkg=mypkg, settings=settings,
+		treetype=mytree, vartree=vartree,
+		scheduler=(scheduler or PollScheduler().sched_iface),
+		background=background, blockers=blockers, pkgloc=pkgloc,
+		infloc=infloc, myebuild=myebuild, mydbapi=mydbapi,
+		prev_mtimes=prev_mtimes, logfile=settings.get('PORTAGE_LOG_FILE'))
+	merge_task.start()
+	retcode = merge_task.wait()
+	return retcode
 
 def unmerge(cat, pkg, myroot=None, settings=None,
 	mytrimworld=None, vartree=None,
@@ -4026,19 +4212,18 @@ def unmerge(cat, pkg, myroot=None, settings=None,
 	mylink = dblink(cat, pkg, settings=settings, treetype="vartree",
 		vartree=vartree, scheduler=scheduler)
 	vartree = mylink.vartree
-	try:
+	parallel_install = "parallel-install" in settings.features
+	if not parallel_install:
 		mylink.lockdb()
+	try:
 		if mylink.exists():
-			plib_registry = vartree.dbapi._plib_registry
-			if plib_registry is None:
-				# preserve-libs is entirely disabled
-				pass
-			else:
-				plib_registry.load()
-				plib_registry.pruneNonExisting()
 			retval = mylink.unmerge(ldpath_mtimes=ldpath_mtimes)
 			if retval == os.EX_OK:
-				mylink.delete()
+				mylink.lockdb()
+				try:
+					mylink.delete()
+				finally:
+					mylink.unlockdb()
 			return retval
 		return os.EX_OK
 	finally:
@@ -4047,7 +4232,8 @@ def unmerge(cat, pkg, myroot=None, settings=None,
 			pass
 		else:
 			vartree.dbapi._linkmap._clear_cache()
-		mylink.unlockdb()
+		if not parallel_install:
+			mylink.unlockdb()
 
 def write_contents(contents, root, f):
 	"""

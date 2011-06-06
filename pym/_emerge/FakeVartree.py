@@ -1,4 +1,4 @@
-# Copyright 1999-2010 Gentoo Foundation
+# Copyright 1999-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 import sys
@@ -86,13 +86,24 @@ class FakeVartree(vartree):
 		if pkg in self._aux_get_history:
 			return self._aux_get(pkg, wants)
 		self._aux_get_history.add(pkg)
+		# We need to check the EAPI, and this also raises
+		# a KeyError to the caller if appropriate.
+		installed_eapi, repo = self._aux_get(pkg, ["EAPI", "repository"])
 		try:
 			# Use the live ebuild metadata if possible.
-			repo = self._aux_get(pkg, ["repository"])[0]
 			repo = _gen_valid_repo(repo)
 			live_metadata = dict(zip(self._portdb_keys,
 				self._portdb.aux_get(pkg, self._portdb_keys, myrepo=repo)))
-			if not portage.eapi_is_supported(live_metadata["EAPI"]):
+			# Use the metadata from the installed instance if the EAPI
+			# of either instance is unsupported, since if the installed
+			# instance has an unsupported or corrupt EAPI then we don't
+			# want to attempt to do complex operations such as execute
+			# pkg_config, pkg_prerm or pkg_postrm phases. If both EAPIs
+			# are supported then go ahead and use the live_metadata, in
+			# order to respect dep updates without revision bump or EAPI
+			# bump, as in bug #368725.
+			if not (portage.eapi_is_supported(live_metadata["EAPI"]) and \
+				portage.eapi_is_supported(installed_eapi)):
 				raise KeyError(pkg)
 			self.dbapi.aux_update(pkg, live_metadata)
 		except (KeyError, portage.exception.PortageException):
@@ -103,26 +114,31 @@ class FakeVartree(vartree):
 				pkg, self.dbapi, self._global_updates)
 		return self._aux_get(pkg, wants)
 
+	def cpv_discard(self, pkg):
+		"""
+		Discard a package from the fake vardb if it exists.
+		"""
+		old_pkg = self.dbapi.get(pkg)
+		if old_pkg is not None:
+			self.dbapi.cpv_remove(old_pkg)
+			self._pkg_cache.pop(old_pkg, None)
+			self._aux_get_history.discard(old_pkg.cpv)
+
 	def sync(self, acquire_lock=1):
 		"""
 		Call this method to synchronize state with the real vardb
 		after one or more packages may have been installed or
 		uninstalled.
 		"""
-		vdb_path = os.path.join(self.settings['EROOT'], portage.VDB_PATH)
+		locked = False
 		try:
-			# At least the parent needs to exist for the lock file.
-			portage.util.ensure_dirs(vdb_path)
-		except portage.exception.PortageException:
-			pass
-		vdb_lock = None
-		try:
-			if acquire_lock and os.access(vdb_path, os.W_OK):
-				vdb_lock = portage.locks.lockdir(vdb_path)
+			if acquire_lock and os.access(self._real_vardb._dbroot, os.W_OK):
+				self._real_vardb.lock()
+				locked = True
 			self._sync()
 		finally:
-			if vdb_lock:
-				portage.locks.unlockdir(vdb_lock)
+			if locked:
+				self._real_vardb.unlock()
 
 		# Populate the old-style virtuals using the cached values.
 		# Skip the aux_get wrapper here, to avoid unwanted
@@ -144,17 +160,17 @@ class FakeVartree(vartree):
 		# Remove any packages that have been uninstalled.
 		for pkg in list(pkg_vardb):
 			if pkg.cpv not in current_cpv_set:
-				pkg_vardb.cpv_remove(pkg)
-				pkg_cache.pop(pkg, None)
-				aux_get_history.discard(pkg.cpv)
+				self.cpv_discard(pkg)
 
 		# Validate counters and timestamps.
 		slot_counters = {}
-		root = self.root
+		root_config = self._pkg_root_config
 		validation_keys = ["COUNTER", "_mtime_"]
 		for cpv in current_cpv_set:
 
-			pkg_hash_key = ("installed", root, cpv, "nomerge")
+			pkg_hash_key = Package._gen_hash_key(cpv=cpv,
+				installed=True, root_config=root_config,
+				type_name="installed")
 			pkg = pkg_vardb.get(pkg_hash_key)
 			if pkg is not None:
 				counter, mtime = real_vardb.aux_get(cpv, validation_keys)
@@ -165,9 +181,7 @@ class FakeVartree(vartree):
 
 				if counter != pkg.counter or \
 					mtime != pkg.mtime:
-					pkg_vardb.cpv_remove(pkg)
-					pkg_cache.pop(pkg, None)
-					aux_get_history.discard(pkg.cpv)
+					self.cpv_discard(pkg)
 					pkg = None
 
 			if pkg is None:

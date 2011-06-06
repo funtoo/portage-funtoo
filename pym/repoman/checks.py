@@ -1,5 +1,5 @@
 # repoman: Checks
-# Copyright 2007, 2010 Gentoo Foundation
+# Copyright 2007, 2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 """This module contains functions used in Repoman to ascertain the quality
@@ -327,6 +327,17 @@ class EprefixifyDefined(LineCheck):
 		elif self._inherit_prefix_re.search(line) is not None:
 			self._prefix_inherited = True
 
+class NoOffsetWithHelpers(LineCheck):
+	""" Check that the image location, the alternate root offset, and the
+	offset prefix (D, ROOT, ED, EROOT and EPREFIX) are not used with
+	helpers """
+
+	repoman_check_name = 'variable.usedwithhelpers'
+	# Ignore matches in quoted strings like this:
+	# elog "installed into ${ROOT}usr/share/php5/apc/."
+	re = re.compile(r'^[^#"\']*\b(dodir|dohard|exeinto|insinto|into)\s+"?\$\{?(D|ROOT|ED|EROOT|EPREFIX)\b.*')
+	error = errors.NO_OFFSET_WITH_HELPERS
+
 class ImplicitRuntimeDeps(LineCheck):
 	"""
 	Detect the case where DEPEND is set and RDEPEND is unset in the ebuild,
@@ -368,6 +379,11 @@ class InheritDeprecated(LineCheck):
 	# deprecated eclass : new eclass (False if no new eclass)
 	deprecated_classes = {
 		"gems": "ruby-fakegem",
+		"git": "git-2",
+		"mozconfig-2": "mozconfig-3",
+		"mozcoreconf": "mozcoreconf-2",
+		"php-ext-pecl-r1": "php-ext-pecl-r2",
+		"php-ext-source-r1": "php-ext-source-r2",
 		"php-pear": "php-pear-r1",
 		"qt3": False,
 		"qt4": "qt4-r2",
@@ -603,16 +619,27 @@ class Eapi4IncompatibleFuncs(LineCheck):
 class Eapi4GoneVars(LineCheck):
 	repoman_check_name = 'EAPI.incompatible'
 	ignore_line = re.compile(r'(^\s*#)')
-	undefined_vars_re = re.compile(r'.*\$(\{(AA|KV)\}|(AA|KV))')
+	undefined_vars_re = re.compile(r'.*\$(\{(AA|KV|EMERGE_FROM)\}|(AA|KV|EMERGE_FROM))')
 
 	def check_eapi(self, eapi):
-		return not eapi_exports_AA(eapi) or not eapi_exports_KV(eapi)
+		# AA, KV, and EMERGE_FROM should not be referenced in EAPI 4 or later.
+		return not eapi_exports_AA(eapi)
 
 	def check(self, num, line):
 		m = self.undefined_vars_re.match(line)
 		if m is not None:
 			return ("variable '$%s'" % m.group(1)) + \
 				" is gone in EAPI=4 on line: %d"
+
+class PortageInternal(LineCheck):
+	repoman_check_name = 'portage.internal'
+	re = re.compile(r'[^#]*\b(ecompress|ecompressdir|prepall|prepalldocs|preplib)\b')
+
+	def check(self, num, line):
+		"""Run the check on line and return error if there is one"""
+		m = self.re.match(line)
+		if m is not None:
+			return ("'%s'" % m.group(1)) + " called on line: %d"
 
 _constant_checks = tuple((c() for c in (
 	EbuildHeader, EbuildWhitespace, EbuildBlankLine, EbuildQuote,
@@ -622,9 +649,9 @@ _constant_checks = tuple((c() for c in (
 	ImplicitRuntimeDeps, InheritAutotools, InheritDeprecated, IUseUndefined,
 	EMakeParallelDisabled, EMakeParallelDisabledViaMAKEOPTS, NoAsNeeded,
 	DeprecatedBindnowFlags, SrcUnpackPatches, WantAutoDefaultValue,
-	SrcCompileEconf, Eapi3DeprecatedFuncs,
+	SrcCompileEconf, Eapi3DeprecatedFuncs, NoOffsetWithHelpers,
 	Eapi4IncompatibleFuncs, Eapi4GoneVars, BuiltWithUse,
-	PreserveOldLib, SandboxAddpredict)))
+	PreserveOldLib, SandboxAddpredict, PortageInternal)))
 
 _here_doc_re = re.compile(r'.*\s<<[-]?(\w+)$')
 

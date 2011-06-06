@@ -1,5 +1,4 @@
-# portage.py -- core Portage functionality
-# Copyright 1998-2004 Gentoo Foundation
+# Copyright 1998-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 # Since python ebuilds remove the 'email' module when USE=build
@@ -23,6 +22,20 @@ import portage
 
 if sys.hexversion >= 0x3000000:
 	basestring = str
+
+	def _force_ascii_if_necessary(s):
+		# Force ascii encoding in order to avoid UnicodeEncodeError
+		# from smtplib.sendmail with python3 (bug #291331).
+		s = _unicode_encode(s,
+			encoding='ascii', errors='backslashreplace')
+		s = _unicode_decode(s,
+			encoding='ascii', errors='replace')
+		return s
+
+else:
+
+	def _force_ascii_if_necessary(s):
+		return s
 
 def TextMessage(_text):
 	from email.mime.text import MIMEText
@@ -67,9 +80,17 @@ def create_message(sender, recipient, subject, body, attachments=None):
 	mymessage.set_unixfrom(sender)
 	mymessage["To"] = recipient
 	mymessage["From"] = sender
+
 	# Use Header as a workaround so that long subject lines are wrapped
 	# correctly by <=python-2.6 (gentoo bug #263370, python issue #1974).
-	mymessage["Subject"] = Header(subject)
+	# Also, need to force ascii for python3, in order to avoid
+	# UnicodeEncodeError with non-ascii characters:
+	#  File "/usr/lib/python3.1/email/header.py", line 189, in __init__
+	#    self.append(s, charset, errors)
+	#  File "/usr/lib/python3.1/email/header.py", line 262, in append
+	#    input_bytes = s.encode(input_charset, errors)
+	#UnicodeEncodeError: 'ascii' codec can't encode characters in position 0-9: ordinal not in range(128)
+	mymessage["Subject"] = Header(_force_ascii_if_necessary(subject))
 	mymessage["Date"] = time.strftime("%a, %d %b %Y %H:%M:%S %z")
 	
 	return mymessage
@@ -85,8 +106,8 @@ def send_mail(mysettings, message):
 	myrecipient = "root@localhost"
 	
 	# Syntax for PORTAGE_ELOG_MAILURI (if defined):
-	# adress [[user:passwd@]mailserver[:port]]
-	# where adress:     recipient adress
+	# address [[user:passwd@]mailserver[:port]]
+	# where address:    recipient address
 	#       user:       username for smtp auth (defaults to none)
 	#       passwd:     password for smtp auth (defaults to none)
 	#       mailserver: smtp server that should be used to deliver the mail (defaults to localhost)
@@ -128,7 +149,7 @@ def send_mail(mysettings, message):
 	# user wants to use a sendmail binary instead of smtp
 	if mymailhost[0] == os.sep and os.path.exists(mymailhost):
 		fd = os.popen(mymailhost+" -f "+myfrom+" "+myrecipient, "w")
-		fd.write(message.as_string())
+		fd.write(_force_ascii_if_necessary(message.as_string()))
 		if fd.close() != None:
 			sys.stderr.write(_("!!! %s returned with a non-zero exit code. This generally indicates an error.\n") % mymailhost)
 	else:
@@ -137,7 +158,7 @@ def send_mail(mysettings, message):
 				myconn = smtplib.SMTP(mymailhost, int(mymailport) - 100000)
 				myconn.ehlo()
 				if not myconn.has_extn("STARTTLS"):
-					raise portage.exception.PortageException(_("!!! TLS support requested for logmail but not suported by server"))
+					raise portage.exception.PortageException(_("!!! TLS support requested for logmail but not supported by server"))
 				myconn.starttls()
 				myconn.ehlo()
 			else:
@@ -145,20 +166,12 @@ def send_mail(mysettings, message):
 			if mymailuser != "" and mymailpasswd != "":
 				myconn.login(mymailuser, mymailpasswd)
 
-			message_str = message.as_string()
-			if sys.hexversion >= 0x3000000:
-				# Force ascii encoding in order to avoid UnicodeEncodeError
-				# from smtplib.sendmail with python3 (bug #291331).
-				message_str = _unicode_encode(message_str,
-					encoding='ascii', errors='backslashreplace')
-				message_str = _unicode_decode(message_str,
-					encoding='ascii', errors='replace')
-
+			message_str = _force_ascii_if_necessary(message.as_string())
 			myconn.sendmail(myfrom, myrecipient, message_str)
 			myconn.quit()
 		except smtplib.SMTPException as e:
-			raise portage.exception.PortageException(_("!!! An error occured while trying to send logmail:\n")+str(e))
+			raise portage.exception.PortageException(_("!!! An error occurred while trying to send logmail:\n")+str(e))
 		except socket.error as e:
-			raise portage.exception.PortageException(_("!!! A network error occured while trying to send logmail:\n%s\nSure you configured PORTAGE_ELOG_MAILURI correctly?") % str(e))
+			raise portage.exception.PortageException(_("!!! A network error occurred while trying to send logmail:\n%s\nSure you configured PORTAGE_ELOG_MAILURI correctly?") % str(e))
 	return
 	

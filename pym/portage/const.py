@@ -1,5 +1,5 @@
 # portage: Constants
-# Copyright 1998-2010 Gentoo Foundation
+# Copyright 1998-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 import os
@@ -88,12 +88,13 @@ EBUILD_PHASES            = ("pretend", "setup", "unpack", "prepare", "configure"
 SUPPORTED_FEATURES       = frozenset([
                            "assume-digests", "binpkg-logs", "buildpkg", "buildsyspkg", "candy",
                            "ccache", "chflags", "collision-protect", "compress-build-logs",
-                           "digest", "distcc", "distlocks",
-                           "fakeroot", "fail-clean", "fixpackages", "getbinpkg",
+                           "digest", "distcc", "distcc-pump", "distlocks", "ebuild-locks", "fakeroot",
+                           "fail-clean", "fixpackages", "force-mirror", "getbinpkg",
                            "installsources", "keeptemp", "keepwork", "fixlafiles", "lmirror",
                            "metadata-transfer", "mini-manifest", "mirror", "multilib-strict", "news",
-                           "noauto", "noclean", "nodoc", "noinfo", "noman", "nostrip",
-                           "notitles", "parallel-fetch", "parse-eapi-ebuild-head",
+                           "noauto", "noclean", "nodoc", "noinfo", "noman",
+                           "nostrip", "notitles", "parallel-fetch", "parallel-install",
+                           "parse-eapi-ebuild-head",
                            "prelink-checksums", "preserve-libs",
                            "protect-owned", "python-trace", "sandbox",
                            "selinux", "sesandbox", "severe", "sfperms",

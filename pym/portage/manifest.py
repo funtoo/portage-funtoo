@@ -1,4 +1,4 @@
-# Copyright 1999-2009 Gentoo Foundation
+# Copyright 1999-2011 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 # $Id: manifest.py 15289 2010-01-30 14:31:53Z zmedico $
 
@@ -501,7 +501,7 @@ class Manifest(object):
 	
 	def updateAllHashes(self, checkExisting=False, ignoreMissingFiles=True):
 		""" Regenerate all hashes for all files in this Manifest. """
-		for ftype in portage.const.MANIFEST2_IDENTIFIERS:
+		for idtype in portage.const.MANIFEST2_IDENTIFIERS:
 			self.updateTypeHashes(idtype, fname, checkExisting)
 
 	def updateCpvHashes(self, cpv, ignoreMissingFiles=True):
