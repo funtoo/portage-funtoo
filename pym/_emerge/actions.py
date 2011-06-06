@@ -2027,14 +2027,14 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
  
 		if portage.process.spawn_bash("mv %s %s" % (repo_path_tmp, repo_path_fin)) != os.EX_OK:
 			print("!!! Couldn't move %s into final location %s; exiting." % ( repo_path_tmp, repo_path_fin ))
- 			sys.exit(1)
+			sys.exit(1)
 
 		# Clean up after ourselves:
 		portage.process.spawn_bash("rm -rf %s" % (repo_path_tmp))
 	else:
 		if not os.path.exists(myportdir+"/.git"):
 			print("!!! Portage tree at %s does not appear to be a git repository. Please move out of the way or correct your PORTDIR setting and retry." % myportdir)
- 			sys.exit(1)
+			sys.exit(1)
 
 		if portage.process.spawn_bash("su - %s -s /bin/sh -c 'cd %s >/dev/null 2>&1'" % ( syncuser, myportdir )) != os.EX_OK:
 			print("!!! Portage tree at %s is not reachable by user %s; please adjust permissions to correct." %  ( myportdir, syncuser ))
