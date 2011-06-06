@@ -30,13 +30,13 @@ import os
 MAKE_CONF_FILE           = "etc/make.conf"
 USER_CONFIG_PATH         = "etc/portage"
 MODULES_FILE_PATH        = USER_CONFIG_PATH + "/modules"
-CUSTOM_PROFILE_PATH      = USER_CONFIG_PATH + "/profile"
+CUSTOM_PROFILE_PATH      = USER_CONFIG_PATH
 USER_VIRTUALS_FILE       = USER_CONFIG_PATH + "/virtuals"
 EBUILD_SH_ENV_FILE       = USER_CONFIG_PATH + "/bashrc"
 EBUILD_SH_ENV_DIR        = USER_CONFIG_PATH + "/env"
 CUSTOM_MIRRORS_FILE      = USER_CONFIG_PATH + "/mirrors"
 COLOR_MAP_FILE           = USER_CONFIG_PATH + "/color.map"
-PROFILE_PATH             = "etc/make.profile"
+PROFILE_PATH             = USER_CONFIG_PATH
 MAKE_DEFAULTS_FILE       = PROFILE_PATH + "/make.defaults"  # FIXME: not used
 DEPRECATED_PROFILE_FILE  = PROFILE_PATH + "/deprecated"
 
@@ -91,18 +91,18 @@ SUPPORTED_FEATURES       = frozenset([
                            "digest", "distcc", "distcc-pump", "distlocks", "ebuild-locks", "fakeroot",
                            "fail-clean", "fixpackages", "force-mirror", "getbinpkg",
                            "installsources", "keeptemp", "keepwork", "fixlafiles", "lmirror",
-                           "metadata-transfer", "mirror", "multilib-strict", "news",
+                           "metadata-transfer", "mini-manifest", "mirror", "multilib-strict", "news",
                            "noauto", "noclean", "nodoc", "noinfo", "noman",
                            "nostrip", "notitles", "parallel-fetch", "parallel-install",
                            "parse-eapi-ebuild-head",
                            "prelink-checksums", "preserve-libs",
-                           "protect-owned", "python-trace", "sandbox",
+                           "protect-owned", "python-trace", "safetydance", "sandbox",
                            "selinux", "sesandbox", "severe", "sfperms",
                            "sign", "skiprocheck", "split-elog", "split-log", "splitdebug",
                            "strict", "stricter", "suidctl", "test", "test-fail-continue",
                            "unknown-features-filter", "unknown-features-warn",
                            "unmerge-logs", "unmerge-orphans", "userfetch", "userpriv",
-                           "usersandbox", "usersync", "webrsync-gpg"])
+                           "usersandbox", "localpatch"])
 
 EAPI                     = 4
 

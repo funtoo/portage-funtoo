@@ -169,7 +169,7 @@ class RepoConfig(object):
 
 class RepoConfigLoader(object):
 	"""Loads and store config of several repositories, loaded from PORTDIR_OVERLAY or repos.conf"""
-	def __init__(self, paths, settings):
+	def __init__(self, paths, repo_vars):
 		"""Load config from files in paths"""
 		def parse(paths, prepos, ignored_map, ignored_location_map):
 			"""Parse files in paths to load config"""
@@ -205,6 +205,7 @@ class RepoConfigLoader(object):
 			if portdir:
 				portdir = normalize_path(portdir)
 				overlays.append(portdir)
+
 			port_ov = [normalize_path(i) for i in shlex_split(portdir_overlay)]
 			overlays.extend(port_ov)
 			default_repo_opts = {}
@@ -217,6 +218,7 @@ class RepoConfigLoader(object):
 			if prepos['DEFAULT'].masters is not None:
 				default_repo_opts['masters'] = \
 					' '.join(prepos['DEFAULT'].masters)
+		
 			if overlays:
 				#overlay priority is negative because we want them to be looked before any other repo
 				base_priority = 0
@@ -256,8 +258,9 @@ class RepoConfigLoader(object):
 							base_priority += 1
 
 					else:
-						writemsg(_("!!! Invalid PORTDIR_OVERLAY"
-							" (not a dir): '%s'\n") % ov, noiselevel=-1)
+						if os.path.exists(ov):
+							writemsg(_("!!! Invalid PORTDIR_OVERLAY"
+								" (not a dir): '%s'\n") % ov, noiselevel=-1)
 
 			return portdir
 
@@ -277,13 +280,12 @@ class RepoConfigLoader(object):
 		ignored_map = {}
 		ignored_location_map = {}
 
-		portdir = settings.get('PORTDIR', '')
-		portdir_overlay = settings.get('PORTDIR_OVERLAY', '')
+		portdir = repo_vars["PORTDIR"]
+		portdir_overlay = repo_vars['PORTDIR_OVERLAY']
 		parse(paths, prepos, ignored_map, ignored_location_map)
 		# If PORTDIR_OVERLAY contains a repo with the same repo_name as
 		# PORTDIR, then PORTDIR is overridden.
-		portdir = add_overlays(portdir, portdir_overlay, prepos,
-			ignored_map, ignored_location_map)
+		portdir = add_overlays(portdir, portdir_overlay, prepos, ignored_map, ignored_location_map)
 		if portdir and portdir.strip():
 			portdir = os.path.realpath(portdir)
 
@@ -346,10 +348,10 @@ class RepoConfigLoader(object):
 
 		if portdir in location_map:
 			portdir_repo = prepos[location_map[portdir]]
-			portdir_sync = settings.get('SYNC', '')
+			#portdir_sync = settings.get('SYNC', '')
 			#if SYNC variable is set and not overwritten by repos.conf
-			if portdir_sync and not portdir_repo.sync:
-				portdir_repo.sync = portdir_sync
+			#if portdir_sync and not portdir_repo.sync:
+			#	portdir_repo.sync = portdir_sync
 
 		if prepos['DEFAULT'].main_repo is None or \
 			prepos['DEFAULT'].main_repo not in prepos:
@@ -360,7 +362,7 @@ class RepoConfigLoader(object):
 				prepos['DEFAULT'].main_repo = ignored_location_map[portdir]
 			else:
 				prepos['DEFAULT'].main_repo = None
-				writemsg(_("!!! main-repo not set in DEFAULT and PORTDIR is empty. \n"), noiselevel=-1)
+				writemsg(_("Portage repository is currently empty. \n"), noiselevel=-1)
 
 		self.prepos = prepos
 		self.prepos_order = prepos_order
@@ -392,7 +394,7 @@ class RepoConfigLoader(object):
 						writemsg_level(_("Unavailable repository '%s' " \
 							"referenced by masters entry in '%s'\n") % \
 							(master_name, layout_filename),
-							level=logging.ERROR, noiselevel=-1)
+							level=logging.ERROR, noiselevel=0)
 					else:
 						master_repos.append(prepos[master_name])
 				repo.masters = tuple(master_repos)
@@ -490,10 +492,9 @@ class RepoConfigLoader(object):
 		for repo_name in self.prepos_order:
 			yield self.prepos[repo_name]
 
-def load_repository_config(settings):
+def load_repository_config(repo_vars):
 	#~ repoconfigpaths = [os.path.join(settings.global_config_path, "repos.conf")]
-	repoconfigpaths = []
-	if settings.local_config:
-		repoconfigpaths.append(os.path.join(settings["PORTAGE_CONFIGROOT"],
-			USER_CONFIG_PATH, "repos.conf"))
-	return RepoConfigLoader(repoconfigpaths, settings)
+	repoconfigpaths = [ "/etc" ]
+	#if settings.local_config:
+	#	repoconfigpaths.append(os.path.join(settings["PORTAGE_CONFIGROOT"], USER_CONFIG_PATH, "repos.conf"))
+	return RepoConfigLoader(repoconfigpaths, repo_vars)

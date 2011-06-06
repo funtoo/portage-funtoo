@@ -1,5 +1,6 @@
 # Copyright 2010 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
+# $Id: digestcheck.py 15459 2010-02-25 20:40:13Z zmedico $
 
 __all__ = ['digestcheck']
 
@@ -37,13 +38,13 @@ def digestcheck(myfiles, mysettings, strict=False, justmanifest=None):
 			return 0
 		else:
 			return 1
-	mf = Manifest(pkgdir, mysettings["DISTDIR"])
+	mf = Manifest(pkgdir, mysettings["DISTDIR"], mini_manifest = "mini-manifest" in mysettings.features)
 	manifest_empty = True
 	for d in mf.fhashdict.values():
 		if d:
 			manifest_empty = False
 			break
-	if manifest_empty:
+	if manifest_empty and "mini-manifest" not in mysettings.features:
 		writemsg(_("!!! Manifest is empty: '%s'\n") % manifest_path,
 			noiselevel=-1)
 		if strict:
@@ -131,6 +132,8 @@ def digestcheck(myfiles, mysettings, strict=False, justmanifest=None):
 				continue
 			if d.startswith(".") or d == "CVS":
 				dirs.remove(d_bytes)
+		if "mini-manifest" in mysettings.features:
+			return 1
 		for f in files:
 			try:
 				f = _unicode_decode(f,

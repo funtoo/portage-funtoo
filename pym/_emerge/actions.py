@@ -63,7 +63,6 @@ from _emerge.search import search
 from _emerge.SetArg import SetArg
 from _emerge.show_invalid_depstring_notice import show_invalid_depstring_notice
 from _emerge.sync.getaddrinfo_validate import getaddrinfo_validate
-from _emerge.sync.old_tree_timestamp import old_tree_timestamp_warn
 from _emerge.unmerge import unmerge
 from _emerge.UnmergeDepPriority import UnmergeDepPriority
 from _emerge.UseFlagDisplay import pkg_use_display
@@ -74,9 +73,6 @@ if sys.hexversion >= 0x3000000:
 
 def action_build(settings, trees, mtimedb,
 	myopts, myaction, myfiles, spinner):
-
-	if '--usepkgonly' not in myopts:
-		old_tree_timestamp_warn(settings['PORTDIR'], settings)
 
 	# It's best for config updates in /etc/portage to be processed
 	# before we get here, so warn if they're not (bug #267103).
@@ -1316,6 +1312,23 @@ class _info_pkgs_ver(object):
 		"""
 		return self.ver + self.repo_suffix + self.provide_suffix
 
+def headSHA1(tree):
+	print("Portage Tree: %s" % tree)
+	head = None
+	hfile = os.path.join(tree,".git/HEAD")
+	hfile2 = ""
+	if os.path.exists(hfile):
+		infile = open(hfile,"r")
+		head = infile.readline().split()[1]
+		infile.close()
+		hfile2 = os.path.join(tree,".git")
+		hfile2 = os.path.join(hfile2,head)
+		if os.path.exists(hfile2):
+			infile = open(hfile2,"r")
+			head = infile.readline().split()[0]
+			infile.close()
+	print ("Portage HEAD:",head,hfile2)
+
 def action_info(settings, trees, myopts, myfiles):
 
 	root_config = trees[settings['ROOT']]['root_config']
@@ -1332,14 +1345,7 @@ def action_info(settings, trees, myopts, myfiles):
 	print(header_width * "=")
 	print("System uname: "+platform.platform(aliased=1))
 
-	lastSync = portage.grabfile(os.path.join(
-		settings["PORTDIR"], "metadata", "timestamp.chk"))
-	print("Timestamp of tree:", end=' ')
-	if lastSync:
-		print(lastSync[0])
-	else:
-		print("Unknown")
-
+	headSHA1(settings["PORTDIR"])
 	output=subprocess_getstatusoutput("distcc --version")
 	if not output[0]:
 		print(str(output[1].split("\n",1)[0]), end=' ')
@@ -1445,7 +1451,7 @@ def action_info(settings, trees, myopts, myfiles):
 		          'PORTDIR_OVERLAY', 'PORTAGE_BUNZIP2_COMMAND',
 		          'PORTAGE_BZIP2_COMMAND',
 		          'USE', 'CHOST', 'CFLAGS', 'CXXFLAGS',
-		          'ACCEPT_KEYWORDS', 'ACCEPT_LICENSE', 'SYNC', 'FEATURES',
+		          'ACCEPT_KEYWORDS', 'ACCEPT_LICENSE', 'SYNC', 'SYNC_USER', 'SYNC_UMASK', 'FEATURES',
 		          'EMERGE_DEFAULT_OPTS']
 
 		myvars.extend(portage.util.grabfile(settings["PORTDIR"]+"/profiles/info_vars"))
@@ -1931,8 +1937,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		global_config_path = os.path.join(settings['EPREFIX'],
 				GLOBAL_CONFIG_PATH.lstrip(os.sep))
 	if not myportdir:
-		sys.stderr.write("!!! PORTDIR is undefined.  " + \
-			"Is %s/make.globals missing?\n" % global_config_path)
+		sys.stderr.write("!!! PORTDIR is undefined. Is %s/make.globals missing?\n" % global_config_path)
 		sys.exit(1)
 	if myportdir[-1]=="/":
 		myportdir=myportdir[:-1]
@@ -1940,75 +1945,103 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		st = os.stat(myportdir)
 	except OSError:
 		st = None
-	if st is None:
-		print(">>>",myportdir,"not found, creating it.")
-		portage.util.ensure_dirs(myportdir, mode=0o755)
-		st = os.stat(myportdir)
-
-	usersync_uid = None
-	spawn_kwargs = {}
-	spawn_kwargs["env"] = settings.environ()
-	if 'usersync' in settings.features and \
-		portage.data.secpass >= 2 and \
-		(st.st_uid != os.getuid() and st.st_mode & 0o700 or \
-		st.st_gid != os.getgid() and st.st_mode & 0o070):
-		try:
-			homedir = pwd.getpwuid(st.st_uid).pw_dir
-		except KeyError:
-			pass
-		else:
-			# Drop privileges when syncing, in order to match
-			# existing uid/gid settings.
-			usersync_uid = st.st_uid
-			spawn_kwargs["uid"]    = st.st_uid
-			spawn_kwargs["gid"]    = st.st_gid
-			spawn_kwargs["groups"] = [st.st_gid]
-			spawn_kwargs["env"]["HOME"] = homedir
-			umask = 0o002
-			if not st.st_mode & 0o020:
-				umask = umask | 0o020
-			spawn_kwargs["umask"] = umask
-
-	if usersync_uid is not None:
-		# PORTAGE_TMPDIR is used below, so validate it and
-		# bail out if necessary.
-		rval = _check_temp_dir(settings)
-		if rval != os.EX_OK:
-			return rval
-
+	
 	syncuri = settings.get("SYNC", "").strip()
-	if not syncuri:
-		writemsg_level("!!! SYNC is undefined. " + \
-			"Is %s/make.globals missing?\n" % global_config_path,
-			noiselevel=-1, level=logging.ERROR)
-		return 1
-
-	vcs_dirs = frozenset([".git", ".svn", "CVS", ".hg"])
-	vcs_dirs = vcs_dirs.intersection(os.listdir(myportdir))
-
-	os.umask(0o022)
-	dosyncuri = syncuri
+	syncuser = settings.get("SYNC_USER", "root").strip()
+	syncumask = settings.get("SYNC_UMASK", "022").strip()
+	
 	updatecache_flg = False
 	if myaction == "metadata":
 		print("skipping sync")
 		updatecache_flg = True
-	elif ".git" in vcs_dirs:
-		# Update existing git repository, and ignore the syncuri. We are
-		# going to trust the user and assume that the user is in the branch
-		# that he/she wants updated. We'll let the user manage branches with
-		# git directly.
-		if portage.process.find_binary("git") is None:
-			msg = ["Command not found: git",
-			"Type \"emerge dev-util/git\" to enable git support."]
-			for l in msg:
-				writemsg_level("!!! %s\n" % l,
-					level=logging.ERROR, noiselevel=-1)
+
+
+	# add git stuff here.
+	
+	if portage.process.find_binary("git") is None:
+		msg = ["Command not found: git", "Type \"emerge dev-vcs/git\" to enable git support."]
+		for l in msg:
+			writemsg_level("!!! %s\n" % l, level=logging.ERROR, noiselevel=-1)
+		return 1
+	updatecache_flg = True
+	if not os.path.exists(myportdir):
+		if not syncuri:
+			writemsg_level("SYNC is undefined.\nPlease set SYNC to the remote location of the Portage repository.\n", noiselevel=-1, level=logging.ERROR)
 			return 1
-		msg = ">>> Starting git pull in %s..." % myportdir
-		emergelog(xterm_titles, msg )
-		writemsg_level(msg + "\n")
-		exitcode = portage.process.spawn_bash("cd %s ; git pull" % \
-			(portage._shell_quote(myportdir),), **spawn_kwargs)
+
+		# A few tricks are required to get git cloning by a non-root user. We will create a temporary working directory called work_path
+		# (/usr/portage.sync). We will make sure this directory is owned by the SYNC_USER user, and then we will use "su" to run git clone
+		# inside this directory, so that git can create the initial repository directory with the proper user permissiosn. After git
+		# clone completes, we will move our new portage tree in repo_path_tmp to repo_path_fin, its final location. And then we will remove
+		# work_path, our temporary directory.
+ 
+		# Real local timestamp file.
+		servertimestampfile = os.path.join(
+			myportdir, "metadata", "timestamp.chk")
+		common_path = os.path.dirname(myportdir)
+		repo_dir = os.path.basename(myportdir)
+		work_path = os.path.join(common_path, repo_dir + ".sync")
+		repo_path_tmp = os.path.join(work_path, repo_dir)
+		repo_path_fin = os.path.join(common_path, repo_dir)
+			
+		print(">>> Using %s as temporary clone directory..." % repo_path_tmp)
+ 
+		# if the directories we will be using exist, try to remove them, non-recursively. If that doesn't work, there are files in them
+		# and throw an error message, requesting the user remove these files so that sync can proceed.
+
+		for checkdir in [ repo_path_tmp, work_path ]:
+			if os.path.exists(checkdir):
+				try:
+					os.rmdir(checkdir)
+				except OSError as e:
+					print("!!! %s exists and contains files. Please remove so that clone can proceed." % checkdir )
+					sys.exit(1)
+
+		# at this point, we want to create an initial portage.sync directory, owned by the user, into which we can use su to run git as
+		# the user, and create the new portage tree directory owned by the user.
+ 
+		if not os.path.exists(common_path):
+			# create common path directory, ie. /var/git, if it doesn't exist.
+			os.makedirs(common_path)
+ 
+		if portage.process.spawn_bash("cd %s && umask %s && install -d -o %s %s" % ( common_path, syncumask, syncuser, work_path)) != os.EX_OK:
+			print("!!! Unable to create initial sync directory %s; exiting." % work_path)
+			sys.exit(1)
+
+		# We've created our temporary work directory, but is the final location actually reachable - ie. readable, by SYNC_USER? We'll
+		# find out now.
+  
+		if portage.process.spawn_bash("su - %s -s /bin/sh -c 'cd %s'" % ( syncuser, common_path )) != os.EX_OK:
+			print("!!! Path %s is not reachable by user %s; please adjust permissions or SYNC_USER setting to correct." %  ( common_path, syncuser ))
+			sys.exit(1)
+
+		# Everything looks OK, so now we will clone the repository:
+		
+		print(">>> Starting initial git clone with "+syncuri+"...")
+ 
+		if portage.process.spawn_bash("su - %s -s /bin/sh -c 'umask %s && cd %s && exec git clone %s %s && mv '" % (syncuser, syncumask, work_path, portage._shell_quote(syncuri), repo_dir)) != os.EX_OK:
+			print("!!! git clone error; exiting.")
+			sys.exit(1)
+		
+		# Our clone should now exist in the temporary location, now move it to the final location, as root:
+ 
+		if portage.process.spawn_bash("mv %s %s" % (repo_path_tmp, repo_path_fin)) != os.EX_OK:
+			print("!!! Couldn't move %s into final location %s; exiting." % ( repo_path_tmp, repo_path_fin ))
+ 			sys.exit(1)
+
+		# Clean up after ourselves:
+		portage.process.spawn_bash("rm -rf %s" % (repo_path_tmp))
+	else:
+		if not os.path.exists(myportdir+"/.git"):
+			print("!!! Portage tree at %s does not appear to be a git repository. Please move out of the way or correct your PORTDIR setting and retry." % myportdir)
+ 			sys.exit(1)
+
+		if portage.process.spawn_bash("su - %s -s /bin/sh -c 'cd %s >/dev/null 2>&1'" % ( syncuser, myportdir )) != os.EX_OK:
+			print("!!! Portage tree at %s is not reachable by user %s; please adjust permissions to correct." %  ( myportdir, syncuser ))
+			sys.exit(1)
+
+		print(">>> Starting git pull...")
+		exitcode = portage.process.spawn_bash( "su - %s -s /bin/sh -c 'umask %s && cd %s && exec git pull --no-stat'" % (syncuser, syncumask, portage._shell_quote(myportdir),))
 		if exitcode != os.EX_OK:
 			msg = "!!! git pull error in %s." % myportdir
 			emergelog(xterm_titles, msg)
@@ -2017,449 +2050,13 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		msg = ">>> Git pull in %s successful" % myportdir
 		emergelog(xterm_titles, msg)
 		writemsg_level(msg + "\n")
-		exitcode = git_sync_timestamps(settings, myportdir)
-		if exitcode == os.EX_OK:
-			updatecache_flg = True
-	elif syncuri[:8]=="rsync://" or syncuri[:6]=="ssh://":
-		for vcs_dir in vcs_dirs:
-			writemsg_level(("!!! %s appears to be under revision " + \
-				"control (contains %s).\n!!! Aborting rsync sync.\n") % \
-				(myportdir, vcs_dir), level=logging.ERROR, noiselevel=-1)
-			return 1
-		if not os.path.exists("/usr/bin/rsync"):
-			print("!!! /usr/bin/rsync does not exist, so rsync support is disabled.")
-			print("!!! Type \"emerge net-misc/rsync\" to enable rsync support.")
-			sys.exit(1)
-		mytimeout=180
 
-		rsync_opts = []
-		if settings["PORTAGE_RSYNC_OPTS"] == "":
-			portage.writemsg("PORTAGE_RSYNC_OPTS empty or unset, using hardcoded defaults\n")
-			rsync_opts.extend([
-				"--recursive",    # Recurse directories
-				"--links",        # Consider symlinks
-				"--safe-links",   # Ignore links outside of tree
-				"--perms",        # Preserve permissions
-				"--times",        # Preserive mod times
-				"--compress",     # Compress the data transmitted
-				"--force",        # Force deletion on non-empty dirs
-				"--whole-file",   # Don't do block transfers, only entire files
-				"--delete",       # Delete files that aren't in the master tree
-				"--stats",        # Show final statistics about what was transfered
-				"--timeout="+str(mytimeout), # IO timeout if not done in X seconds
-				"--exclude=/distfiles",   # Exclude distfiles from consideration
-				"--exclude=/local",       # Exclude local     from consideration
-				"--exclude=/packages",    # Exclude packages  from consideration
-			])
+	# if initial clone or sync, 
+	exitcode = git_sync_timestamps(settings, myportdir)
+	if exitcode != os.EX_OK:
+		sys.exit(retval)
 
-		else:
-			# The below validation is not needed when using the above hardcoded
-			# defaults.
-
-			portage.writemsg("Using PORTAGE_RSYNC_OPTS instead of hardcoded defaults\n", 1)
-			rsync_opts.extend(portage.util.shlex_split(
-				settings.get("PORTAGE_RSYNC_OPTS", "")))
-			for opt in ("--recursive", "--times"):
-				if opt not in rsync_opts:
-					portage.writemsg(yellow("WARNING:") + " adding required option " + \
-					"%s not included in PORTAGE_RSYNC_OPTS\n" % opt)
-					rsync_opts.append(opt)
-
-			for exclude in ("distfiles", "local", "packages"):
-				opt = "--exclude=/%s" % exclude
-				if opt not in rsync_opts:
-					portage.writemsg(yellow("WARNING:") + \
-					" adding required option %s not included in "  % opt + \
-					"PORTAGE_RSYNC_OPTS (can be overridden with --exclude='!')\n")
-					rsync_opts.append(opt)
-
-			if syncuri.rstrip("/").endswith(".gentoo.org/gentoo-portage"):
-				def rsync_opt_startswith(opt_prefix):
-					for x in rsync_opts:
-						if x.startswith(opt_prefix):
-							return True
-					return False
-
-				if not rsync_opt_startswith("--timeout="):
-					rsync_opts.append("--timeout=%d" % mytimeout)
-
-				for opt in ("--compress", "--whole-file"):
-					if opt not in rsync_opts:
-						portage.writemsg(yellow("WARNING:") + " adding required option " + \
-						"%s not included in PORTAGE_RSYNC_OPTS\n" % opt)
-						rsync_opts.append(opt)
-
-		if "--quiet" in myopts:
-			rsync_opts.append("--quiet")    # Shut up a lot
-		else:
-			rsync_opts.append("--verbose")	# Print filelist
-
-		if "--verbose" in myopts:
-			rsync_opts.append("--progress")  # Progress meter for each file
-
-		if "--debug" in myopts:
-			rsync_opts.append("--checksum") # Force checksum on all files
-
-		# Real local timestamp file.
-		servertimestampfile = os.path.join(
-			myportdir, "metadata", "timestamp.chk")
-
-		content = portage.util.grabfile(servertimestampfile)
-		mytimestamp = 0
-		if content:
-			try:
-				mytimestamp = time.mktime(time.strptime(content[0],
-					"%a, %d %b %Y %H:%M:%S +0000"))
-			except (OverflowError, ValueError):
-				pass
-		del content
-
-		try:
-			rsync_initial_timeout = \
-				int(settings.get("PORTAGE_RSYNC_INITIAL_TIMEOUT", "15"))
-		except ValueError:
-			rsync_initial_timeout = 15
-
-		try:
-			maxretries=int(settings["PORTAGE_RSYNC_RETRIES"])
-		except SystemExit as e:
-			raise # Needed else can't exit
-		except:
-			maxretries = -1 #default number of retries
-
-		retries=0
-		try:
-			proto, user_name, hostname, port = re.split(
-				r"(rsync|ssh)://([^:/]+@)?(\[[:\da-fA-F]*\]|[^:/]*)(:[0-9]+)?",
-				syncuri, maxsplit=4)[1:5]
-		except ValueError:
-			writemsg_level("!!! SYNC is invalid: %s\n" % syncuri,
-				noiselevel=-1, level=logging.ERROR)
-			return 1
-		if port is None:
-			port=""
-		if user_name is None:
-			user_name=""
-		if re.match(r"^\[[:\da-fA-F]*\]$", hostname) is None:
-			getaddrinfo_host = hostname
-		else:
-			# getaddrinfo needs the brackets stripped
-			getaddrinfo_host = hostname[1:-1]
-		updatecache_flg=True
-		all_rsync_opts = set(rsync_opts)
-		extra_rsync_opts = portage.util.shlex_split(
-			settings.get("PORTAGE_RSYNC_EXTRA_OPTS",""))
-		all_rsync_opts.update(extra_rsync_opts)
-
-		family = socket.AF_UNSPEC
-		if "-4" in all_rsync_opts or "--ipv4" in all_rsync_opts:
-			family = socket.AF_INET
-		elif socket.has_ipv6 and \
-			("-6" in all_rsync_opts or "--ipv6" in all_rsync_opts):
-			family = socket.AF_INET6
-
-		addrinfos = None
-		uris = []
-
-		try:
-			addrinfos = getaddrinfo_validate(
-				socket.getaddrinfo(getaddrinfo_host, None,
-				family, socket.SOCK_STREAM))
-		except socket.error as e:
-			writemsg_level(
-				"!!! getaddrinfo failed for '%s': %s\n" % (hostname, e),
-				noiselevel=-1, level=logging.ERROR)
-
-		if addrinfos:
-
-			AF_INET = socket.AF_INET
-			AF_INET6 = None
-			if socket.has_ipv6:
-				AF_INET6 = socket.AF_INET6
-
-			ips_v4 = []
-			ips_v6 = []
-
-			for addrinfo in addrinfos:
-				if addrinfo[0] == AF_INET:
-					ips_v4.append("%s" % addrinfo[4][0])
-				elif AF_INET6 is not None and addrinfo[0] == AF_INET6:
-					# IPv6 addresses need to be enclosed in square brackets
-					ips_v6.append("[%s]" % addrinfo[4][0])
-
-			random.shuffle(ips_v4)
-			random.shuffle(ips_v6)
-
-			# Give priority to the address family that
-			# getaddrinfo() returned first.
-			if AF_INET6 is not None and addrinfos and \
-				addrinfos[0][0] == AF_INET6:
-				ips = ips_v6 + ips_v4
-			else:
-				ips = ips_v4 + ips_v6
-
-			for ip in ips:
-				uris.append(syncuri.replace(
-					"//" + user_name + hostname + port + "/",
-					"//" + user_name + ip + port + "/", 1))
-
-		if not uris:
-			# With some configurations we need to use the plain hostname
-			# rather than try to resolve the ip addresses (bug #340817).
-			uris.append(syncuri)
-
-		# reverse, for use with pop()
-		uris.reverse()
-
-		effective_maxretries = maxretries
-		if effective_maxretries < 0:
-			effective_maxretries = len(uris) - 1
-
-		SERVER_OUT_OF_DATE = -1
-		EXCEEDED_MAX_RETRIES = -2
-		while (1):
-			if uris:
-				dosyncuri = uris.pop()
-			else:
-				writemsg("!!! Exhausted addresses for %s\n" % \
-					hostname, noiselevel=-1)
-				return 1
-
-			if (retries==0):
-				if "--ask" in myopts:
-					if userquery("Do you want to sync your Portage tree " + \
-						"with the mirror at\n" + blue(dosyncuri) + bold("?"),
-						enter_invalid) == "No":
-						print()
-						print("Quitting.")
-						print()
-						sys.exit(0)
-				emergelog(xterm_titles, ">>> Starting rsync with " + dosyncuri)
-				if "--quiet" not in myopts:
-					print(">>> Starting rsync with "+dosyncuri+"...")
-			else:
-				emergelog(xterm_titles,
-					">>> Starting retry %d of %d with %s" % \
-						(retries, effective_maxretries, dosyncuri))
-				writemsg_stdout(
-					"\n\n>>> Starting retry %d of %d with %s\n" % \
-					(retries, effective_maxretries, dosyncuri), noiselevel=-1)
-
-			if dosyncuri.startswith('ssh://'):
-				dosyncuri = dosyncuri[6:].replace('/', ':/', 1)
-
-			if mytimestamp != 0 and "--quiet" not in myopts:
-				print(">>> Checking server timestamp ...")
-
-			rsynccommand = ["/usr/bin/rsync"] + rsync_opts + extra_rsync_opts
-
-			if "--debug" in myopts:
-				print(rsynccommand)
-
-			exitcode = os.EX_OK
-			servertimestamp = 0
-			# Even if there's no timestamp available locally, fetch the
-			# timestamp anyway as an initial probe to verify that the server is
-			# responsive.  This protects us from hanging indefinitely on a
-			# connection attempt to an unresponsive server which rsync's
-			# --timeout option does not prevent.
-			if True:
-				# Temporary file for remote server timestamp comparison.
-				# NOTE: If FEATURES=usersync is enabled then the tempfile
-				# needs to be in a directory that's readable by the usersync
-				# user. We assume that PORTAGE_TMPDIR will satisfy this
-				# requirement, since that's not necessarily true for the
-				# default directory used by the tempfile module.
-				if usersync_uid is not None:
-					tmpdir = settings['PORTAGE_TMPDIR']
-				else:
-					# use default dir from tempfile module
-					tmpdir = None
-				fd, tmpservertimestampfile = \
-					tempfile.mkstemp(dir=tmpdir)
-				os.close(fd)
-				if usersync_uid is not None:
-					portage.util.apply_permissions(tmpservertimestampfile,
-						uid=usersync_uid)
-				mycommand = rsynccommand[:]
-				mycommand.append(dosyncuri.rstrip("/") + \
-					"/metadata/timestamp.chk")
-				mycommand.append(tmpservertimestampfile)
-				content = None
-				mypids = []
-				try:
-					# Timeout here in case the server is unresponsive.  The
-					# --timeout rsync option doesn't apply to the initial
-					# connection attempt.
-					try:
-						if rsync_initial_timeout:
-							portage.exception.AlarmSignal.register(
-								rsync_initial_timeout)
-
-						mypids.extend(portage.process.spawn(
-							mycommand, returnpid=True, **spawn_kwargs))
-						exitcode = os.waitpid(mypids[0], 0)[1]
-						if usersync_uid is not None:
-							portage.util.apply_permissions(tmpservertimestampfile,
-								uid=os.getuid())
-						content = portage.grabfile(tmpservertimestampfile)
-					finally:
-						if rsync_initial_timeout:
-							portage.exception.AlarmSignal.unregister()
-						try:
-							os.unlink(tmpservertimestampfile)
-						except OSError:
-							pass
-				except portage.exception.AlarmSignal:
-					# timed out
-					print('timed out')
-					# With waitpid and WNOHANG, only check the
-					# first element of the tuple since the second
-					# element may vary (bug #337465).
-					if mypids and os.waitpid(mypids[0], os.WNOHANG)[0] == 0:
-						os.kill(mypids[0], signal.SIGTERM)
-						os.waitpid(mypids[0], 0)
-					# This is the same code rsync uses for timeout.
-					exitcode = 30
-				else:
-					if exitcode != os.EX_OK:
-						if exitcode & 0xff:
-							exitcode = (exitcode & 0xff) << 8
-						else:
-							exitcode = exitcode >> 8
-				if mypids:
-					portage.process.spawned_pids.remove(mypids[0])
-				if content:
-					try:
-						servertimestamp = time.mktime(time.strptime(
-							content[0], "%a, %d %b %Y %H:%M:%S +0000"))
-					except (OverflowError, ValueError):
-						pass
-				del mycommand, mypids, content
-			if exitcode == os.EX_OK:
-				if (servertimestamp != 0) and (servertimestamp == mytimestamp):
-					emergelog(xterm_titles,
-						">>> Cancelling sync -- Already current.")
-					print()
-					print(">>>")
-					print(">>> Timestamps on the server and in the local repository are the same.")
-					print(">>> Cancelling all further sync action. You are already up to date.")
-					print(">>>")
-					print(">>> In order to force sync, remove '%s'." % servertimestampfile)
-					print(">>>")
-					print()
-					sys.exit(0)
-				elif (servertimestamp != 0) and (servertimestamp < mytimestamp):
-					emergelog(xterm_titles,
-						">>> Server out of date: %s" % dosyncuri)
-					print()
-					print(">>>")
-					print(">>> SERVER OUT OF DATE: %s" % dosyncuri)
-					print(">>>")
-					print(">>> In order to force sync, remove '%s'." % servertimestampfile)
-					print(">>>")
-					print()
-					exitcode = SERVER_OUT_OF_DATE
-				elif (servertimestamp == 0) or (servertimestamp > mytimestamp):
-					# actual sync
-					mycommand = rsynccommand + [dosyncuri+"/", myportdir]
-					exitcode = portage.process.spawn(mycommand, **spawn_kwargs)
-					if exitcode in [0,1,3,4,11,14,20,21]:
-						break
-			elif exitcode in [1,3,4,11,14,20,21]:
-				break
-			else:
-				# Code 2 indicates protocol incompatibility, which is expected
-				# for servers with protocol < 29 that don't support
-				# --prune-empty-directories.  Retry for a server that supports
-				# at least rsync protocol version 29 (>=rsync-2.6.4).
-				pass
-
-			retries=retries+1
-
-			if maxretries < 0 or retries <= maxretries:
-				print(">>> Retrying...")
-			else:
-				# over retries
-				# exit loop
-				updatecache_flg=False
-				exitcode = EXCEEDED_MAX_RETRIES
-				break
-
-		if (exitcode==0):
-			emergelog(xterm_titles, "=== Sync completed with %s" % dosyncuri)
-		elif exitcode == SERVER_OUT_OF_DATE:
-			sys.exit(1)
-		elif exitcode == EXCEEDED_MAX_RETRIES:
-			sys.stderr.write(
-				">>> Exceeded PORTAGE_RSYNC_RETRIES: %s\n" % maxretries)
-			sys.exit(1)
-		elif (exitcode>0):
-			msg = []
-			if exitcode==1:
-				msg.append("Rsync has reported that there is a syntax error. Please ensure")
-				msg.append("that your SYNC statement is proper.")
-				msg.append("SYNC=" + settings["SYNC"])
-			elif exitcode==11:
-				msg.append("Rsync has reported that there is a File IO error. Normally")
-				msg.append("this means your disk is full, but can be caused by corruption")
-				msg.append("on the filesystem that contains PORTDIR. Please investigate")
-				msg.append("and try again after the problem has been fixed.")
-				msg.append("PORTDIR=" + settings["PORTDIR"])
-			elif exitcode==20:
-				msg.append("Rsync was killed before it finished.")
-			else:
-				msg.append("Rsync has not successfully finished. It is recommended that you keep")
-				msg.append("trying or that you use the 'emerge-webrsync' option if you are unable")
-				msg.append("to use rsync due to firewall or other restrictions. This should be a")
-				msg.append("temporary problem unless complications exist with your network")
-				msg.append("(and possibly your system's filesystem) configuration.")
-			for line in msg:
-				out.eerror(line)
-			sys.exit(exitcode)
-	elif syncuri[:6]=="cvs://":
-		if not os.path.exists("/usr/bin/cvs"):
-			print("!!! /usr/bin/cvs does not exist, so CVS support is disabled.")
-			print("!!! Type \"emerge dev-vcs/cvs\" to enable CVS support.")
-			sys.exit(1)
-		cvsroot=syncuri[6:]
-		cvsdir=os.path.dirname(myportdir)
-		if not os.path.exists(myportdir+"/CVS"):
-			#initial checkout
-			print(">>> Starting initial cvs checkout with "+syncuri+"...")
-			if os.path.exists(cvsdir+"/gentoo-x86"):
-				print("!!! existing",cvsdir+"/gentoo-x86 directory; exiting.")
-				sys.exit(1)
-			try:
-				os.rmdir(myportdir)
-			except OSError as e:
-				if e.errno != errno.ENOENT:
-					sys.stderr.write(
-						"!!! existing '%s' directory; exiting.\n" % myportdir)
-					sys.exit(1)
-				del e
-			if portage.process.spawn_bash(
-					"cd %s; exec cvs -z0 -d %s co -P gentoo-x86" % \
-					(portage._shell_quote(cvsdir), portage._shell_quote(cvsroot)),
-					**spawn_kwargs) != os.EX_OK:
-				print("!!! cvs checkout error; exiting.")
-				sys.exit(1)
-			os.rename(os.path.join(cvsdir, "gentoo-x86"), myportdir)
-		else:
-			#cvs update
-			print(">>> Starting cvs update with "+syncuri+"...")
-			retval = portage.process.spawn_bash(
-				"cd %s; exec cvs -z0 -q update -dP" % \
-				(portage._shell_quote(myportdir),), **spawn_kwargs)
-			if retval != os.EX_OK:
-				writemsg_level("!!! cvs update error; exiting.\n",
-					noiselevel=-1, level=logging.ERROR)
-				sys.exit(retval)
-		dosyncuri = syncuri
-	else:
-		writemsg_level("!!! Unrecognized protocol: SYNC='%s'\n" % (syncuri,),
-			noiselevel=-1, level=logging.ERROR)
-		return 1
+#git end
 
 	if updatecache_flg and  \
 		myaction != "metadata" and \
@@ -2472,15 +2069,13 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 	root_config = trees[settings["ROOT"]]["root_config"]
 	portdb = trees[settings["ROOT"]]["porttree"].dbapi
 
-	if updatecache_flg and \
-		os.path.exists(os.path.join(myportdir, 'metadata', 'cache')):
+	if updatecache_flg and os.path.exists(os.path.join(myportdir, 'metadata', 'cache')):
 
 		# Only update cache for myportdir since that's
 		# the only one that's been synced here.
 		action_metadata(settings, portdb, myopts, porttrees=[myportdir])
 
-	if myopts.get('--package-moves') != 'n' and \
-		_global_updates(trees, mtimedb["updates"], quiet=("--quiet" in myopts)):
+	if myopts.get('--package-moves') != 'n' and _global_updates(trees, mtimedb["updates"], quiet=("--quiet" in myopts)):
 		mtimedb.commit()
 		# Reload the whole config from scratch.
 		settings, trees, mtimedb = load_emerge_config(trees=trees)
@@ -2992,6 +2587,14 @@ def load_emerge_config(trees=None):
 	QueryCommand._db = trees
 	return settings, trees, mtimedb
 
+def pw_grp_conv(eroot):
+	if eroot != "/":
+		return
+	if os.path.exists("/usr/sbin/pwconv"):
+		portage.process.spawn_bash("/usr/sbin/pwconv")
+	if os.path.exists("/usr/sbin/grpconv"):
+		portage.process.spawn_bash("/usr/sbin/grpconv")
+	
 def chk_updated_cfg_files(eroot, config_protect):
 	target_root = eroot
 	result = list(

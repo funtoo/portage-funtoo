@@ -2772,7 +2772,6 @@ class depgraph(object):
 		required_use_unsatisfied = []
 		masked_pkg_instances = set()
 		missing_licenses = []
-		have_eapi_mask = False
 		pkgsettings = self._frozen_config.pkgsettings[root]
 		root_config = self._frozen_config.roots[root]
 		portdb = self._frozen_config.roots[root].trees["porttree"].dbapi
@@ -3057,25 +3056,23 @@ class depgraph(object):
 
 		elif show_missing_use:
 			writemsg_stdout("\nemerge: there are no ebuilds built with USE flags to satisfy "+green(xinfo)+".\n", noiselevel=-1)
-			writemsg_stdout("!!! One of the following packages is required to complete your request:\n", noiselevel=-1)
+			writemsg_stdout("\n>>> Possible solutions:\n", noiselevel=-1)
 			for pkg, mreasons in show_missing_use:
-				writemsg_stdout("- "+pkg.cpv+" ("+", ".join(mreasons)+")\n", noiselevel=-1)
+				writemsg_stdout("    "+pkg.cpv+" ("+", ".join(mreasons)+")\n", noiselevel=-1)
 
 		elif masked_packages:
-			writemsg_stdout("\n!!! " + \
-				colorize("BAD", "All ebuilds that could satisfy ") + \
-				colorize("INFORM", xinfo) + \
-				colorize("BAD", " have been masked.") + "\n", noiselevel=-1)
-			writemsg_stdout("!!! One of the following masked packages is required to complete your request:\n", noiselevel=-1)
-			have_eapi_mask = show_masked_packages(masked_packages)
-			if have_eapi_mask:
+			out_text = "!!! All ebuilds that could satisfy %s have been masked." % xinfo
+			writemsg_stdout("\n%s\n" % out_text,  noiselevel=-1)
+			writemsg_stdout("\n>>> Possible solutions:\n", noiselevel=-1)
+			retval = show_masked_packages(masked_packages)
+			if retval["have_eapi_mask"]:
 				writemsg_stdout("\n", noiselevel=-1)
 				msg = ("The current version of portage supports " + \
 					"EAPI '%s'. You must upgrade to a newer version" + \
 					" of portage before EAPI masked packages can" + \
 					" be installed.") % portage.const.EAPI
 				writemsg_stdout("\n".join(textwrap.wrap(msg, 75)), noiselevel=-1)
-			writemsg_stdout("\n", noiselevel=-1)
+			writemsg_stdout("\n", noiselevel=0)
 			mask_docs = True
 		else:
 			cp_exists = False
@@ -3154,7 +3151,6 @@ class depgraph(object):
 
 		if mask_docs:
 			show_mask_docs()
-			writemsg_stdout("\n", noiselevel=-1)
 
 	def _iter_match_pkgs_any(self, root_config, atom, onlydeps=False):
 		for db, pkg_type, built, installed, db_keys in \
@@ -6612,6 +6608,16 @@ def insert_category_into_atom(atom, category):
 def _spinner_start(spinner, myopts):
 	if spinner is None:
 		return
+	show_spinner = "--quiet" not in myopts and "--nodeps" not in myopts
+	if not show_spinner:
+		spinner.update = spinner.update_quiet
+
+	if show_spinner:
+		portage.writemsg_stdout("Calculating dependencies  ")
+
+def _spinner_start(spinner, myopts):
+	if spinner is None:
+		return
 	if "--quiet" not in myopts and \
 		("--pretend" in myopts or "--ask" in myopts or \
 		"--tree" in myopts or "--verbose" in myopts):
@@ -6662,11 +6668,11 @@ def backtrack_depgraph(settings, trees, myopts, myparams,
 	"""
 	_spinner_start(spinner, myopts)
 	try:
-		return _backtrack_depgraph(settings, trees, myopts, myparams, 
-			myaction, myfiles, spinner)
-	finally:
-		_spinner_stop(spinner)
-
+		retval = _backtrack_depgraph(settings, trees, myopts, myparams, myaction, myfiles, spinner)
+		_spinner_stop(spinner, myopts, success=retval[0])
+		return retval
+	except PackageSetNotFound:
+		_spinner_stop(spinner, myopts)
 
 def _backtrack_depgraph(settings, trees, myopts, myparams, myaction, myfiles, spinner):
 
@@ -6743,10 +6749,11 @@ def resume_depgraph(settings, trees, mtimedb, myopts, myparams, spinner):
 	"""
 	_spinner_start(spinner, myopts)
 	try:
-		return _resume_depgraph(settings, trees, mtimedb, myopts,
-			myparams, spinner)
-	finally:
-		_spinner_stop(spinner)
+		retval = _resume_depgraph(settings, trees, mtimedb, myopts, myparams, spinner)
+		_spinner_stop(spinner, myopts, success=retval[0])
+		return retval
+	except PackageSetNotFound:
+		_spinner_stop(spinner, myopts)
 
 def _resume_depgraph(settings, trees, mtimedb, myopts, myparams, spinner):
 	"""
@@ -6854,14 +6861,13 @@ def get_mask_info(root_config, cpv, pkgsettings,
 	return metadata, mreasons
 
 def show_masked_packages(masked_packages):
-	shown_licenses = set()
+	show_licenses = set()
 	shown_comments = set()
 	# Maybe there is both an ebuild and a binary. Only
 	# show one of them to avoid redundant appearance.
 	shown_cpvs = set()
-	have_eapi_mask = False
-	for (root_config, pkgsettings, cpv, repo,
-		metadata, mreasons) in masked_packages:
+	retval = { "have_eapi_mask" : False, "missing_licenses" : False }
+	for (root_config, pkgsettings, cpv, repo, metadata, mreasons) in masked_packages:
 		output_cpv = cpv
 		if repo:
 			output_cpv += _repo_separator + repo
@@ -6879,32 +6885,30 @@ def show_masked_packages(masked_packages):
 		missing_licenses = []
 		if metadata:
 			if not portage.eapi_is_supported(metadata["EAPI"]):
-				have_eapi_mask = True
+				retval["have_eapi_mask"] = True
 			try:
-				missing_licenses = \
-					pkgsettings._getMissingLicenses(
-						cpv, metadata)
+				missing_licenses = pkgsettings._getMissingLicenses( cpv, metadata)
 			except portage.exception.InvalidDependString:
-				# This will have already been reported
-				# above via mreasons.
+				# This will have already been reported above via mreasons.
 				pass
 
-		writemsg_stdout("- "+output_cpv+" (masked by: "+", ".join(mreasons)+")\n", noiselevel=-1)
+		writemsg_stdout("    "+colorize("INFORM",output_cpv)+" (masked by: "+colorize("INFORM",", ".join(mreasons))+")\n", noiselevel=-1)
 
 		if comment and comment not in shown_comments:
-			writemsg_stdout(filename + ":\n" + comment + "\n",
-				noiselevel=-1)
+			writemsg_stdout(filename + ":\n" + comment + "\n", noiselevel=-1)
 			shown_comments.add(comment)
 		portdb = root_config.trees["porttree"].dbapi
 		for l in missing_licenses:
+			show_licenses.add(l)
+			retval["missing_licenses"] = True
+	if len(show_licenses):
+		writemsg_stdout("\n>>> License text(s):\n", noiselevel=-1)
+		for l in show_licenses:	
 			l_path = portdb.findLicensePath(l)
-			if l in shown_licenses:
-				continue
-			msg = ("A copy of the '%s' license" + \
-			" is located at '%s'.\n\n") % (l, l_path)
+			msg = ("    " + colorize("INFORM",l_path) + "\n" )
 			writemsg_stdout(msg, noiselevel=-1)
-			shown_licenses.add(l)
-	return have_eapi_mask
+		writemsg_stdout("\nTo accept a license, add the license name to the ACCEPT_LICENSE setting.", noiselevel=-1)
+	return retval
 
 def show_mask_docs():
 	writemsg_stdout("For more information, see the MASKED PACKAGES section in the emerge\n", noiselevel=-1)

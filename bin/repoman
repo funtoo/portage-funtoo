@@ -1081,9 +1081,9 @@ for x in scanlist:
 			try:
 				distdir = repoman_settings['DISTDIR']
 				mf = portage.manifest.Manifest(checkdir, distdir,
-					fetchlist_dict=fetchlist_dict)
+					fetchlist_dict=fetchlist_dict, mini_manifest = "mini-manifest" in repoman_settings.features )
 				mf.create(requiredDistfiles=None,
-					assumeDistHashesAlways=True)
+					assumeDistHashesAlways=True, mini_manifest = "mini-manifest" in repoman_settings.features)
 				for distfiles in fetchlist_dict.values():
 					for distfile in distfiles:
 						if os.path.isfile(os.path.join(distdir, distfile)):
@@ -1280,7 +1280,7 @@ for x in scanlist:
 				raise
 			continue
 
-	mf = Manifest(checkdir, repoman_settings["DISTDIR"])
+	mf = Manifest(checkdir, repoman_settings["DISTDIR"], mini_manifest = "mini-manifest" in repoman_settings.features)
 	mydigests=mf.getTypeDigests("DIST")
 
 	fetchlist_dict = portage.FetchlistDict(checkdir, repoman_settings, portdb)

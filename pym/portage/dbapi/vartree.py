@@ -1928,6 +1928,7 @@ class dblink(object):
 				errno.ENOTDIR, errno.EISDIR,
 				errno.EPERM)
 			modprotect = os.path.join(self._eroot, "lib/modules/")
+			fwprotect = os.path.join(self._eroot, "lib/firmware/")
 
 			def unlink(file_name, lstatobj):
 				if bsd_chflags:
@@ -2042,7 +2043,7 @@ class dblink(object):
 				# installed instance (so they are not orphans). For normal
 				# uninstall (not rebuild/reinstall), remove the modules along
 				# with all other files (leave no orphans).
-				if obj.startswith(modprotect):
+				if obj.startswith(modprotect) or obj.startswith(fwprotect):
 					show_unmerge("---", unmerge_desc["cfgpro"], file_type, obj)
 					continue
 

@@ -23,7 +23,7 @@ ROOTPATH=${ROOTPATH##:}
 ROOTPATH=${ROOTPATH%%:}
 PREROOTPATH=${PREROOTPATH##:}
 PREROOTPATH=${PREROOTPATH%%:}
-PATH=$PORTAGE_BIN_PATH/ebuild-helpers:$PREROOTPATH${PREROOTPATH:+:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${ROOTPATH:+:}$ROOTPATH
+PATH=$PREROOTPATH${PREROOTPATH:+:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${ROOTPATH:+:}$ROOTPATH:$PORTAGE_BIN_PATH/ebuild-helpers
 export PATH
 
 # This is just a temporary workaround for portage-9999 users since
@@ -319,6 +319,46 @@ export MOPREFIX=${PN}
 declare -a PORTAGE_DOCOMPRESS=( /usr/share/{doc,info,man} )
 declare -a PORTAGE_DOCOMPRESS_SKIP=( /usr/share/doc/${PF}/html )
 
+localpatch() {
+	local patches_overlay_dir patches patch locksufix
+
+	locksufix="${RANDOM}"
+
+	LOCALPATCH_OVERLAY="${LOCALPATCH_OVERLAY:-/etc/portage/patches}"
+
+	if [ -d "${LOCALPATCH_OVERLAY}" ]; then
+		if [ -d "${LOCALPATCH_OVERLAY}/${CATEGORY}/${PN}-${PV}-${PR}" ]; then
+			patches_overlay_dir="${LOCALPATCH_OVERLAY}/${CATEGORY}/${PN}-${PV}-${PR}"
+		elif [ -d "${LOCALPATCH_OVERLAY}/${CATEGORY}/${PN}-${PV}" ]; then
+			patches_overlay_dir="${LOCALPATCH_OVERLAY}/${CATEGORY}/${PN}-${PV}"
+		elif [ -d "${LOCALPATCH_OVERLAY}/${CATEGORY}/${PN}" ]; then
+			patches_overlay_dir="${LOCALPATCH_OVERLAY}/${CATEGORY}/${PN}"
+		fi
+
+		if [ -n "${patches_overlay_dir}" ]; then patches="$(find "${patches_overlay_dir}"/ -type f -regex '.*\.\(diff\|\patch\)$' | sort -n)"; fi
+	else
+		ewarn "LOCALPATCH_OVERLAY is set to '${LOCALPATCH_OVERLAY}' but there is no such directory."
+	fi
+
+	if [ -n "${patches}" ]; then
+		for patch in ${patches}; do
+			if [ -r "${patch}" ] && [ ! -f "${S}/.patch-${patch##*/}.${locksufix}" ]; then
+				for patchprefix in {0..4}; do
+					patch -d "${S}" --dry-run -p${patchprefix} -i "${patch}" --silent > /dev/null
+					if [ "$?" = 0 ]; then
+						einfo "Applying ${patch##*/} [localpatch] ..."
+						patch -d "${S}" -p${patchprefix} -i "${patch}" --silent && touch "${S}/.patch-${patch##*/}.${locksufix}"; eend $?; break
+					elif [ "${patchprefix}" -ge 4 ]; then
+						eerror "\e[1;31mLocal patch ${patch##*/} does not fit.\e[0m"; eend 1; die "localpatch failed."
+					fi
+				done
+			fi
+		done
+
+		rm "${S}"/.patch-*."${locksufix}" -f
+	fi
+}
+
 # adds ".keep" files so that dirs aren't auto-cleaned
 keepdir() {
 	dodir "$@"
@@ -519,74 +559,74 @@ econf() {
 
 		# if the profile defines a location to install libs to aside from default, pass it on.
 		# if the ebuild passes in --libdir, they're responsible for the conf_libdir fun.
-		local CONF_LIBDIR LIBDIR_VAR="LIBDIR_${ABI}"
-		if [[ -n ${ABI} && -n ${!LIBDIR_VAR} ]] ; then
-			CONF_LIBDIR=${!LIBDIR_VAR}
-		fi
-		if [[ -n ${CONF_LIBDIR} ]] && ! hasgq --libdir=\* "$@" ; then
-			export CONF_PREFIX=$(hasg --exec-prefix=\* "$@")
-			[[ -z ${CONF_PREFIX} ]] && CONF_PREFIX=$(hasg --prefix=\* "$@")
-			: ${CONF_PREFIX:=/usr}
-			CONF_PREFIX=${CONF_PREFIX#*=}
-			[[ ${CONF_PREFIX} != /* ]] && CONF_PREFIX="/${CONF_PREFIX}"
-			[[ ${CONF_LIBDIR} != /* ]] && CONF_LIBDIR="/${CONF_LIBDIR}"
-			set -- --libdir="$(strip_duplicate_slashes ${CONF_PREFIX}${CONF_LIBDIR})" "$@"
-		fi
-
-		set -- \
-			--prefix=/usr \
-			${CBUILD:+--build=${CBUILD}} \
-			--host=${CHOST} \
-			${CTARGET:+--target=${CTARGET}} \
-			--mandir=/usr/share/man \
-			--infodir=/usr/share/info \
-			--datadir=/usr/share \
-			--sysconfdir=/etc \
-			--localstatedir=/var/lib \
-			"$@" \
-			${EXTRA_ECONF}
-		vecho "${ECONF_SOURCE}/configure" "$@"
-
-		if ! "${ECONF_SOURCE}/configure" "$@" ; then
-
-			if [ -s config.log ]; then
-				echo
-				echo "!!! Please attach the following file when seeking support:"
-				echo "!!! ${PWD}/config.log"
-			fi
-			die "econf failed"
-		fi
-	elif [ -f "${ECONF_SOURCE}/configure" ]; then
-		die "configure is not executable"
-	else
-		die "no configure script found"
+	local CONF_LIBDIR LIBDIR_VAR="LIBDIR_${ABI}"
+	if [[ -n ${ABI} && -n ${!LIBDIR_VAR} ]] ; then
+		CONF_LIBDIR=${!LIBDIR_VAR}
 	fi
+	if [[ -n ${CONF_LIBDIR} ]] && ! hasgq --libdir=\* "$@" ; then
+		export CONF_PREFIX=$(hasg --exec-prefix=\* "$@")
+		[[ -z ${CONF_PREFIX} ]] && CONF_PREFIX=$(hasg --prefix=\* "$@")
+		: ${CONF_PREFIX:=/usr}
+		CONF_PREFIX=${CONF_PREFIX#*=}
+		[[ ${CONF_PREFIX} != /* ]] && CONF_PREFIX="/${CONF_PREFIX}"
+		[[ ${CONF_LIBDIR} != /* ]] && CONF_LIBDIR="/${CONF_LIBDIR}"
+		set -- --libdir="$(strip_duplicate_slashes ${CONF_PREFIX}${CONF_LIBDIR})" "$@"
+	fi
+
+	set -- \
+		--prefix=/usr \
+		${CBUILD:+--build=${CBUILD}} \
+		--host=${CHOST} \
+		${CTARGET:+--target=${CTARGET}} \
+		--mandir=/usr/share/man \
+		--infodir=/usr/share/info \
+		--datadir=/usr/share \
+		--sysconfdir=/etc \
+		--localstatedir=/var/lib \
+		"$@" \
+		${EXTRA_ECONF}
+	vecho "${ECONF_SOURCE}/configure" "$@"
+
+	if ! "${ECONF_SOURCE}/configure" "$@" ; then
+
+		if [ -s config.log ]; then
+			echo
+			echo "!!! Please attach the following file when seeking support:"
+			echo "!!! ${PWD}/config.log"
+		fi
+		die "econf failed"
+	fi
+elif [ -f "${ECONF_SOURCE}/configure" ]; then
+	die "configure is not executable"
+else
+	die "no configure script found"
+fi
 }
 
 einstall() {
-	# CONF_PREFIX is only set if they didn't pass in libdir above.
-	local LOCAL_EXTRA_EINSTALL="${EXTRA_EINSTALL}"
-	LIBDIR_VAR="LIBDIR_${ABI}"
-	if [ -n "${ABI}" -a -n "${!LIBDIR_VAR}" ]; then
-		CONF_LIBDIR="${!LIBDIR_VAR}"
-	fi
-	unset LIBDIR_VAR
-	if [ -n "${CONF_LIBDIR}" ] && [ "${CONF_PREFIX:+set}" = set ]; then
-		EI_DESTLIBDIR="${D}/${CONF_PREFIX}/${CONF_LIBDIR}"
-		EI_DESTLIBDIR="$(strip_duplicate_slashes ${EI_DESTLIBDIR})"
-		LOCAL_EXTRA_EINSTALL="libdir=${EI_DESTLIBDIR} ${LOCAL_EXTRA_EINSTALL}"
-		unset EI_DESTLIBDIR
-	fi
+# CONF_PREFIX is only set if they didn't pass in libdir above.
+local LOCAL_EXTRA_EINSTALL="${EXTRA_EINSTALL}"
+LIBDIR_VAR="LIBDIR_${ABI}"
+if [ -n "${ABI}" -a -n "${!LIBDIR_VAR}" ]; then
+	CONF_LIBDIR="${!LIBDIR_VAR}"
+fi
+unset LIBDIR_VAR
+if [ -n "${CONF_LIBDIR}" ] && [ "${CONF_PREFIX:+set}" = set ]; then
+	EI_DESTLIBDIR="${D}/${CONF_PREFIX}/${CONF_LIBDIR}"
+	EI_DESTLIBDIR="$(strip_duplicate_slashes ${EI_DESTLIBDIR})"
+	LOCAL_EXTRA_EINSTALL="libdir=${EI_DESTLIBDIR} ${LOCAL_EXTRA_EINSTALL}"
+	unset EI_DESTLIBDIR
+fi
 
-	if [ -f ./[mM]akefile -o -f ./GNUmakefile ] ; then
-		if [ "${PORTAGE_DEBUG}" == "1" ]; then
-			${MAKE:-make} -n prefix="${D}usr" \
-				datadir="${D}usr/share" \
-				infodir="${D}usr/share/info" \
-				localstatedir="${D}var/lib" \
-				mandir="${D}usr/share/man" \
-				sysconfdir="${D}etc" \
-				${LOCAL_EXTRA_EINSTALL} \
+if [ -f ./[mM]akefile -o -f ./GNUmakefile ] ; then
+	if [ "${PORTAGE_DEBUG}" == "1" ]; then
+		${MAKE:-make} -n prefix="${D}usr" \
+			datadir="${D}usr/share" \
+			infodir="${D}usr/share/info" \
+			localstatedir="${D}var/lib" \
+			mandir="${D}usr/share/man" \
+			sysconfdir="${D}etc" \
+			${LOCAL_EXTRA_EINSTALL} \
 				${MAKEOPTS} ${EXTRA_EMAKE} -j1 \
 				"$@" install
 		fi
@@ -1009,6 +1049,7 @@ dyn_prepare() {
 
 	ebuild_phase pre_src_prepare
 	vecho ">>> Preparing source in $PWD ..."
+	if hasq localpatch ${FEATURES}; then localpatch; fi
 	ebuild_phase src_prepare
 	>> "$PORTAGE_BUILDDIR/.prepared" || \
 		die "Failed to create $PORTAGE_BUILDDIR/.prepared"
@@ -1716,7 +1757,7 @@ source_all_bashrcs() {
 	# own peril.  This is the ONLY non-portage bit of code that can change shopts
 	# without a QA violation.
 	for x in "${PORTAGE_BASHRC}" "${PM_EBUILD_HOOK_DIR}"/${CATEGORY}/{${PN},${PN}:${SLOT},${P},${PF}}; do
-		if [ -r "${x}" ]; then
+		if [ -r "${x}" ] && [ ! -d "${x}" ]; then
 			# If $- contains x, then tracing has already enabled elsewhere for some
 			# reason.  We preserve it's state so as not to interfere.
 			if [ "$PORTAGE_DEBUG" != "1" ] || [ "${-/x/}" != "$-" ]; then
@@ -1738,7 +1779,7 @@ source_all_bashrcs() {
 # of ebuild.sh will work for pkg_postinst, pkg_prerm, and pkg_postrm
 # when portage is upgrading itself.
 
-PORTAGE_READONLY_METADATA="DEFINED_PHASES DEPEND DESCRIPTION
+PORTAGE_READONLY_METADATA="DEFINED_PHASES DESCRIPTION
 	EAPI HOMEPAGE INHERITED IUSE REQUIRED_USE KEYWORDS LICENSE
 	PDEPEND PROVIDE RDEPEND RESTRICT SLOT SRC_URI"
 
@@ -2199,6 +2240,15 @@ ebuild_main() {
 	export EBUILD_MASTER_PID=$BASHPID
 	trap 'exit 1' SIGTERM
 
+	# auto-add xz-utils to DEPEND if we have a file that requires it.
+	if [ "${SRC_URI/\.xz/}" != "${SRC_URI}" ]
+	then
+		if [ "${DEPEND/app-arch\/xz-utils/}" = "${DEPEND}" ]
+		then
+			DEPEND="$DEPEND app-arch/xz-utils"
+		fi
+	fi
+
 	if [[ $EBUILD_PHASE != depend ]] ; then
 		# Force configure scripts that automatically detect ccache to
 		# respect FEATURES="-ccache".
@@ -2340,11 +2390,21 @@ ebuild_main() {
 		if [ -n "${dbkey}" ] ; then
 			> "${dbkey}"
 			for f in ${auxdbkeys} ; do
-				echo $(echo ${!f}) >> "${dbkey}" || exit $?
+				if [ "${dbkey_format}" == "extend-1" ]
+				then
+					echo $(echo ${f}:${!f}) >> "${dbkey}" || exit $?
+				else
+					echo $(echo ${!f}) >> "${dbkey}" || exit $?
+				fi
 			done
 		else
 			for f in ${auxdbkeys} ; do
-				echo $(echo ${!f}) 1>&9 || exit $?
+				if [ "${dbkey_format}" == "extend-1" ]
+				then
+					echo $(echo ${f}:${!f}) 1>&9 || exit $?
+				else
+					echo $(echo ${!f}) 1>&9 || exit $?
+				fi
 			done
 			exec 9>&-
 		fi
