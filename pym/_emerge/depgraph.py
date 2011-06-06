@@ -5663,7 +5663,7 @@ def backtrack_depgraph(settings, trees, myopts, myparams,
 		retval = _backtrack_depgraph(settings, trees, myopts, myparams, myaction, myfiles, spinner)
 		_spinner_stop(spinner, myopts, success=retval[0])
 		return retval
-	except PackageSetNotFound:
+	except portage.exception.PackageSetNotFound:
 		_spinner_stop(spinner, myopts)
 
 def _backtrack_depgraph(settings, trees, myopts, myparams, myaction, myfiles, spinner):
@@ -5722,7 +5722,7 @@ def resume_depgraph(settings, trees, mtimedb, myopts, myparams, spinner):
 		retval = _resume_depgraph(settings, trees, mtimedb, myopts, myparams, spinner)
 		_spinner_stop(spinner, myopts, success=retval[0])
 		return retval
-	except PackageSetNotFound:
+	except portage.exception.PackageSetNotFound:
 		_spinner_stop(spinner, myopts)
 
 def _resume_depgraph(settings, trees, mtimedb, myopts, myparams, spinner):
