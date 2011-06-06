@@ -39,10 +39,9 @@ from portage.data import portage_gid, portage_uid, secpass, \
 	uid, userpriv_groups
 from portage.dbapi.porttree import _parse_uri_map
 from portage.dbapi.virtual import fakedbapi
-from portage.dep import Atom, check_required_use, \
-	human_readable_required_use, paren_enclose, use_reduce
+from portage.dep import Atom, paren_enclose, use_reduce
 from portage.eapi import eapi_exports_KV, eapi_exports_merge_type, \
-	eapi_exports_replace_vars, eapi_has_required_use, \
+	eapi_exports_replace_vars, \
 	eapi_has_src_prepare_and_src_configure, eapi_has_pkg_pretend
 from portage.elog import elog_process
 from portage.elog.messages import eerror, eqawarn
@@ -281,12 +280,9 @@ def doebuild_environment(myebuild, mydo, myroot=None, settings=None,
 	if portage_bin_path not in mysplit:
 		mysettings["PATH"] = portage_bin_path + ":" + mysettings["PATH"]
 
-	# All temporary directories should be subdirectories of
-	# $PORTAGE_TMPDIR/portage, since it's common for /tmp and /var/tmp
-	# to be mounted with the "noexec" option (see bug #346899).
 	mysettings["BUILD_PREFIX"] = mysettings["PORTAGE_TMPDIR"]+"/portage"
-	mysettings["PKG_TMPDIR"]   = mysettings["BUILD_PREFIX"]+"/._unmerge_"
-
+	mysettings["PKG_TMPDIR"]   = mysettings["PORTAGE_TMPDIR"]+"/binpkgs"
+	
 	# Package {pre,post}inst and {pre,post}rm may overlap, so they must have separate
 	# locations in order to prevent interference.
 	if mydo in ("unmerge", "prerm", "postrm", "cleanrm"):
@@ -741,12 +737,6 @@ def doebuild(myebuild, mydo, myroot, mysettings, debug=0, listonly=0,
 			if not fetch(fetchme, mysettings, listonly=listonly,
 				fetchonly=fetchonly):
 				spawn_nofetch(mydbapi, myebuild, settings=mysettings)
-				if listonly:
-					# The convention for listonly mode is to report
-					# success in any case, even though fetch() may
-					# return unsuccessfully in order to trigger the
-					# nofetch phase.
-					return 0
 				return 1
 
 		if mydo == "fetch":
@@ -786,7 +776,7 @@ def doebuild(myebuild, mydo, myroot, mysettings, debug=0, listonly=0,
 		# remove PORTAGE_ACTUAL_DISTDIR once cvs/svn is supported via SRC_URI
 		if tree == 'porttree' and \
 			((mydo != "setup" and "noauto" not in features) \
-			or mydo in ("install", "unpack")):
+			or mydo == "unpack"):
 			_prepare_fake_distdir(mysettings, alist)
 
 		#initial dep checks complete; time to process main commands
@@ -1058,30 +1048,6 @@ def _validate_deps(mysettings, myroot, mydo, mydbapi):
 			portage.util.writemsg_level(x,
 				level=logging.ERROR, noiselevel=-1)
 		if mydo not in invalid_dep_exempt_phases:
-			return 1
-
-	if not pkg.built and \
-		mydo not in ("digest", "help", "manifest") and \
-		pkg.metadata["REQUIRED_USE"] and \
-		eapi_has_required_use(pkg.metadata["EAPI"]):
-		result = check_required_use(pkg.metadata["REQUIRED_USE"],
-			pkg.use.enabled, pkg.iuse.is_valid_flag)
-		if not result:
-			reduced_noise = result.tounicode()
-			writemsg("\n  %s\n" % _("The following REQUIRED_USE flag" + \
-				" constraints are unsatisfied:"), noiselevel=-1)
-			writemsg("    %s\n" % reduced_noise,
-				noiselevel=-1)
-			normalized_required_use = \
-				" ".join(pkg.metadata["REQUIRED_USE"].split())
-			if reduced_noise != normalized_required_use:
-				writemsg("\n  %s\n" % _("The above constraints " + \
-					"are a subset of the following complete expression:"),
-					noiselevel=-1)
-				writemsg("    %s\n" % \
-					human_readable_required_use(normalized_required_use),
-					noiselevel=-1)
-			writemsg("\n", noiselevel=-1)
 			return 1
 
 	return os.EX_OK

@@ -1,10 +1,9 @@
-# Copyright 1999-2011 Gentoo Foundation
+# Copyright 1999-2009 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 from portage import os
 from portage.output import colorize
 
-from _emerge.AsynchronousTask import AsynchronousTask
 from _emerge.Binpkg import Binpkg
 from _emerge.CompositeTask import CompositeTask
 from _emerge.EbuildBuild import EbuildBuild
@@ -104,11 +103,23 @@ class MergeListItem(CompositeTask):
 			self._start_task(binpkg, self._default_final_exit)
 			return
 
-	def create_install_task(self):
+	def _poll(self):
+		self._install_task.poll()
+		return self.returncode
+
+	def _wait(self):
+		self._install_task.wait()
+		return self.returncode
+
+	def merge(self):
 
 		pkg = self.pkg
 		build_opts = self.build_opts
+		find_blockers = self.find_blockers
+		logger = self.logger
 		mtimedb = self.mtimedb
+		pkg_count = self.pkg_count
+		prefetcher = self.prefetcher
 		scheduler = self.scheduler
 		settings = self.settings
 		world_atom = self.world_atom
@@ -118,18 +129,21 @@ class MergeListItem(CompositeTask):
 			if not (build_opts.buildpkgonly or \
 				build_opts.fetchonly or build_opts.pretend):
 
-				task = PackageUninstall(background=self.background,
+				uninstall = PackageUninstall(background=self.background,
 					ldpath_mtimes=ldpath_mtimes, opts=self.emerge_opts,
 					pkg=pkg, scheduler=scheduler, settings=settings,
 					world_atom=world_atom)
 
-			else:
-				task = AsynchronousTask()
+				uninstall.start()
+				retval = uninstall.wait()
+				if retval != os.EX_OK:
+					return retval
+			return os.EX_OK
 
-		elif build_opts.fetchonly or \
+		if build_opts.fetchonly or \
 			build_opts.buildpkgonly:
-			task = AsynchronousTask()
-		else:
-			task = self._install_task.create_install_task()
+			return self.returncode
 
-		return task
+		retval = self._install_task.install()
+		return retval
+

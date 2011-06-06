@@ -66,10 +66,6 @@ class AsynchronousLock(AsynchronousTask):
 		if not self._waiting:
 			self.wait()
 
-	def _cancel(self):
-		if self._imp is not None:
-			self._imp.cancel()
-
 	def _wait(self):
 		if self.returncode is not None:
 			return self.returncode
@@ -130,10 +126,6 @@ class _LockThread(AbstractPollTask):
 			self._unregister()
 			self.returncode = os.EX_OK
 			self.wait()
-
-	def _cancel(self):
-		# There's currently no way to force thread termination.
-		pass
 
 	def _wait(self):
 		if self.returncode is not None:
@@ -205,10 +197,6 @@ class _LockProcess(AbstractPollTask):
 			# There's no good reason for locks to fail.
 			raise AssertionError('lock process failed with returncode %s' \
 				% (proc.returncode,))
-
-	def _cancel(self):
-		if self._proc is not None:
-			self._proc.cancel()
 
 	def _wait(self):
 		if self.returncode is not None:

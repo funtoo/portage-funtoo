@@ -1,4 +1,4 @@
-# Copyright 1999-2011 Gentoo Foundation
+# Copyright 1999-2010 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 import gzip
@@ -121,10 +121,9 @@ class EbuildPhase(CompositeTask):
 		# Don't open the log file during the clean phase since the
 		# open file can result in an nfs lock on $T/build.log which
 		# prevents the clean phase from removing $T.
-		logfile = None
-		if self.phase not in ("clean", "cleanrm") and \
-			self.settings.get("PORTAGE_BACKGROUND") != "subprocess":
-			logfile = self.settings.get("PORTAGE_LOG_FILE")
+		logfile = self.settings.get("PORTAGE_LOG_FILE")
+		if self.phase in ("clean", "cleanrm"):
+			logfile = None
 
 		fd_pipes = None
 		if not self.background and self.phase == 'nofetch':
@@ -152,16 +151,13 @@ class EbuildPhase(CompositeTask):
 		if not fail:
 			self.returncode = None
 
-		logfile = None
-		if self.settings.get("PORTAGE_BACKGROUND") != "subprocess":
-			logfile = self.settings.get("PORTAGE_LOG_FILE")
-
 		if self.phase == "install":
 			out = portage.StringIO()
 			_check_build_log(self.settings, out=out)
 			msg = _unicode_decode(out.getvalue(),
 				encoding=_encodings['content'], errors='replace')
-			self.scheduler.output(msg, log_path=logfile)
+			self.scheduler.output(msg,
+				log_path=self.settings.get("PORTAGE_LOG_FILE"))
 
 		if fail:
 			self._die_hooks()
@@ -177,10 +173,12 @@ class EbuildPhase(CompositeTask):
 			msg = _unicode_decode(out.getvalue(),
 				encoding=_encodings['content'], errors='replace')
 			if msg:
-				self.scheduler.output(msg, log_path=logfile)
+				self.scheduler.output(msg,
+					log_path=self.settings.get("PORTAGE_LOG_FILE"))
 
 		post_phase_cmds = _post_phase_cmds.get(self.phase)
 		if post_phase_cmds is not None:
+			logfile = settings.get("PORTAGE_LOG_FILE")
 			if logfile is not None and self.phase in ("install",):
 				# Log to a temporary file, since the code we are running
 				# reads PORTAGE_LOG_FILE for QA checks, and we want to
@@ -206,10 +204,7 @@ class EbuildPhase(CompositeTask):
 
 		self._assert_current(post_phase)
 
-		log_path = None
-		if self.settings.get("PORTAGE_BACKGROUND") != "subprocess":
-			log_path = self.settings.get("PORTAGE_LOG_FILE")
-
+		log_path = self.settings.get("PORTAGE_LOG_FILE")
 		if post_phase.logfile is not None and \
 			post_phase.logfile != log_path:
 			# We were logging to a temp file (see above), so append
@@ -298,7 +293,5 @@ class EbuildPhase(CompositeTask):
 		msg = _unicode_decode(out.getvalue(),
 			encoding=_encodings['content'], errors='replace')
 		if msg:
-			log_path = None
-			if self.settings.get("PORTAGE_BACKGROUND") != "subprocess":
-				log_path = self.settings.get("PORTAGE_LOG_FILE")
-			self.scheduler.output(msg, log_path=log_path)
+			self.scheduler.output(msg,
+				log_path=self.settings.get("PORTAGE_LOG_FILE"))

@@ -1,4 +1,4 @@
-# Copyright 1999-2011 Gentoo Foundation
+# Copyright 1999-2009 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 from __future__ import print_function
@@ -94,16 +94,11 @@ def help(myopts, havecolor=1):
 		"listed in package.provided (see portage(5)) may be removed by " + \
 		"depclean, even if they are part of the world set."
 
-		paragraph += " Also note that " + \
-			"depclean may break link level dependencies"
-
-		if _ENABLE_DYN_LINK_MAP:
-			paragraph += ", especially when the " + \
-				"--depclean-lib-check option is disabled"
-
-		paragraph += ". Thus, it is " + \
-			"recommended to use a tool such as revdep-rebuild(1) " + \
-			"in order to detect such breakage."
+		if not _ENABLE_DYN_LINK_MAP:
+			paragraph += " Also note that " + \
+				"depclean may break link level dependencies. Thus, it is " + \
+				"recommended to use a tool such as revdep-rebuild(1) " + \
+				"in order to detect such breakage."
 
 		for line in wrap(paragraph, desc_width):
 			print(desc_indent + line)
@@ -270,9 +265,7 @@ def help(myopts, havecolor=1):
 		print("              With this option, output such as USE=\"dar -bar -foo\" will instead")
 		print("              be displayed as USE=\"-bar dar -foo\"")
 		print()
-		print("       " + green("--ask") + \
-			" [ %s | %s ] (%s short option)" % \
-			(turquoise("y"), turquoise("n"), green("-a")))
+		print("       "+green("--ask")+" ("+green("-a")+" short option)")
 		desc = "Before performing the action, display what will take place (server info for " + \
 			"--sync, --pretend output for merge, and so forth), then ask " + \
 			"whether to proceed with the action or abort.  Using --ask is more " + \
@@ -505,10 +498,7 @@ def help(myopts, havecolor=1):
 		print("       "+green("--newuse")+" ("+green("-N")+" short option)")
 		desc = "Tells emerge to include installed packages where USE " + \
 			"flags have changed since compilation. This option " + \
-			"also implies the --selective option. If you would " + \
-			"like to skip rebuilds for which disabled flags have " + \
-			"been added to or removed from IUSE, see the related " + \
-			"--reinstall=changed-use option."
+			"also implies the --selective option."
 		for line in wrap(desc, desc_width):
 			print(desc_indent + line)
 		print()
@@ -570,14 +560,11 @@ def help(myopts, havecolor=1):
 		print("              printed out accompanied by a '+' for enabled and a '-' for")
 		print("              disabled USE flags.")
 		print()
-		print("       " + green("--quiet") + \
-			" [ %s | %s ] (%s short option)" % \
-			(turquoise("y"), turquoise("n"), green("-q")))
+		print("       "+green("--quiet")+" ("+green("-q")+" short option)")
 		print("              Effects vary, but the general outcome is a reduced or condensed")
 		print("              output from portage's displays.")
 		print()
-		print("       " + green("--quiet-build") + \
-			" [ %s | %s ]" % (turquoise("y"), turquoise("n")))
+		print("       "+green("--quiet-build"))
 		desc = "Redirect all build output to logs alone, and do not " + \
 			"display it on stdout."
 		for line in wrap(desc, desc_width):

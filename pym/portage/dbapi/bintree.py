@@ -1,4 +1,4 @@
-# Copyright 1998-2011 Gentoo Foundation
+# Copyright 1998-2010 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 __all__ = ["bindbapi", "binarytree"]
@@ -224,7 +224,9 @@ class binarytree(object):
 			self.populated = 0
 			self.tree = {}
 			self._remote_has_index = False
+			self._remote_base_uri = None
 			self._remotepkgs = None # remote metadata indexed by cpv
+			self.__remotepkgs = {}  # indexed by tbz2 name (deprecated)
 			self.invalids = []
 			self.settings = settings
 			self._pkg_paths = {}
@@ -240,7 +242,7 @@ class binarytree(object):
 				["BUILD_TIME", "CHOST", "DEPEND", "DESCRIPTION", "EAPI",
 				"IUSE", "KEYWORDS", "LICENSE", "PDEPEND", "PROPERTIES",
 				"PROVIDE", "RDEPEND", "repository", "SLOT", "USE", "DEFINED_PHASES",
-				"REQUIRED_USE", "BASE_URI"]
+				"REQUIRED_USE"]
 			self._pkgindex_aux_keys = list(self._pkgindex_aux_keys)
 			self._pkgindex_use_evaluated_keys = \
 				("LICENSE", "RDEPEND", "DEPEND",
@@ -726,11 +728,8 @@ class binarytree(object):
 			writemsg(_("!!! PORTAGE_BINHOST unset, but use is requested.\n"),
 				noiselevel=-1)
 
-		if not getbinpkgs or 'PORTAGE_BINHOST' not in self.settings:
-			self.populated=1
-			return
-		self._remotepkgs = {}
-		for base_url in self.settings["PORTAGE_BINHOST"].split():
+		if getbinpkgs and 'PORTAGE_BINHOST' in self.settings:
+			base_url = self.settings["PORTAGE_BINHOST"]
 			parsed_url = urlparse(base_url)
 			host = parsed_url.netloc
 			port = parsed_url.port
@@ -770,9 +769,8 @@ class binarytree(object):
 				# urlparse.urljoin() only works correctly with recognized
 				# protocols and requires the base url to have a trailing
 				# slash, so join manually...
-				url = base_url.rstrip("/") + "/Packages"
 				try:
-					f = urllib_request_urlopen(url)
+					f = urllib_request_urlopen(base_url.rstrip("/") + "/Packages")
 				except IOError:
 					path = parsed_url.path.rstrip("/") + "/Packages"
 
@@ -797,18 +795,7 @@ class binarytree(object):
 							stdout=subprocess.PIPE)
 						f = proc.stdout
 					else:
-						setting = 'FETCHCOMMAND_' + parsed_url.scheme.upper()
-						fcmd = self.settings.get(setting)
-						if not fcmd:
-							raise
-						fd, tmp_filename = tempfile.mkstemp()
-						tmp_dirname, tmp_basename = os.path.split(tmp_filename)
-						os.close(fd)
-						success = portage.getbinpkg.file_get(url,
-						     tmp_dirname, fcmd=fcmd, filename=tmp_basename)
-						if not success:
-							raise EnvironmentError("%s failed" % (setting,))
-						f = open(tmp_filename, 'rb')
+						raise
 
 				f_dec = codecs.iterdecode(f,
 					_encodings['repo.content'], errors='replace')
@@ -818,8 +805,6 @@ class binarytree(object):
 					if not remote_timestamp:
 						# no timestamp in the header, something's wrong
 						pkgindex = None
-						writemsg(_("\n\n!!! Binhost package index " \
-						" has no TIMESTAMP field.\n"), noiselevel=-1)
 					else:
 						if not self._pkgindex_version_supported(rmt_idx):
 							writemsg(_("\n\n!!! Binhost package index version" \
@@ -872,14 +857,13 @@ class binarytree(object):
 					# file, but that's alright.
 			if pkgindex:
 				# Organize remote package list as a cpv -> metadata map.
-				remotepkgs = _pkgindex_cpv_map_latest_build(pkgindex)
-				remote_base_uri = pkgindex.header.get("URI", base_url)
-				for remote_metadata in remotepkgs.values():
-					remote_metadata["BASE_URI"] = remote_base_uri
-				self._remotepkgs.update(remotepkgs)
+				self._remotepkgs = _pkgindex_cpv_map_latest_build(pkgindex)
 				self._remote_has_index = True
-				for cpv in remotepkgs:
+				self._remote_base_uri = pkgindex.header.get("URI", base_url)
+				self.__remotepkgs = {}
+				for cpv in self._remotepkgs:
 					self.dbapi.cpv_inject(cpv)
+				self.populated = 1
 				if True:
 					# Remote package instances override local package
 					# if they are not identical.
@@ -909,7 +893,8 @@ class binarytree(object):
 					# Local package instances override remote instances.
 					for cpv in metadata:
 						self._remotepkgs.pop(cpv, None)
-				continue
+				return
+			self._remotepkgs = {}
 			try:
 				chunk_size = long(self.settings["PORTAGE_BINHOST_CHUNKSIZE"])
 				if chunk_size < 8:
@@ -920,17 +905,18 @@ class binarytree(object):
 			writemsg_stdout(
 				colorize("GOOD", _("Fetching bininfo from ")) + \
 				re.sub(r'//(.+):.+@(.+)/', r'//\1:*password*@\2/', base_url) + "\n")
-			remotepkgs = portage.getbinpkg.dir_get_metadata(
-				base_url, chunk_size=chunk_size)
+			self.__remotepkgs = portage.getbinpkg.dir_get_metadata(
+				self.settings["PORTAGE_BINHOST"], chunk_size=chunk_size)
+			#writemsg(green("  -- DONE!\n\n"))
 
-			for mypkg, remote_metadata in remotepkgs.items():
-				mycat = remote_metadata.get("CATEGORY")
-				if mycat is None:
+			for mypkg in list(self.__remotepkgs):
+				if "CATEGORY" not in self.__remotepkgs[mypkg]:
 					#old-style or corrupt package
 					writemsg(_("!!! Invalid remote binary package: %s\n") % mypkg,
 						noiselevel=-1)
+					del self.__remotepkgs[mypkg]
 					continue
-				mycat = mycat.strip()
+				mycat = self.__remotepkgs[mypkg]["CATEGORY"].strip()
 				fullpkg = mycat+"/"+mypkg[:-5]
 
 				if fullpkg in metadata:
@@ -952,9 +938,9 @@ class binarytree(object):
 				try:
 					# invalid tbz2's can hurt things.
 					self.dbapi.cpv_inject(fullpkg)
+					remote_metadata = self.__remotepkgs[mypkg]
 					for k, v in remote_metadata.items():
 						remote_metadata[k] = v.strip()
-					remote_metadata["BASE_URI"] = base_url
 
 					# Eliminate metadata values with names that digestCheck
 					# uses, since they are not valid when using the old
@@ -972,6 +958,7 @@ class binarytree(object):
 				except:
 					writemsg(_("!!! Failed to inject remote binary package: %s\n") % fullpkg,
 						noiselevel=-1)
+					del self.__remotepkgs[mypkg]
 					continue
 		self.populated=1
 
@@ -1246,8 +1233,7 @@ class binarytree(object):
 			rel_url = self._remotepkgs[pkgname].get("PATH")
 			if not rel_url:
 				rel_url = pkgname+".tbz2"
-			remote_base_uri = self._remotepkgs[pkgname]["BASE_URI"]
-			url = remote_base_uri.rstrip("/") + "/" + rel_url.lstrip("/")
+			url = self._remote_base_uri.rstrip("/") + "/" + rel_url.lstrip("/")
 		else:
 			url = self.settings["PORTAGE_BINHOST"].rstrip("/") + "/" + tbz2name
 		protocol = urlparse(url)[0]
