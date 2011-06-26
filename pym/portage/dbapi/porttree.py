@@ -577,7 +577,7 @@ class portdbapi(dbapi):
 		if myebuild is None:
 			raise AssertionError(_("ebuild not found for '%s'") % mypkg)
 		pkgdir = os.path.dirname(myebuild)
-		mf = Manifest(pkgdir, self.settings["DISTDIR"])
+		mf = Manifest(pkgdir, self.settings["DISTDIR"], mini_manifest = "mini-manifest" in self.settings.features)
 		checksums = mf.getDigests()
 		if not checksums:
 			if debug: 
@@ -645,7 +645,7 @@ class portdbapi(dbapi):
 		if myebuild is None:
 			raise AssertionError(_("ebuild not found for '%s'") % mypkg)
 		pkgdir = os.path.dirname(myebuild)
-		mf = Manifest(pkgdir, self.settings["DISTDIR"])
+		mf = Manifest(pkgdir, self.settings["DISTDIR"], mini_manifest = "mini-manifest" in self.settings.features)
 		mysums = mf.getDigests()
 
 		failures = {}

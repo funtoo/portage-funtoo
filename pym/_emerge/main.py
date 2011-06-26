@@ -38,7 +38,7 @@ from portage._global_updates import _global_updates
 
 from _emerge.actions import action_config, action_sync, action_metadata, \
 	action_regen, action_search, action_uninstall, action_info, action_build, \
-	adjust_configs, chk_updated_cfg_files, display_missing_pkg_set, \
+	adjust_configs, chk_updated_cfg_files, pw_grp_conv, display_missing_pkg_set, \
 	display_news_notification, getportageversion, load_emerge_config
 import _emerge
 from _emerge.emergelog import emergelog
@@ -371,6 +371,8 @@ def post_emerge(myaction, myopts, myfiles,
 				vardbapi.unlock()
 
 	chk_updated_cfg_files(settings['EROOT'], config_protect)
+
+	pw_grp_conv(settings['EROOT'])
 
 	display_news_notification(root_config, myopts)
 	if retval in (None, os.EX_OK) or (not "--pretend" in myopts):

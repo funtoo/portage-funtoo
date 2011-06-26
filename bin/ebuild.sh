@@ -23,8 +23,8 @@ ROOTPATH=${ROOTPATH##:}
 ROOTPATH=${ROOTPATH%%:}
 PREROOTPATH=${PREROOTPATH##:}
 PREROOTPATH=${PREROOTPATH%%:}
-PATH=$PORTAGE_BIN_PATH/ebuild-helpers:$PREROOTPATH${PREROOTPATH:+:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${ROOTPATH:+:}$ROOTPATH
-export PATH
+PATH=$PREROOTPATH${PREROOTPATH:+:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${ROOTPATH:+:}$ROOTPATH:$PORTAGE_BIN_PATH/ebuild-helpers
+ export PATH
 
 # This is just a temporary workaround for portage-9999 users since
 # earlier portage versions do not detect a version change in this case
@@ -318,6 +318,46 @@ export DIROPTIONS="-m0755"
 export MOPREFIX=${PN}
 declare -a PORTAGE_DOCOMPRESS=( /usr/share/{doc,info,man} )
 declare -a PORTAGE_DOCOMPRESS_SKIP=( /usr/share/doc/${PF}/html )
+
+localpatch() {
+	local patches_overlay_dir patches patch locksufix
+
+	locksufix="${RANDOM}"
+
+	LOCALPATCH_OVERLAY="${LOCALPATCH_OVERLAY:-/etc/portage/patches}"
+
+	if [ -d "${LOCALPATCH_OVERLAY}" ]; then
+		if [ -d "${LOCALPATCH_OVERLAY}/${CATEGORY}/${PN}-${PV}-${PR}" ]; then
+			patches_overlay_dir="${LOCALPATCH_OVERLAY}/${CATEGORY}/${PN}-${PV}-${PR}"
+		elif [ -d "${LOCALPATCH_OVERLAY}/${CATEGORY}/${PN}-${PV}" ]; then
+			patches_overlay_dir="${LOCALPATCH_OVERLAY}/${CATEGORY}/${PN}-${PV}"
+		elif [ -d "${LOCALPATCH_OVERLAY}/${CATEGORY}/${PN}" ]; then
+			patches_overlay_dir="${LOCALPATCH_OVERLAY}/${CATEGORY}/${PN}"
+		fi
+
+		if [ -n "${patches_overlay_dir}" ]; then patches="$(find "${patches_overlay_dir}"/ -type f -regex '.*\.\(diff\|\patch\)$' | sort -n)"; fi
+	else
+		ewarn "LOCALPATCH_OVERLAY is set to '${LOCALPATCH_OVERLAY}' but there is no such directory."
+	fi
+
+	if [ -n "${patches}" ]; then
+		for patch in ${patches}; do
+			if [ -r "${patch}" ] && [ ! -f "${S}/.patch-${patch##*/}.${locksufix}" ]; then
+				for patchprefix in {0..4}; do
+					patch -d "${S}" --dry-run -p${patchprefix} -i "${patch}" --silent > /dev/null
+					if [ "$?" = 0 ]; then
+						einfo "Applying ${patch##*/} [localpatch] ..."
+						patch -d "${S}" -p${patchprefix} -i "${patch}" --silent && touch "${S}/.patch-${patch##*/}.${locksufix}"; eend $?; break
+					elif [ "${patchprefix}" -ge 4 ]; then
+						eerror "\e[1;31mLocal patch ${patch##*/} does not fit.\e[0m"; eend 1; die "localpatch failed."
+					fi
+				done
+			fi
+		done
+
+		rm "${S}"/.patch-*."${locksufix}" -f
+	fi
+}
 
 # adds ".keep" files so that dirs aren't auto-cleaned
 keepdir() {
@@ -1009,6 +1049,7 @@ dyn_prepare() {
 
 	ebuild_phase pre_src_prepare
 	vecho ">>> Preparing source in $PWD ..."
+	if hasq localpatch ${FEATURES}; then localpatch; fi
 	ebuild_phase src_prepare
 	>> "$PORTAGE_BUILDDIR/.prepared" || \
 		die "Failed to create $PORTAGE_BUILDDIR/.prepared"
@@ -1716,7 +1757,7 @@ source_all_bashrcs() {
 	# own peril.  This is the ONLY non-portage bit of code that can change shopts
 	# without a QA violation.
 	for x in "${PORTAGE_BASHRC}" "${PM_EBUILD_HOOK_DIR}"/${CATEGORY}/{${PN},${PN}:${SLOT},${P},${PF}}; do
-		if [ -r "${x}" ]; then
+		if [ -r "${x}" ] && [ ! -d "${x}" ]; then
 			# If $- contains x, then tracing has already enabled elsewhere for some
 			# reason.  We preserve it's state so as not to interfere.
 			if [ "$PORTAGE_DEBUG" != "1" ] || [ "${-/x/}" != "$-" ]; then

@@ -54,7 +54,7 @@ def digestgen(myarchives=None, mysettings=None, myportdb=None):
 		mytree = os.path.dirname(os.path.dirname(mysettings["O"]))
 		manifest1_compat = False
 		mf = Manifest(mysettings["O"], mysettings["DISTDIR"],
-			fetchlist_dict=fetchlist_dict, manifest1_compat=manifest1_compat)
+			fetchlist_dict=fetchlist_dict, manifest1_compat=manifest1_compat, mini_manifest="mini-manifest" in mysettings.features)
 		# Don't require all hashes since that can trigger excessive
 		# fetches when sufficient digests already exist.  To ease transition
 		# while Manifest 1 is being removed, only require hashes that will
@@ -161,7 +161,7 @@ def digestgen(myarchives=None, mysettings=None, myportdb=None):
 		try:
 			mf.create(assumeDistHashesSometimes=True,
 				assumeDistHashesAlways=(
-				"assume-digests" in mysettings.features))
+				"assume-digests" in mysettings.features), mini_manifest = "mini-manifest" in mysettings.features)
 		except FileNotFound as e:
 			writemsg(_("!!! File %s doesn't exist, can't update "
 				"Manifest\n") % e, noiselevel=-1)

@@ -221,10 +221,7 @@ def help(myopts, havecolor=1):
 		desc = "This updates the portage tree that is located in the " + \
 			"directory that the PORTDIR variable refers to (default " + \
 			"location is /usr/portage). The SYNC variable specifies " + \
-			"the remote URI from which files will be synchronized. " + \
-			"The PORTAGE_SYNC_STALE variable configures " + \
-			"warnings that are shown when emerge --sync has not " + \
-			"been executed recently."
+			"the remote URI from which files will be synchronized. "
 		for line in wrap(desc, desc_width):
 			print(desc_indent + line)
 		print()
@@ -234,13 +231,6 @@ def help(myopts, havecolor=1):
 			"variable refers to (default location is /usr/portage). " + \
 			"For more information, see the PORTDIR documentation in " + \
 			"the make.conf(5) man page."
-		for line in wrap(desc, desc_width):
-			print(desc_indent + line)
-		print()
-		print(desc_indent + green("NOTE:"))
-		desc = "The emerge-webrsync program will download the entire " + \
-			"portage tree as a tarball, which is much faster than emerge " + \
-			"--sync for first time syncs."
 		for line in wrap(desc, desc_width):
 			print(desc_indent + line)
 		print()

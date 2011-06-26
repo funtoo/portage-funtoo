@@ -256,8 +256,9 @@ class RepoConfigLoader(object):
 							base_priority += 1
 
 					else:
-						writemsg(_("!!! Invalid PORTDIR_OVERLAY"
-							" (not a dir): '%s'\n") % ov, noiselevel=-1)
+						if os.path.exists(ov):
+							writemsg(_("!!! Invalid PORTDIR_OVERLAY"
+								" (not a dir): '%s'\n") % ov, noiselevel=-1)
 
 			return portdir
 

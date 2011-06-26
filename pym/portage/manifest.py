@@ -93,12 +93,15 @@ class Manifest2Entry(ManifestEntry):
 class Manifest(object):
 	parsers = (parseManifest2,)
 	def __init__(self, pkgdir, distdir, fetchlist_dict=None,
-		manifest1_compat=False, from_scratch=False):
+		manifest1_compat=False, from_scratch=False, **args):
 		""" create new Manifest instance for package in pkgdir
 		    and add compability entries for old portage versions if manifest1_compat == True.
 		    Do not parse Manifest file if from_scratch == True (only for internal use)
 			The fetchlist_dict parameter is required only for generation of
 			a Manifest (not needed for parsing and checking sums)."""
+		self._mini_manifest = False
+		if "mini_manifest" in args:
+			self._mini_manifest = args["mini_manifest"]
 		self.pkgdir = _unicode_decode(pkgdir).rstrip(os.sep) + os.sep
 		self.fhashdict = {}
 		self.hashes = set()
@@ -286,7 +289,10 @@ class Manifest(object):
 	
 	def hasFile(self, ftype, fname):
 		""" Return whether the Manifest contains an entry for the given type,filename pair """
-		return (fname in self.fhashdict[ftype])
+		if self._mini_manifest and ( ftype != "DIST" ):
+			return True
+		else:
+			return (fname in self.fhashdict[ftype])
 	
 	def findFile(self, fname):
 		""" Return entrytype of the given file if present in Manifest or None if not present """
@@ -296,7 +302,7 @@ class Manifest(object):
 		return None
 	
 	def create(self, checkExisting=False, assumeDistHashesSometimes=False,
-		assumeDistHashesAlways=False, requiredDistfiles=[]):
+		assumeDistHashesAlways=False, requiredDistfiles=[], **args):
 		""" Recreate this Manifest from scratch.  This will not use any
 		existing checksums unless assumeDistHashesSometimes or
 		assumeDistHashesAlways is true (assumeDistHashesSometimes will only
@@ -305,6 +311,11 @@ class Manifest(object):
 		distfiles to raise a FileNotFound exception for (if no file or existing
 		checksums are available), and defaults to all distfiles when not
 		specified."""
+
+		mini_manifest = False
+		if "mini_manifest" in args:
+			mini_manifest = args["mini_manifest"]
+
 		if checkExisting:
 			self.checkAllHashes()
 		if assumeDistHashesSometimes or assumeDistHashesAlways:
@@ -345,29 +356,34 @@ class Manifest(object):
 						_("Package name does not "
 						"match directory name: '%s'") % cpv)
 				cpvlist.append(cpv)
+				if mini_manifest:
+					continue
 			elif manifest2MiscfileFilter(f):
 				mytype = "MISC"
+				if mini_manifest:
+					continue
 			else:
 				continue
 			self.fhashdict[mytype][f] = perform_multiple_checksums(self.pkgdir+f, self.hashes)
 		recursive_files = []
 
 		pkgdir = self.pkgdir
-		cut_len = len(os.path.join(pkgdir, "files") + os.sep)
-		for parentdir, dirs, files in os.walk(os.path.join(pkgdir, "files")):
-			for f in files:
-				try:
-					f = _unicode_decode(f,
-						encoding=_encodings['fs'], errors='strict')
-				except UnicodeDecodeError:
+		if not mini_manifest:
+			cut_len = len(os.path.join(pkgdir, "files") + os.sep)
+			for parentdir, dirs, files in os.walk(os.path.join(pkgdir, "files")):
+				for f in files:
+					try:
+						f = _unicode_decode(f,
+							encoding=_encodings['fs'], errors='strict')
+					except UnicodeDecodeError:
+						continue
+					full_path = os.path.join(parentdir, f)
+					recursive_files.append(full_path[cut_len:])
+			for f in recursive_files:
+				if not manifest2AuxfileFilter(f):
 					continue
-				full_path = os.path.join(parentdir, f)
-				recursive_files.append(full_path[cut_len:])
-		for f in recursive_files:
-			if not manifest2AuxfileFilter(f):
-				continue
-			self.fhashdict["AUX"][f] = perform_multiple_checksums(
-				os.path.join(self.pkgdir, "files", f.lstrip(os.sep)), self.hashes)
+				self.fhashdict["AUX"][f] = perform_multiple_checksums(
+					os.path.join(self.pkgdir, "files", f.lstrip(os.sep)), self.hashes)
 		distlist = set()
 		for cpv in cpvlist:
 			distlist.update(self._getCpvDistfiles(cpv))
@@ -425,6 +441,8 @@ class Manifest(object):
 			self.checkFileHashes(idtype, f, ignoreMissing=ignoreMissingFiles)
 	
 	def checkFileHashes(self, ftype, fname, ignoreMissing=False):
+		if self._mini_manifest and ftype != "DIST":
+			return True, None
 		myhashes = self.fhashdict[ftype][fname]
 		try:
 			ok,reason = verify_all(self._getAbsname(ftype, fname), self.fhashdict[ftype][fname])
@@ -439,7 +457,7 @@ class Manifest(object):
 	def checkCpvHashes(self, cpv, checkDistfiles=True, onlyDistfiles=False, checkMiscfiles=False):
 		""" check the hashes for all files associated to the given cpv, include all
 		AUX files and optionally all MISC files. """
-		if not onlyDistfiles:
+		if (not self._mini_manifest) and (not onlyDistfiles):
 			self.checkTypeHashes("AUX", ignoreMissingFiles=False)
 			if checkMiscfiles:
 				self.checkTypeHashes("MISC", ignoreMissingFiles=False)
