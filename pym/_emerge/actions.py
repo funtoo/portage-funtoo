@@ -68,7 +68,9 @@ from _emerge.unmerge import unmerge
 from _emerge.UnmergeDepPriority import UnmergeDepPriority
 from _emerge.UseFlagDisplay import pkg_use_display
 from _emerge.userquery import userquery
-from _emerge.funtoo import action_sync, pw_grp_conv
+
+from portage.const import PORTAGE_PYM_PATH
+exec(open("%s/_emerge/funtoo.py" % PORTAGE_PYM_PATH).read())
 
 if sys.hexversion >= 0x3000000:
 	long = int
