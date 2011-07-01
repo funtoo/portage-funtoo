@@ -23,8 +23,21 @@ ROOTPATH=${ROOTPATH##:}
 ROOTPATH=${ROOTPATH%%:}
 PREROOTPATH=${PREROOTPATH##:}
 PREROOTPATH=${PREROOTPATH%%:}
-PATH=$PREROOTPATH${PREROOTPATH:+:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${ROOTPATH:+:}$ROOTPATH:$PORTAGE_BIN_PATH/ebuild-helpers
- export PATH
+
+get_path() {
+	local _ebuild_helpers_path
+	case "$1" in
+		0|1|2|3)
+			_ebuild_helpers_path="$PORTAGE_BIN_PATH/ebuild-helpers"
+			;;
+		*)
+			_ebuild_helpers_path="$PORTAGE_BIN_PATH/ebuild-helpers/4:$PORTAGE_BIN_PATH/ebuild-helpers"
+			;;
+	esac
+	echo "$PREROOTPATH${PREROOTPATH:+:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${ROOTPATH:+:}$ROOTPATH:$_ebuild_helpers_path"
+}
+
+export PATH="$(get_path)"
 
 # This is just a temporary workaround for portage-9999 users since
 # earlier portage versions do not detect a version change in this case
@@ -2147,18 +2160,7 @@ if ! hasq "$EBUILD_PHASE" clean cleanrm ; then
 
 		if [[ $EBUILD_PHASE != depend ]] ; then
 
-			case "$EAPI" in
-				0|1|2|3)
-					_ebuild_helpers_path="$PORTAGE_BIN_PATH/ebuild-helpers"
-					;;
-				*)
-					_ebuild_helpers_path="$PORTAGE_BIN_PATH/ebuild-helpers/4:$PORTAGE_BIN_PATH/ebuild-helpers"
-					;;
-			esac
-
-			PATH=$_ebuild_helpers_path:$PREROOTPATH${PREROOTPATH:+:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${ROOTPATH:+:}$ROOTPATH
-			unset _ebuild_helpers_path
-
+			PATH="$(get_path $EAPI)"
 			# Use default ABI libdir in accordance with bug #355283.
 			x=LIBDIR_${DEFAULT_ABI}
 			[[ -n $DEFAULT_ABI && -n ${!x} ]] && x=${!x} || x=lib
