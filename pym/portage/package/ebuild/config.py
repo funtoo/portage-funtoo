@@ -1145,7 +1145,7 @@ class config(object):
 				repo_env.append(d)
 				cpdict = self._use_manager._repo_puse_dict.get(repo, {}).get(cp)
 				if cpdict:
-					repo_puse = ordered_by_atom_specificity(cpdict, pkg)
+					repo_puse = ordered_by_atom_specificity(cpdict, cpv_slot)
 					if repo_puse:
 						for x in repo_puse:
 							d["USE"] = d.get("USE", "") + " " + " ".join(x)
