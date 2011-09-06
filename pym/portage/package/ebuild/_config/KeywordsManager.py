@@ -207,9 +207,10 @@ class KeywordsManager(object):
 		hastesting = False
 		for gp in mygroups:
 			if gp == "*" or (gp == "-*" and len(mygroups) == 1):
-				writemsg(_("--- WARNING: Package '%(cpv)s' uses"
-					" '%(keyword)s' keyword.\n") % {"cpv": cpv, "keyword": gp},
-					 noiselevel=-1)
+				# Funtoo - disable warning for use of "*", "-*" keyword.
+				#writemsg(_("--- WARNING: Package '%(cpv)s' uses"
+				#	" '%(keyword)s' keyword.\n") % {"cpv": cpv, "keyword": gp},
+				#	 noiselevel=-1)
 				if gp == "*":
 					match = True
 					break
