@@ -6,6 +6,7 @@ __all__ = [
 ]
 
 import copy
+from itertools import chain
 import logging
 import re
 import sys
@@ -130,6 +131,7 @@ class config(object):
 	_environ_filter = special_env_vars.environ_filter
 	_environ_whitelist = special_env_vars.environ_whitelist
 	_environ_whitelist_re = special_env_vars.environ_whitelist_re
+	_global_only_vars = special_env_vars.global_only_vars
 
 	def __init__(self, clone=None, mycpv=None, config_profile_path=None,
 		config_incrementals=None, config_root=None, target_root=None,
@@ -206,6 +208,7 @@ class config(object):
 			self.repositories = clone.repositories
 			self._iuse_implicit_match = clone._iuse_implicit_match
 			self._non_user_variables = clone._non_user_variables
+			self._env_d_blacklist = clone._env_d_blacklist
 			self._repo_make_defaults = clone._repo_make_defaults
 			self.usemask = clone.usemask
 			self.useforce = clone.useforce
@@ -433,8 +436,17 @@ class config(object):
 			non_user_variables = set()
 			non_user_variables.update(profile_only_variables)
 			non_user_variables.update(self._env_blacklist)
+			non_user_variables.update(self._global_only_vars)
 			non_user_variables = frozenset(non_user_variables)
 			self._non_user_variables = non_user_variables
+
+			self._env_d_blacklist = frozenset(chain(
+				profile_only_variables,
+				self._env_blacklist,
+			))
+			env_d = self.configdict["env.d"]
+			for k in self._env_d_blacklist:
+				env_d.pop(k, None)
 
 			for k in profile_only_variables:
 				self.mygcfg.pop(k, None)
@@ -518,8 +530,10 @@ class config(object):
 			for repo in self.repositories.repos_with_profiles():
 				d = getconfig(os.path.join(repo.location, "profiles", "make.defaults"),
 					expand=self.configdict["globals"].copy()) or {}
-				for blacklisted in self._env_blacklist:
-					d.pop(blacklisted, None)
+				if d:
+					for k in chain(self._env_blacklist,
+						profile_only_variables, self._global_only_vars):
+						d.pop(k, None)
 				self._repo_make_defaults[repo.name] = d
 
 			#Read package.keywords and package.accept_keywords.
@@ -1125,7 +1139,6 @@ class config(object):
 			has_changed = True
 
 		repo_env = []
-		repo_env_empty = True
 		if repository and repository != Package.UNKNOWN_REPO:
 			repos = []
 			try:
@@ -1142,17 +1155,16 @@ class config(object):
 					# make a copy, since we might modify it with
 					# package.use settings
 					d = d.copy()
-				repo_env.append(d)
 				cpdict = self._use_manager._repo_puse_dict.get(repo, {}).get(cp)
 				if cpdict:
-					repo_puse = ordered_by_atom_specificity(cpdict, pkg)
+					repo_puse = ordered_by_atom_specificity(cpdict, cpv_slot)
 					if repo_puse:
 						for x in repo_puse:
 							d["USE"] = d.get("USE", "") + " " + " ".join(x)
 				if d:
-					repo_env_empty = False
+					repo_env.append(d)
 
-		if not repo_env_empty or self.configdict["repo"]:
+		if repo_env or self.configdict["repo"]:
 			self.configdict["repo"].clear()
 			self.configdict["repo"].update(stack_dicts(repo_env,
 				incrementals=self.incrementals))
@@ -1468,6 +1480,9 @@ class config(object):
 		@return: A matching profile atom string or None if one is not found.
 		"""
 
+		warnings.warn("The config._getProfileMaskAtom() method is deprecated.",
+			DeprecationWarning, stacklevel=2)
+
 		cp = cpv_getkey(cpv)
 		profile_atoms = self.prevmaskdict.get(cp)
 		if profile_atoms:
@@ -1705,6 +1720,8 @@ class config(object):
 		env_d = getconfig(env_d_filename, expand=False)
 		if env_d:
 			# env_d will be None if profile.env doesn't exist.
+			for k in self._env_d_blacklist:
+				env_d.pop(k, None)
 			self.configdict["env.d"].update(env_d)
 
 	def regenerate(self, useonly=0, use_cache=None):

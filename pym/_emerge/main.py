@@ -9,10 +9,6 @@ import stat
 import sys
 import textwrap
 import platform
-try:
-	from subprocess import getstatusoutput as subprocess_getstatusoutput
-except ImportError:
-	from commands import getstatusoutput as subprocess_getstatusoutput
 import portage
 from portage import os
 from portage import _encodings
@@ -32,7 +28,8 @@ import portage.exception
 from portage.data import secpass
 from portage.dbapi.dep_expand import dep_expand
 from portage.util import normalize_path as normpath
-from portage.util import shlex_split, writemsg_level, writemsg_stdout
+from portage.util import (shlex_split, varexpand,
+	writemsg_level, writemsg_stdout)
 from portage._sets import SETPREFIX
 from portage._global_updates import _global_updates
 
@@ -162,7 +159,9 @@ def chk_updated_info_files(root, infodirs, prev_mtimes, retval):
 									raise
 								del e
 					processed_count += 1
-					myso=subprocess_getstatusoutput("LANG=C LANGUAGE=C /usr/bin/install-info --dir-file="+inforoot+"/dir "+inforoot+"/"+x)[1]
+					myso = portage.subprocess_getstatusoutput(
+						"LANG=C LANGUAGE=C /usr/bin/install-info " +
+						"--dir-file=%s/dir %s/%s" % (inforoot, inforoot, x))[1]
 					existsstr="already exists, for file `"
 					if myso!="":
 						if re.search(existsstr,myso):
@@ -262,7 +261,15 @@ def display_preserved_libs(vardbapi, myopts):
 					consumer_map[f] = consumers
 					search_for_owners.update(consumers[:MAX_DISPLAY+1])
 
-			owners = vardbapi._owners.getFileOwnerMap(search_for_owners)
+			owners = {}
+			for f in search_for_owners:
+				owner_set = set()
+				for owner in linkmap.getOwners(f):
+					owner_dblink = vardbapi._dblink(owner)
+					if owner_dblink.exists():
+						owner_set.add(owner_dblink)
+				if owner_set:
+					owners[f] = owner_set
 
 		for cpv in plibdata:
 			print(colorize("WARN", ">>>") + " package: %s" % cpv)
@@ -302,7 +309,6 @@ def post_emerge(myaction, myopts, myfiles,
 	Update News Items
 	Commit mtimeDB
 	Display preserved libs warnings
-	Exit Emerge
 
 	@param myaction: The action returned from parse_opts()
 	@type myaction: String
@@ -318,9 +324,6 @@ def post_emerge(myaction, myopts, myfiles,
 	@type mtimedb: MtimeDB class instance
 	@param retval: Emerge's return value
 	@type retval: Int
-	@rype: None
-	@returns:
-	1.  Calls sys.exit(retval)
 	"""
 
 	root_config = trees[target_root]["root_config"]
@@ -351,7 +354,7 @@ def post_emerge(myaction, myopts, myfiles,
 	if not vardbapi._pkgs_changed:
 		display_news_notification(root_config, myopts)
 		# If vdb state has not changed then there's nothing else to do.
-		sys.exit(retval)
+		return
 
 	vdb_path = os.path.join(root_config.settings['EROOT'], portage.VDB_PATH)
 	portage.util.ensure_dirs(vdb_path)
@@ -388,11 +391,11 @@ def post_emerge(myaction, myopts, myfiles,
 				" %s spawn failed of %s\n" % (bad("*"), postemerge,),
 				level=logging.ERROR, noiselevel=-1)
 
+	clean_logs(settings)
+
 	if "--quiet" not in myopts and \
 		myaction is None and "@world" in myfiles:
 		show_depclean_suggestion()
-
-	sys.exit(retval)
 
 def show_depclean_suggestion():
 	out = portage.output.EOutput()
@@ -846,8 +849,7 @@ def parse_opts(tmpcmdline, silent=False):
 		},
 
 		"--selective": {
-			"help"    : "similar to the --noreplace but does not take " + \
-			            "precedence over options such as --newuse",
+			"help"    : "identical to --noreplace",
 			"type"    : "choice",
 			"choices" : true_y_or_n
 		},
@@ -1225,7 +1227,6 @@ def ionice(settings):
 	if not ionice_cmd:
 		return
 
-	from portage.util import varexpand
 	variables = {"PID" : str(os.getpid())}
 	cmd = [varexpand(x, mydict=variables) for x in ionice_cmd]
 
@@ -1240,6 +1241,35 @@ def ionice(settings):
 		out = portage.output.EOutput()
 		out.eerror("PORTAGE_IONICE_COMMAND returned %d" % (rval,))
 		out.eerror("See the make.conf(5) man page for PORTAGE_IONICE_COMMAND usage instructions.")
+
+def clean_logs(settings):
+
+	if "clean-logs" not in settings.features:
+		return
+
+	clean_cmd = settings.get("PORT_LOGDIR_CLEAN")
+	if clean_cmd:
+		clean_cmd = shlex_split(clean_cmd)
+	if not clean_cmd:
+		return
+
+	logdir = settings.get("PORT_LOGDIR")
+	if logdir is None or not os.path.isdir(logdir):
+		return
+
+	variables = {"PORT_LOGDIR" : logdir}
+	cmd = [varexpand(x, mydict=variables) for x in clean_cmd]
+
+	try:
+		rval = portage.process.spawn(cmd, env=os.environ)
+	except portage.exception.CommandNotFound:
+		rval = 127
+
+	if rval != os.EX_OK:
+		out = portage.output.EOutput()
+		out.eerror("PORT_LOGDIR_CLEAN returned %d" % (rval,))
+		out.eerror("See the make.conf(5) man page for "
+			"PORT_LOGDIR_CLEAN usage instructions.")
 
 def setconfig_fallback(root_config):
 	from portage._sets.base import DummyPackageSet
@@ -1469,10 +1499,10 @@ def profile_check(trees, myaction):
 			continue
 		# generate some profile related warning messages
 		validate_ebuild_environment(trees)
-		msg = "If you have just changed your profile configuration, you " + \
-			"should revert back to the previous configuration. Due to " + \
-			"your current profile being invalid, allowed actions are " + \
-			"limited to --help, --info, --sync, and --version."
+		msg = ("Your current profile is invalid. If you have just changed "
+			"your profile configuration, you should revert back to the "
+			"previous configuration. Allowed actions are limited to "
+			"--help, --info, --sync, and --version.")
 		writemsg_level("".join("!!! %s\n" % l for l in textwrap.wrap(msg, 70)),
 			level=logging.ERROR, noiselevel=-1)
 		return 1
@@ -1548,6 +1578,11 @@ def emerge_main(args=None):
 		settings, trees, mtimedb = load_emerge_config(trees=trees)
 		portdb = trees[settings["ROOT"]]["porttree"].dbapi
 
+	# NOTE: adjust_configs() can map options to FEATURES, so any relevant
+	# options adjustments should be made prior to calling adjust_configs().
+	if "--buildpkgonly" in myopts:
+		myopts["--buildpkg"] = True
+
 	adjust_configs(myopts, trees)
 	apply_priorities(settings)
 
@@ -1589,9 +1624,6 @@ def emerge_main(args=None):
 
 	if "--usepkgonly" in myopts:
 		myopts["--usepkg"] = True
-
-	if "buildpkg" in settings.features or "--buildpkgonly" in myopts:
-		myopts["--buildpkg"] = True
 
 	if "--buildpkgonly" in myopts:
 		# --buildpkgonly will not merge anything, so
@@ -1756,7 +1788,11 @@ def emerge_main(args=None):
 		if x in myopts:
 			disable_emergelog = True
 			break
-	if myaction in ("search", "info"):
+	if disable_emergelog:
+		pass
+	elif myaction in ("search", "info"):
+		disable_emergelog = True
+	elif portage.data.secpass < 1:
 		disable_emergelog = True
 
 	_emerge.emergelog._disable = disable_emergelog
@@ -1771,8 +1807,13 @@ def emerge_main(args=None):
 					"EMERGE_LOG_DIR='%s':\n!!! %s\n" % \
 					(settings['EMERGE_LOG_DIR'], e),
 					noiselevel=-1, level=logging.ERROR)
+				portage.util.ensure_dirs(_emerge.emergelog._emerge_log_dir)
 			else:
 				_emerge.emergelog._emerge_log_dir = settings["EMERGE_LOG_DIR"]
+		else:
+			_emerge.emergelog._emerge_log_dir = os.path.join(os.sep,
+				settings["EPREFIX"].lstrip(os.sep), "var", "log")
+			portage.util.ensure_dirs(_emerge.emergelog._emerge_log_dir)
 
 	if not "--pretend" in myopts:
 		emergelog(xterm_titles, "Started emerge on: "+\

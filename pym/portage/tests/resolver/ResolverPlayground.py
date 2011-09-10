@@ -7,7 +7,8 @@ import sys
 import tempfile
 import portage
 from portage import os
-from portage.const import PORTAGE_BASE_PATH
+from portage.const import (GLOBAL_CONFIG_PATH, PORTAGE_BASE_PATH,
+	USER_CONFIG_PATH)
 from portage.dbapi.vartree import vartree
 from portage.dbapi.porttree import portagetree
 from portage.dbapi.bintree import binarytree
@@ -16,6 +17,7 @@ from portage.package.ebuild.config import config
 from portage.package.ebuild.digestgen import digestgen
 from portage._sets import load_default_config
 from portage._sets.base import InternalPackageSet
+from portage.util import ensure_dirs
 from portage.versions import catsplit
 
 import _emerge
@@ -37,6 +39,21 @@ class ResolverPlayground(object):
 
 	config_files = frozenset(("package.use", "package.mask", "package.keywords", \
 		"package.unmask", "package.properties", "package.license", "use.mask", "use.force"))
+
+	metadata_xml_template = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "http://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+<herd>%(herd)s</herd>
+<maintainer>
+<email>maintainer-needed@gentoo.org</email>
+<description>Description of the maintainership</description>
+</maintainer>
+<longdescription>Long description of the package</longdescription>
+<use>
+%(flags)s
+</use>
+</pkgmetadata>
+"""
 
 	def __init__(self, ebuilds={}, installed={}, profile={}, repo_configs={}, \
 		user_config={}, sets={}, world=[], debug=False):
@@ -106,16 +123,20 @@ class ResolverPlayground(object):
 				repo = "test_repo"
 
 			metadata = ebuilds[cpv].copy()
+			copyright_header = metadata.pop("COPYRIGHT_HEADER", None)
+			desc = metadata.pop("DESCRIPTION", None)
 			eapi = metadata.pop("EAPI", 0)
 			lic = metadata.pop("LICENSE", "")
 			properties = metadata.pop("PROPERTIES", "")
 			slot = metadata.pop("SLOT", 0)
 			keywords = metadata.pop("KEYWORDS", "x86")
+			homepage = metadata.pop("HOMEPAGE", None)
 			iuse = metadata.pop("IUSE", "")
 			depend = metadata.pop("DEPEND", "")
 			rdepend = metadata.pop("RDEPEND", None)
 			pdepend = metadata.pop("PDEPEND", None)
 			required_use = metadata.pop("REQUIRED_USE", None)
+			misc_content = metadata.pop("MISC_CONTENT", None)
 
 			if metadata:
 				raise ValueError("metadata of ebuild '%s' contains unknown keys: %s" % (cpv, metadata.keys()))
@@ -129,7 +150,13 @@ class ResolverPlayground(object):
 				pass
 
 			f = open(ebuild_path, "w")
+			if copyright_header is not None:
+				f.write(copyright_header)
 			f.write('EAPI="' + str(eapi) + '"\n')
+			if desc is not None:
+				f.write('DESCRIPTION="%s"\n' % desc)
+			if homepage is not None:
+				f.write('HOMEPAGE="%s"\n' % homepage)
 			f.write('LICENSE="' + str(lic) + '"\n')
 			f.write('PROPERTIES="' + str(properties) + '"\n')
 			f.write('SLOT="' + str(slot) + '"\n')
@@ -142,6 +169,8 @@ class ResolverPlayground(object):
 				f.write('PDEPEND="' + str(pdepend) + '"\n')
 			if required_use is not None:
 				f.write('REQUIRED_USE="' + str(required_use) + '"\n')
+			if misc_content is not None:
+				f.write(misc_content)
 			f.close()
 
 	def _create_ebuild_manifests(self, ebuilds):
@@ -197,6 +226,7 @@ class ResolverPlayground(object):
 				f.close()
 			
 			write_key("EAPI", eapi)
+			write_key("COUNTER", "0")
 			write_key("LICENSE", lic)
 			write_key("PROPERTIES", properties)
 			write_key("SLOT", slot)
@@ -215,6 +245,13 @@ class ResolverPlayground(object):
 				write_key("REQUIRED_USE", required_use)
 
 	def _create_profile(self, ebuilds, installed, profile, repo_configs, user_config, sets):
+
+		user_config_dir = os.path.join(self.eroot, USER_CONFIG_PATH)
+
+		try:
+			os.makedirs(user_config_dir)
+		except os.error:
+			pass
 
 		for repo in self.repo_dirs:
 			repo_dir = self._get_repo_dir(repo)
@@ -277,6 +314,11 @@ class ResolverPlayground(object):
 				f.write("x86\n")
 				f.close()
 
+				parent_file = os.path.join(sub_profile_dir, "parent")
+				f = open(parent_file, "w")
+				f.write("..\n")
+				f.close()
+
 				if profile:
 					for config_file, lines in profile.items():
 						if config_file not in self.config_files:
@@ -289,15 +331,30 @@ class ResolverPlayground(object):
 						f.close()
 
 				#Create profile symlink
-				os.makedirs(os.path.join(self.eroot, "etc"))
-				os.symlink(sub_profile_dir, os.path.join(self.eroot, "etc", "make.profile"))
+				os.symlink(sub_profile_dir, os.path.join(user_config_dir, "make.profile"))
 
-		user_config_dir = os.path.join(self.eroot, "etc", "portage")
-
-		try:
-			os.makedirs(user_config_dir)
-		except os.error:
-			pass
+				#Create minimal herds.xml
+				metadata_dir = os.path.join(repo_dir, "metadata")
+				os.makedirs(metadata_dir)
+				herds_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE herds SYSTEM "http://www.gentoo.org/dtd/herds.dtd">
+<?xml-stylesheet href="/xsl/herds.xsl" type="text/xsl" ?>
+<?xml-stylesheet href="/xsl/guide.xsl" type="text/xsl" ?>
+<herds>
+<herd>
+  <name>base-system</name>
+  <email>base-system@gentoo.org</email>
+  <description>Core system utilities and libraries.</description>
+  <maintainer>
+    <email>base-system@gentoo.orgg</email>
+    <name>Base System</name>
+    <role>Base System Maintainer</role>
+  </maintainer>
+</herd>
+</herds>
+"""
+				with open(os.path.join(metadata_dir, "metadata.xml"), 'w') as f:
+					f.write(herds_xml)
 
 		repos_conf_file = os.path.join(user_config_dir, "repos.conf")		
 		f = open(repos_conf_file, "w")
@@ -321,6 +378,13 @@ class ResolverPlayground(object):
 			for line in lines:
 				f.write("%s\n" % line)
 			f.close()
+
+		#Create /usr/share/portage/config/make.globals
+		make_globals_path = os.path.join(self.eroot,
+			GLOBAL_CONFIG_PATH.lstrip(os.sep), "make.globals")
+		ensure_dirs(os.path.dirname(make_globals_path))
+		os.symlink(os.path.join(PORTAGE_BASE_PATH, "cnf", "make.globals"),
+			make_globals_path)
 
 		#Create /usr/share/portage/config/sets/portage.conf
 		default_sets_conf_dir = os.path.join(self.eroot, "usr/share/portage/config/sets")

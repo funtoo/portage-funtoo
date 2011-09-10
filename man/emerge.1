@@ -484,10 +484,7 @@ Skips the packages specified on the command\-line that have already
 been installed.  Without this option, any packages, ebuilds, or deps
 you specify on the command\-line \fBwill\fR cause Portage to remerge
 the package, even if it is already installed.  Note that Portage will
-not remerge dependencies by default. Also note that this option takes
-precedence over options such as \fB\-\-newuse\fR, preventing a package
-from being reinstalled even though the corresponding USE flag settings
-may have changed.
+not remerge dependencies by default.
 .TP
 .BR "\-\-nospinner"
 Disables the spinner for the session.  The spinner is active when the
@@ -555,18 +552,16 @@ to be set in the \fBmake.conf\fR(5)
 \fBEMERGE_DEFAULT_OPTS\fR variable.
 .TP
 .BR "\-\-rebuild\-if\-new\-rev [ y | n ]"
-Rebuild packages when dependencies that are used at both build\-time and
-run\-time are built, if the dependency is not already installed with the
-same version and revision.
+Rebuild packages when build\-time dependencies are built from source, if the
+dependency is not already installed with the same version and revision.
 .TP
 .BR "\-\-rebuild\-if\-new\-ver [ y | n ]"
-Rebuild packages when dependencies that are used at both build\-time and
-run\-time are built, if the dependency is not already installed with the
-same version. Revision numbers are ignored.
+Rebuild packages when build\-time dependencies are built from source, if the
+dependency is not already installed with the same version. Revision numbers
+are ignored.
 .TP
 .BR "\-\-rebuild\-if\-unbuilt [ y | n ]"
-Rebuild packages when dependencies that are used at both build\-time and
-run\-time are built.
+Rebuild packages when build\-time dependencies are built from source.
 .TP
 .BR "\-\-rebuilt\-binaries [ y | n ]"
 Replace installed packages with binary packages that have
@@ -615,8 +610,7 @@ use \fBEMERGE_DEFAULT_OPTS\fR to make
 \fB\-\-oneshot\fR behavior default.
 .TP
 .BR "\-\-selective [ y | n ]"
-This is similar to the \fB\-\-noreplace\fR option, except that it
-does not take precedence over options such as \fB\-\-newuse\fR.
+This is identical to the \fB\-\-noreplace\fR option.
 Some options, such as \fB\-\-update\fR, imply \fB\-\-selective\fR.
 Use \fB\-\-selective=n\fR if you want to forcefully disable
 \fB\-\-selective\fR, regardless of options like \fB\-\-update\fR.

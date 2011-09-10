@@ -3,12 +3,10 @@
 
 from __future__ import print_function
 
-import codecs
 import difflib
 import errno
-import gc
+import io
 import logging
-import re
 import stat
 import sys
 import textwrap
@@ -32,6 +30,7 @@ from portage._sets import SETPREFIX
 from portage._sets.base import InternalPackageSet
 from portage.util import ConfigProtect, shlex_split, new_protect_filename
 from portage.util import cmp_sort_key, writemsg, writemsg_stdout
+from portage.util import ensure_dirs
 from portage.util import writemsg_level, write_atomic
 from portage.util.digraph import digraph
 from portage.util.listdir import _ignorecvs_dirs
@@ -50,7 +49,8 @@ from _emerge.DepPriorityNormalRange import DepPriorityNormalRange
 from _emerge.DepPrioritySatisfiedRange import DepPrioritySatisfiedRange
 from _emerge.FakeVartree import FakeVartree
 from _emerge._find_deep_system_runtime_deps import _find_deep_system_runtime_deps
-from _emerge.is_valid_package_atom import is_valid_package_atom
+from _emerge.is_valid_package_atom import insert_category_into_atom, \
+	is_valid_package_atom
 from _emerge.Package import Package
 from _emerge.PackageArg import PackageArg
 from _emerge.PackageVirtualDbapi import PackageVirtualDbapi
@@ -174,7 +174,7 @@ class _rebuild_config(object):
 		rebuild_exclude = self._frozen_config.rebuild_exclude
 		rebuild_ignore = self._frozen_config.rebuild_ignore
 		if (self.rebuild and isinstance(parent, Package) and
-			parent.built and (priority.buildtime or priority.runtime) and
+			parent.built and priority.buildtime and
 			isinstance(dep_pkg, Package) and
 			not rebuild_exclude.findAtomForPackage(parent) and
 			not rebuild_ignore.findAtomForPackage(dep_pkg)):
@@ -209,66 +209,63 @@ class _rebuild_config(object):
 
 		return True
 
-	def _trigger_rebuild(self, parent, build_deps, runtime_deps):
+	def _trigger_rebuild(self, parent, build_deps):
 		root_slot = (parent.root, parent.slot_atom)
 		if root_slot in self.rebuild_list:
 			return False
 		trees = self._frozen_config.trees
-		children = set(build_deps).intersection(runtime_deps)
 		reinstall = False
-		for slot_atom in children:
-			kids = set([build_deps[slot_atom], runtime_deps[slot_atom]])
-			for dep_pkg in kids:
-				dep_root_slot = (dep_pkg.root, slot_atom)
-				if self._needs_rebuild(dep_pkg):
+		for slot_atom, dep_pkg in build_deps.items():
+			dep_root_slot = (dep_pkg.root, slot_atom)
+			if self._needs_rebuild(dep_pkg):
+				self.rebuild_list.add(root_slot)
+				return True
+			elif ("--usepkg" in self._frozen_config.myopts and
+				(dep_root_slot in self.reinstall_list or
+				dep_root_slot in self.rebuild_list or
+				not dep_pkg.installed)):
+
+				# A direct rebuild dependency is being installed. We
+				# should update the parent as well to the latest binary,
+				# if that binary is valid.
+				#
+				# To validate the binary, we check whether all of the
+				# rebuild dependencies are present on the same binhost.
+				#
+				# 1) If parent is present on the binhost, but one of its
+				#    rebuild dependencies is not, then the parent should
+				#    be rebuilt from source.
+				# 2) Otherwise, the parent binary is assumed to be valid,
+				#    because all of its rebuild dependencies are
+				#    consistent.
+				bintree = trees[parent.root]["bintree"]
+				uri = bintree.get_pkgindex_uri(parent.cpv)
+				dep_uri = bintree.get_pkgindex_uri(dep_pkg.cpv)
+				bindb = bintree.dbapi
+				if self.rebuild_if_new_ver and uri and uri != dep_uri:
+					cpv_norev = catpkgsplit(dep_pkg.cpv)[:-1]
+					for cpv in bindb.match(dep_pkg.slot_atom):
+						if cpv_norev == catpkgsplit(cpv)[:-1]:
+							dep_uri = bintree.get_pkgindex_uri(cpv)
+							if uri == dep_uri:
+								break
+				if uri and uri != dep_uri:
+					# 1) Remote binary package is invalid because it was
+					#    built without dep_pkg. Force rebuild.
 					self.rebuild_list.add(root_slot)
 					return True
-				elif ("--usepkg" in self._frozen_config.myopts and
-					(dep_root_slot in self.reinstall_list or
-					dep_root_slot in self.rebuild_list or
-					not dep_pkg.installed)):
-
-					# A direct rebuild dependency is being installed. We
-					# should update the parent as well to the latest binary,
-					# if that binary is valid.
-					#
-					# To validate the binary, we check whether all of the
-					# rebuild dependencies are present on the same binhost.
-					#
-					# 1) If parent is present on the binhost, but one of its
-					#    rebuild dependencies is not, then the parent should
-					#    be rebuilt from source.
-					# 2) Otherwise, the parent binary is assumed to be valid,
-					#    because all of its rebuild dependencies are
-					#    consistent.
-					bintree = trees[parent.root]["bintree"]
-					uri = bintree.get_pkgindex_uri(parent.cpv)
-					dep_uri = bintree.get_pkgindex_uri(dep_pkg.cpv)
-					bindb = bintree.dbapi
-					if self.rebuild_if_new_ver and uri and uri != dep_uri:
-						cpv_norev = catpkgsplit(dep_pkg.cpv)[:-1]
-						for cpv in bindb.match(dep_pkg.slot_atom):
-							if cpv_norev == catpkgsplit(cpv)[:-1]:
-								dep_uri = bintree.get_pkgindex_uri(cpv)
-								if uri == dep_uri:
-									break
-					if uri and uri != dep_uri:
-						# 1) Remote binary package is invalid because it was
-						#    built without dep_pkg. Force rebuild.
-						self.rebuild_list.add(root_slot)
-						return True
-					elif (parent.installed and
-						root_slot not in self.reinstall_list):
-						inst_build_time = parent.metadata.get("BUILD_TIME")
-						try:
-							bin_build_time, = bindb.aux_get(parent.cpv,
-								["BUILD_TIME"])
-						except KeyError:
-							continue
-						if bin_build_time != inst_build_time:
-							# 2) Remote binary package is valid, and local package
-							#    is not up to date. Force reinstall.
-							reinstall = True
+				elif (parent.installed and
+					root_slot not in self.reinstall_list):
+					inst_build_time = parent.metadata.get("BUILD_TIME")
+					try:
+						bin_build_time, = bindb.aux_get(parent.cpv,
+							["BUILD_TIME"])
+					except KeyError:
+						continue
+					if bin_build_time != inst_build_time:
+						# 2) Remote binary package is valid, and local package
+						#    is not up to date. Force reinstall.
+						reinstall = True
 		if reinstall:
 			self.reinstall_list.add(root_slot)
 		return reinstall
@@ -282,31 +279,15 @@ class _rebuild_config(object):
 		need_restart = False
 		graph = self._graph
 		build_deps = {}
-		runtime_deps = {}
+
 		leaf_nodes = deque(graph.leaf_nodes())
-
-		def ignore_non_runtime(priority):
-			return not priority.runtime
-
-		def ignore_non_buildtime(priority):
-			return not priority.buildtime
 
 		# Trigger rebuilds bottom-up (starting with the leaves) so that parents
 		# will always know which children are being rebuilt.
 		while graph:
 			if not leaf_nodes:
-				# We're interested in intersection of buildtime and runtime,
-				# so ignore edges that do not contain both.
-				leaf_nodes.extend(graph.leaf_nodes(
-					ignore_priority=ignore_non_runtime))
-				if not leaf_nodes:
-					leaf_nodes.extend(graph.leaf_nodes(
-						ignore_priority=ignore_non_buildtime))
-					if not leaf_nodes:
-						# We'll have to drop an edge that is both
-						# buildtime and runtime. This should be
-						# quite rare.
-						leaf_nodes.append(graph.order[-1])
+				# We'll have to drop an edge. This should be quite rare.
+				leaf_nodes.append(graph.order[-1])
 
 			node = leaf_nodes.popleft()
 			if node not in graph:
@@ -315,32 +296,23 @@ class _rebuild_config(object):
 			slot_atom = node.slot_atom
 
 			# Remove our leaf node from the graph, keeping track of deps.
-			parents = graph.nodes[node][1].items()
+			parents = graph.parent_nodes(node)
 			graph.remove(node)
 			node_build_deps = build_deps.get(node, {})
-			node_runtime_deps = runtime_deps.get(node, {})
-			for parent, priorities in parents:
+			for parent in parents:
 				if parent == node:
 					# Ignore a direct cycle.
 					continue
 				parent_bdeps = build_deps.setdefault(parent, {})
-				parent_rdeps = runtime_deps.setdefault(parent, {})
-				for priority in priorities:
-					if priority.buildtime:
-						parent_bdeps[slot_atom] = node
-					if priority.runtime:
-						parent_rdeps[slot_atom] = node
-				if slot_atom in parent_bdeps and slot_atom in parent_rdeps:
-					parent_rdeps.update(node_runtime_deps)
+				parent_bdeps[slot_atom] = node
 				if not graph.child_nodes(parent):
 					leaf_nodes.append(parent)
 
 			# Trigger rebuilds for our leaf node. Because all of our children
-			# have been processed, build_deps and runtime_deps will be
-			# completely filled in, and self.rebuild_list / self.reinstall_list
-			# will tell us whether any of our children need to be rebuilt or
-			# reinstalled.
-			if self._trigger_rebuild(node, node_build_deps, node_runtime_deps):
+			# have been processed, the build_deps will be completely filled in,
+			# and self.rebuild_list / self.reinstall_list will tell us whether
+			# any of our children need to be rebuilt or reinstalled.
+			if self._trigger_rebuild(node, node_build_deps):
 				need_restart = True
 
 		return need_restart
@@ -613,6 +585,7 @@ class depgraph(object):
 		if not missed_updates:
 			return
 
+		self._show_merge_list()
 		backtrack_masked = []
 
 		for pkg, parent_atoms in missed_updates:
@@ -655,9 +628,10 @@ class depgraph(object):
 		if not missed_updates:
 			return
 
+		self._show_merge_list()
 		msg = []
-		msg.append("\n!!! One or more updates have been skipped due to " + \
-			"a dependency conflict:\n\n")
+		msg.append("\nWARNING: One or more updates have been " + \
+			"skipped due to a dependency conflict:\n\n")
 
 		indent = "  "
 		for pkg, parent_atoms in missed_updates:
@@ -976,6 +950,11 @@ class depgraph(object):
 		return (existing_node, matches)
 
 	def _add_pkg(self, pkg, dep):
+		"""
+		Adds a package to the depgraph, queues dependencies, and handles
+		slot conflicts.
+		"""
+		debug = "--debug" in self._frozen_config.myopts
 		myparent = None
 		priority = None
 		depth = 0
@@ -987,17 +966,28 @@ class depgraph(object):
 			depth = dep.depth
 		if priority is None:
 			priority = DepPriority()
-		"""
-		Fills the digraph with nodes comprised of packages to merge.
-		mybigkey is the package spec of the package to merge.
-		myparent is the package depending on mybigkey ( or None )
-		addme = Should we add this package to the digraph or are we just looking at it's deps?
-			Think --onlydeps, we need to ignore packages in that case.
-		#stuff to add:
-		#SLOT-aware emerge
-		#IUSE-aware emerge -> USE DEP aware depgraph
-		#"no downgrade" emerge
-		"""
+
+		if debug:
+			writemsg_level(
+				"\n%s%s %s\n" % ("Child:".ljust(15), pkg,
+				pkg_use_display(pkg, self._frozen_config.myopts,
+				modified_use=self._pkg_use_enabled(pkg))),
+				level=logging.DEBUG, noiselevel=-1)
+			if isinstance(myparent,
+				(PackageArg, AtomArg)):
+				# For PackageArg and AtomArg types, it's
+				# redundant to display the atom attribute.
+				writemsg_level(
+					"%s%s\n" % ("Parent Dep:".ljust(15), myparent),
+					level=logging.DEBUG, noiselevel=-1)
+			else:
+				# Display the specific atom from SetArg or
+				# Package types.
+				writemsg_level(
+					"%s%s required by %s\n" %
+					("Parent Dep:".ljust(15), dep.atom, myparent),
+					level=logging.DEBUG, noiselevel=-1)
+
 		# Ensure that the dependencies of the same package
 		# are never processed more than once.
 		previously_added = pkg in self._dynamic_config.digraph
@@ -1189,6 +1179,14 @@ class depgraph(object):
 					# shown later if there are no unresolvable blockers.
 					self._add_slot_conflict(pkg)
 					slot_collision = True
+
+					if debug:
+						writemsg_level(
+							"%s%s %s\n" % ("Slot Conflict:".ljust(15),
+							existing_node, pkg_use_display(existing_node,
+							self._frozen_config.myopts,
+							modified_use=self._pkg_use_enabled(existing_node))),
+							level=logging.DEBUG, noiselevel=-1)
 
 			if slot_collision:
 				# Now add this node to the graph so that self.display()
@@ -1573,7 +1571,7 @@ class depgraph(object):
 				continue
 
 			if debug:
-				writemsg_level("Candidates: %s: %s\n" % \
+				writemsg_level("\nCandidates: %s: %s\n" % \
 					(virt_pkg.cpv, [str(x) for x in atoms]),
 					noiselevel=-1, level=logging.DEBUG)
 
@@ -1670,7 +1668,7 @@ class depgraph(object):
 							traversed_virt_pkgs.add(dep.child)
 
 		if debug:
-			writemsg_level("Exiting... %s\n" % (pkg,),
+			writemsg_level("\nExiting... %s\n" % (pkg,),
 				noiselevel=-1, level=logging.DEBUG)
 
 		return 1
@@ -2082,6 +2080,14 @@ class depgraph(object):
 					else:
 						atom = null_atom
 
+				if atom.use and atom.use.conditional:
+					writemsg(
+						("\n\n!!! '%s' contains a conditional " + \
+						"which is not allowed.\n") % (x,), noiselevel=-1)
+					writemsg("!!! Please check ebuild(5) for full details.\n")
+					self._dynamic_config._skip_restart = True
+					return (0,[])
+
 				args.append(AtomArg(arg=x, atom=atom,
 					root_config=root_config))
 
@@ -2218,8 +2224,8 @@ class depgraph(object):
 							return 0, myfavorites
 						continue
 					if debug:
-						portage.writemsg("      Arg: %s\n     Atom: %s\n" % \
-							(arg, atom), noiselevel=-1)
+						writemsg_level("\n      Arg: %s\n     Atom: %s\n" %
+							(arg, atom), noiselevel=-1, level=logging.DEBUG)
 					pkg, existing_node = self._select_package(
 						myroot, atom, onlydeps=onlydeps)
 					if not pkg:
@@ -2257,7 +2263,10 @@ class depgraph(object):
 							# specified on the command line.
 							self._dynamic_config._pprovided_args.append((arg, atom))
 							continue
-					if pkg.installed and "selective" not in self._dynamic_config.myparams:
+					if pkg.installed and \
+						"selective" not in self._dynamic_config.myparams and \
+						not self._frozen_config.excluded_pkgs.findAtomForPackage(
+						pkg, modified_use=self._pkg_use_enabled(pkg)):
 						self._dynamic_config._unsatisfied_deps_for_display.append(
 							((myroot, atom), {"myparent" : arg}))
 						# Previous behavior was to bail out in this case, but
@@ -3070,7 +3079,7 @@ class depgraph(object):
 			writemsg_stdout("\nemerge: there are no ebuilds built with USE flags to satisfy "+green(xinfo)+".\n", noiselevel=-1)
 			writemsg_stdout("!!! One of the following packages is required to complete your request:\n", noiselevel=-1)
 			for pkg, mreasons in show_missing_use:
-				writemsg_stdout("- "+pkg.cpv+" ("+", ".join(mreasons)+")\n", noiselevel=-1)
+				writemsg_stdout("- "+pkg.cpv+_repo_separator+pkg.repo+" ("+", ".join(mreasons)+")\n", noiselevel=-1)
 
 		elif masked_packages:
 			writemsg_stdout("\n!!! " + \
@@ -3299,6 +3308,9 @@ class depgraph(object):
 		"""
 		if "selective" not in self._dynamic_config.myparams and \
 			pkg.root == self._frozen_config.target_root:
+			if self._frozen_config.excluded_pkgs.findAtomForPackage(pkg,
+				modified_use=self._pkg_use_enabled(pkg)):
+				return True
 			try:
 				next(self._iter_atoms_for_pkg(pkg))
 			except StopIteration:
@@ -3559,7 +3571,6 @@ class depgraph(object):
 		empty = "empty" in self._dynamic_config.myparams
 		selective = "selective" in self._dynamic_config.myparams
 		reinstall = False
-		noreplace = "--noreplace" in self._frozen_config.myopts
 		avoid_update = "--update" not in self._frozen_config.myopts
 		dont_miss_updates = "--update" in self._frozen_config.myopts
 		use_ebuild_visibility = self._frozen_config.myopts.get(
@@ -3647,16 +3658,6 @@ class depgraph(object):
 							continue
 
 					cpv = pkg.cpv
-					# Make --noreplace take precedence over --newuse.
-					if not pkg.installed and noreplace and \
-						cpv in vardb.match(atom):
-						inst_pkg = self._pkg(pkg.cpv, "installed",
-							root_config, installed=True)
-						if inst_pkg.visible:
-							# If the installed version is masked, it may
-							# be necessary to look at lower versions,
-							# in case there is a visible downgrade.
-							continue
 					reinstall_for_flags = None
 
 					if not pkg.installed or \
@@ -3901,8 +3902,9 @@ class depgraph(object):
 
 		if "--debug" in self._frozen_config.myopts:
 			for pkg in matched_packages:
-				portage.writemsg("%s %s\n" % \
-					((pkg.type_name + ":").rjust(10), pkg.cpv), noiselevel=-1)
+				portage.writemsg("%s %s%s%s\n" % \
+					((pkg.type_name + ":").rjust(10),
+					pkg.cpv, _repo_separator, pkg.repo), noiselevel=-1)
 
 		# Filter out any old-style virtual matches if they are
 		# mixed with new-style virtual matches.
@@ -5496,8 +5498,7 @@ class depgraph(object):
 			noiselevel=-1)
 		portage.writemsg("\n", noiselevel=-1)
 
-		if handler.circular_dep_message is None or \
-			"--debug" in self._frozen_config.myopts:
+		if handler.circular_dep_message is None:
 			handler.debug_print()
 			portage.writemsg("\n", noiselevel=-1)
 
@@ -5528,7 +5529,7 @@ class depgraph(object):
 
 	def _show_merge_list(self):
 		if self._dynamic_config._serialized_tasks_cache is not None and \
-			not (self._dynamic_config._displayed_list and \
+			not (self._dynamic_config._displayed_list is not None and \
 			(self._dynamic_config._displayed_list == self._dynamic_config._serialized_tasks_cache or \
 			self._dynamic_config._displayed_list == \
 				list(reversed(self._dynamic_config._serialized_tasks_cache)))):
@@ -5905,7 +5906,7 @@ class depgraph(object):
 		def write_changes(root, changes, file_to_write_to):
 			file_contents = None
 			try:
-				file_contents = codecs.open(
+				file_contents = io.open(
 					_unicode_encode(file_to_write_to,
 					encoding=_encodings['fs'], errors='strict'),
 					mode='r', encoding=_encodings['content'],
@@ -5951,11 +5952,12 @@ class depgraph(object):
 			if userquery(prompt, enter_invalid) == 'No':
 				write_to_file = False
 
-		if write_to_file:
+		if write_to_file and file_to_write_to:
 			for root in roots:
 				settings = self._frozen_config.roots[root].settings
 				abs_user_config = os.path.join(
 					settings["PORTAGE_CONFIGROOT"], USER_CONFIG_PATH)
+				ensure_dirs(abs_user_config)
 
 				if root in unstable_keyword_msg:
 					write_changes(root, unstable_keyword_msg[root],
@@ -6194,7 +6196,8 @@ class depgraph(object):
 		all_added.extend(added_favorites)
 		all_added.sort()
 		for a in all_added:
-			writemsg(">>> Recording %s in \"world\" favorites file...\n" % \
+			writemsg_stdout(
+				">>> Recording %s in \"world\" favorites file...\n" % \
 				colorize("INFORM", str(a)), noiselevel=-1)
 		if all_added:
 			world_set.update(all_added)
@@ -6564,8 +6567,14 @@ class _dep_check_composite_db(dbapi):
 					continue
 				self._cpv_pkg_map[pkg.cpv] = pkg
 				ret.append(pkg.cpv)
-			if ret:
+
+			if len(ret) > 1:
 				self._cpv_sort_ascending(ret)
+				if "--update" in self._depgraph._frozen_config.myopts:
+					# With --update, we want to force selection of
+					# the highest available version.
+					ret = [ret[-1]]
+
 		self._match_cache[atom] = ret
 		return ret[:]
 
@@ -6658,15 +6667,6 @@ def ambiguous_package_name(arg, atoms, root_config, spinner, myopts):
 	s.output()
 	writemsg("!!! The short ebuild name \"%s\" is ambiguous. Please specify\n" % arg, noiselevel=-1)
 	writemsg("!!! one of the above fully-qualified ebuild names instead.\n\n", noiselevel=-1)
-
-def insert_category_into_atom(atom, category):
-	alphanum = re.search(r'\w', atom)
-	if alphanum:
-		ret = atom[:alphanum.start()] + "%s/" % category + \
-			atom[alphanum.start():]
-	else:
-		ret = None
-	return ret
 
 def _spinner_start(spinner, myopts):
 	if spinner is None:
@@ -6850,17 +6850,20 @@ def _resume_depgraph(settings, trees, mtimedb, myopts, myparams, spinner):
 					if not isinstance(parent_node, Package) \
 						or parent_node.operation not in ("merge", "nomerge"):
 						continue
-					unsatisfied = \
-						graph.child_nodes(parent_node,
-						ignore_priority=DepPrioritySatisfiedRange.ignore_soft)
-					if pkg in unsatisfied:
-						unsatisfied_parents[parent_node] = parent_node
-						unsatisfied_stack.append(parent_node)
+					# We need to traverse all priorities here, in order to
+					# ensure that a package with an unsatisfied depenedency
+					# won't get pulled in, even indirectly via a soft
+					# dependency.
+					unsatisfied_parents[parent_node] = parent_node
+					unsatisfied_stack.append(parent_node)
 
+			unsatisfied_tuples = frozenset(tuple(parent_node)
+				for parent_node in unsatisfied_parents
+				if isinstance(parent_node, Package))
 			pruned_mergelist = []
 			for x in mergelist:
 				if isinstance(x, list) and \
-					tuple(x) not in unsatisfied_parents:
+					tuple(x) not in unsatisfied_tuples:
 					pruned_mergelist.append(x)
 
 			# If the mergelist doesn't shrink then this loop is infinite.

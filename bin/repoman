@@ -9,10 +9,10 @@
 from __future__ import print_function
 
 import calendar
-import codecs
 import copy
 import errno
 import formatter
+import io
 import logging
 import optparse
 import re
@@ -55,7 +55,6 @@ from portage import os
 from portage import subprocess_getstatusoutput
 from portage import _encodings
 from portage import _unicode_encode
-from portage import StringIO
 from repoman.checks import run_checks
 from repoman import utilities
 from repoman.herdbase import make_herd_base
@@ -97,7 +96,8 @@ os.umask(0o22)
 # behave incrementally.
 repoman_incrementals = tuple(x for x in \
 	portage.const.INCREMENTALS if x != 'ACCEPT_KEYWORDS')
-repoman_settings = portage.config(local_config=False)
+eprefix = os.environ.get("__REPOMAN_TEST_EPREFIX")
+repoman_settings = portage.config(local_config=False, _eprefix=eprefix)
 repoman_settings.lock()
 
 if repoman_settings.get("NOCOLOR", "").lower() in ("yes", "true") or \
@@ -210,6 +210,11 @@ def ParseArgs(argv, qahelp):
 	parser.add_option('-x', '--xmlparse', dest='xml_parse', action='store_true',
 		default=False, help='forces the metadata.xml parse check to be carried out')
 
+	parser.add_option(
+		'--if-modified', type='choice', choices=('y', 'n'), default='n',
+		metavar="<y|n>",
+		help='only check packages that have uncommitted modifications')
+
 	parser.add_option('-i', '--ignore-arches', dest='ignore_arches', action='store_true',
 		default=False, help='ignore arch-specific failures (where arch != host)')
 
@@ -286,7 +291,7 @@ qahelp={
 	"ebuild.notadded":"Ebuilds that exist but have not been added to cvs",
 	"ebuild.patches":"PATCHES variable should be a bash array to ensure white space safety",
 	"changelog.notadded":"ChangeLogs that exist but have not been added to cvs",
-	"dependency.unknown" : "Ebuild has a dependency that refers to an unknown package (which may be provided by an overlay)",
+	"dependency.unknown" : "Ebuild has a dependency that refers to an unknown package (which may be valid if it is a blocker for a renamed/removed package, or is an alternative choice provided by an overlay)",
 	"file.executable":"Ebuilds, digests, metadata.xml, Manifest, and ChangeLog do note need the executable bit",
 	"file.size":"Files in the files directory must be under 20 KiB",
 	"file.size.fatal":"Files in the files directory must be under 60 KiB",
@@ -566,13 +571,13 @@ if options.mode == 'commit' and not options.pretend and not vcs:
 	options.pretend = True
 
 # Ensure that PORTDIR_OVERLAY contains the repository corresponding to $PWD.
-repoman_settings = portage.config(local_config=False)
+repoman_settings = portage.config(local_config=False, _eprefix=eprefix)
 repoman_settings['PORTDIR_OVERLAY'] = "%s %s" % \
 	(repoman_settings.get('PORTDIR_OVERLAY', ''), portdir_overlay)
 # We have to call the config constructor again so
 # that config.repositories is initialized correctly.
-repoman_settings = portage.config(local_config=False, env=dict(os.environ,
-	PORTDIR_OVERLAY=repoman_settings['PORTDIR_OVERLAY']))
+repoman_settings = portage.config(local_config=False, _eprefix=eprefix,
+	env=dict(os.environ, PORTDIR_OVERLAY=repoman_settings['PORTDIR_OVERLAY']))
 
 root = '/'
 trees = {
@@ -700,7 +705,7 @@ for path in portdb.porttrees:
 
 	desc_path = os.path.join(path, 'profiles', 'profiles.desc')
 	try:
-		desc_file = codecs.open(_unicode_encode(desc_path,
+		desc_file = io.open(_unicode_encode(desc_path,
 			encoding=_encodings['fs'], errors='strict'),
 			mode='r', encoding=_encodings['repo.content'], errors='replace')
 	except EnvironmentError:
@@ -1057,6 +1062,11 @@ except FileNotFound:
 	# disable for non-gentoo repoman users who may not have herds.
 	herd_base = None
 
+modified_pkgs = 0
+if options.if_modified == "y" and not vcs:
+	logging.info("Not in a version controlled repository; disabling --if-modified.")
+	options.if_modified = "n"
+
 for x in scanlist:
 	#ebuilds and digests added to cvs respectively.
 	logging.info("checking package %s" % x)
@@ -1069,6 +1079,18 @@ for x in scanlist:
 	if repolevel < 2:
 		checkdir_relative = os.path.join(catdir, checkdir_relative)
 	checkdir_relative = os.path.join(".", checkdir_relative)
+
+	if options.if_modified == "y":
+		checkdir_modified = False
+		checkdir_pattern = checkdir_relative.rstrip(os.sep) + os.sep
+		for f in chain(mychanged, mynew):
+			if f.startswith(checkdir_pattern):
+				checkdir_modified = True
+				modified_pkgs += 1
+				break
+		if not checkdir_modified:
+			continue
+
 	generated_manifest = False
 
 	if options.mode == "manifest" or \
@@ -1207,11 +1229,13 @@ for x in scanlist:
 
 		if not (y in ("ChangeLog", "metadata.xml") or y.endswith(".ebuild")):
 			continue
+		f = None
 		try:
 			line = 1
-			for l in codecs.open(_unicode_encode(os.path.join(checkdir, y),
+			f = io.open(_unicode_encode(os.path.join(checkdir, y),
 				encoding=_encodings['fs'], errors='strict'),
-				mode='r', encoding=_encodings['repo.content']):
+				mode='r', encoding=_encodings['repo.content'])
+			for l in f:
 				line +=1
 		except UnicodeDecodeError as ue:
 			stats["file.UTF8"] += 1
@@ -1221,6 +1245,9 @@ for x in scanlist:
 			if l2 != 0:
 				s = s[s.rfind("\n") + 1:]
 			fails["file.UTF8"].append("%s/%s: line %i, just after: '%s'" % (checkdir, y, line, s))
+		finally:
+			if f is not None:
+				f.close()
 
 	if vcs in ("git", "hg") and check_ebuild_notadded:
 		if vcs == "git":
@@ -1404,7 +1431,7 @@ for x in scanlist:
 				os.path.join(checkdir, "metadata.xml"),
 				parser=xml.etree.ElementTree.XMLParser(
 					target=_MetadataTreeBuilder()))
-		except (xml.etree.ElementTree.ParseError, ExpatError, EnvironmentError) as e:
+		except (ExpatError, SyntaxError, EnvironmentError) as e:
 			metadata_bad = True
 			stats["metadata.bad"] += 1
 			fails["metadata.bad"].append("%s/metadata.xml: %s" % (x, e))
@@ -1636,7 +1663,7 @@ for x in scanlist:
 				# packages that have empty KEYWORDS.
 				arches.append(['**', '**', ['**']])
 
-		unknown_pkgs = {}
+		unknown_pkgs = set()
 		baddepsyntax = False
 		badlicsyntax = False
 		badprovsyntax = False
@@ -1673,11 +1700,9 @@ for x in scanlist:
 					if atom == "||":
 						continue
 
-					if not atom.blocker and \
-						not portdb.cp_list(atom.cp) and \
+					if not portdb.xmatch("match-all", atom) and \
 						not atom.cp.startswith("virtual/"):
-						unknown_pkgs.setdefault(atom.cp, set()).add(
-							(mytype, atom.unevaluated_atom))
+						unknown_pkgs.add((mytype, atom.unevaluated_atom))
 
 					is_blocker = atom.blocker
 
@@ -1822,7 +1847,7 @@ for x in scanlist:
 				pkg.mtime = None
 		try:
 			# All ebuilds should have utf_8 encoding.
-			f = codecs.open(_unicode_encode(full_path,
+			f = io.open(_unicode_encode(full_path,
 				encoding=_encodings['fs'], errors='strict'),
 				mode='r', encoding=_encodings['repo.content'])
 			try:
@@ -1861,7 +1886,7 @@ for x in scanlist:
 						config_incrementals=repoman_incrementals,
 						local_config=False,
 						_unmatched_removal=options.unmatched_removal,
-						env=env)
+						env=env, _eprefix=eprefix)
 					if options.without_mask:
 						dep_settings._mask_manager = \
 							copy.deepcopy(dep_settings._mask_manager)
@@ -1922,12 +1947,16 @@ for x in scanlist:
 
 						if success:
 							if atoms:
+
+								# Don't bother with dependency.unknown for
+								# cases in which *DEPEND.bad is triggered.
 								for atom in atoms:
+									# dep_check returns all blockers and they
+									# aren't counted for *DEPEND.bad, so we
+									# ignore them here.
 									if not atom.blocker:
-										# Don't bother with dependency.unknown
-										# for cases in which *DEPEND.bad is
-										# triggered.
-										unknown_pkgs.pop(atom.cp, None)
+										unknown_pkgs.discard(
+											(mytype, atom.unevaluated_atom))
 
 								if not prof.sub_path:
 									# old-style virtuals currently aren't
@@ -1958,10 +1987,8 @@ for x in scanlist:
 								prof, repr(atoms)))
 
 		if not baddepsyntax and unknown_pkgs:
-			all_unknown = set()
-			all_unknown.update(*unknown_pkgs.values())
 			type_map = {}
-			for mytype, atom in all_unknown:
+			for mytype, atom in unknown_pkgs:
 				type_map.setdefault(mytype, set()).add(atom)
 			for mytype, atoms in type_map.items():
 				stats["dependency.unknown"] += 1
@@ -1985,6 +2012,9 @@ for x in scanlist:
 			fails["metadata.warning"].append(
 				"%s/metadata.xml: unused local USE-description: '%s'" % \
 				(x, myflag))
+
+if options.if_modified == "y" and modified_pkgs < 1:
+	logging.warn("--if-modified is enabled, but no modified packages were found!")
 
 if options.mode == "manifest":
 	sys.exit(dofail)
@@ -2011,7 +2041,7 @@ if dofail or \
 # in $EDITOR while the user creates a commit message.
 # Otherwise, the user would not be able to see this output
 # once the editor has taken over the screen.
-qa_output = StringIO()
+qa_output = io.StringIO()
 style_file = ConsoleStyleFile(sys.stdout)
 if options.mode == 'commit' and \
 	(not commitmessage or not commitmessage.strip()):
@@ -2319,7 +2349,7 @@ else:
 	commitmessage = options.commitmsg
 	if options.commitmsgfile:
 		try:
-			f = codecs.open(_unicode_encode(options.commitmsgfile,
+			f = io.open(_unicode_encode(options.commitmsgfile,
 			encoding=_encodings['fs'], errors='strict'),
 			mode='r', encoding=_encodings['content'], errors='replace')
 			commitmessage = f.read()

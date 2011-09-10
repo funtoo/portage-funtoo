@@ -3,12 +3,8 @@
 
 __docformat__ = "epytext"
 
-import codecs
-try:
-	from subprocess import getstatusoutput as subprocess_getstatusoutput
-except ImportError:
-	from commands import getstatusoutput as subprocess_getstatusoutput
 import errno
+import io
 import formatter
 import re
 import sys
@@ -166,11 +162,14 @@ def _parse_color_map(config_root='/', onerror=None):
 		if token[0] in quotes and token[0] == token[-1]:
 			token = token[1:-1]
 		return token
+
+	f = None
 	try:
-		lineno=0
-		for line in codecs.open(_unicode_encode(myfile,
+		f = io.open(_unicode_encode(myfile,
 			encoding=_encodings['fs'], errors='strict'),
-			mode='r', encoding=_encodings['content'], errors='replace'):
+			mode='r', encoding=_encodings['content'], errors='replace')
+		lineno = 0
+		for line in f:
 			lineno += 1
 
 			commenter_pos = line.find("#")
@@ -230,6 +229,9 @@ def _parse_color_map(config_root='/', onerror=None):
 		elif e.errno == errno.EACCES:
 			raise PermissionDenied(myfile)
 		raise
+	finally:
+		if f is not None:
+			f.close()
 
 def nc_len(mystr):
 	tmp = re.sub(esc_seq + "^m]+m", "", mystr);
@@ -435,7 +437,7 @@ def get_term_size():
 			pass
 	except ImportError:
 		pass
-	st, out = subprocess_getstatusoutput('stty size')
+	st, out = portage.subprocess_getstatusoutput('stty size')
 	if st == os.EX_OK:
 		out = out.split()
 		if len(out) == 2:

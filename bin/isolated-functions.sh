@@ -183,7 +183,7 @@ die() {
 		done
 	fi
 	if [ "${EMERGE_FROM}" != "binary" ] && \
-		! hasq ${EBUILD_PHASE} prerm postrm && \
+		! has ${EBUILD_PHASE} prerm postrm && \
 		[ "${EBUILD#${PORTDIR}/}" == "${EBUILD}" ] ; then
 		local overlay=${EBUILD%/*}
 		overlay=${overlay%/*}
@@ -203,7 +203,12 @@ die() {
 		fi
 	fi
 
-	if [[ "${EBUILD_PHASE/depend}" == "${EBUILD_PHASE}" ]] ; then
+	# Only call die hooks here if we are executed via ebuild.sh or
+	# misc-functions.sh, since those are the only cases where the environment
+	# contains the hook functions. When necessary (like for helpers_die), die
+	# hooks are automatically called later by a misc-functions.sh invocation.
+	if has ${BASH_SOURCE[$main_index]##*/} ebuild.sh misc-functions.sh && \
+		[[ ${EBUILD_PHASE} != depend ]] ; then
 		local x
 		for x in $EBUILD_DEATH_HOOKS; do
 			${x} "$@" >&2 1>&2
@@ -511,20 +516,29 @@ if [[ -z ${XARGS} ]] ; then
 	esac
 fi
 
-has() {
-	hasq "$@"
+hasq() {
+	has $EBUILD_PHASE prerm postrm || eqawarn \
+		"QA Notice: The 'hasq' function is deprecated (replaced by 'has')"
+	has "$@"
 }
 
 hasv() {
-	if hasq "$@" ; then
+	if has "$@" ; then
 		echo "$1"
 		return 0
 	fi
 	return 1
 }
 
-hasq() {
-	[[ " ${*:2} " == *" $1 "* ]]
+has() {
+	local needle=$1
+	shift
+
+	local x
+	for x in "$@"; do
+		[ "${x}" = "${needle}" ] && return 0
+	done
+	return 1
 }
 
 # @FUNCTION: save_ebuild_env
@@ -538,7 +552,7 @@ hasq() {
 save_ebuild_env() {
 	(
 
-		if hasq --exclude-init-phases $* ; then
+		if has --exclude-init-phases $* ; then
 			unset S _E_DOCDESTTREE_ _E_EXEDESTTREE_
 			if [[ -n $PYTHONPATH ]] ; then
 				export PYTHONPATH=${PYTHONPATH/${PORTAGE_PYM_PATH}:}
