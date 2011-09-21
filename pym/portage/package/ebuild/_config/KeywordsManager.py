@@ -208,16 +208,9 @@ class KeywordsManager(object):
 		hasstable = False
 		hastesting = False
 		for gp in mygroups:
-			if gp == "*":
-				match = True
-				break
-			elif gp == "~*":
-				hastesting = True
-				for x in pgroups:
-					if x[:1] == "~":
-						match = True
-						break
-				if match:
+			if gp == "*" or (gp == "-*" and len(mygroups) == 1):
+				if gp == "*":
+					match = True
 					break
 			elif gp in pgroups:
 				match = True
