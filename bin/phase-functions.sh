@@ -354,6 +354,46 @@ has_phase_defined_up_to() {
 	return 1
 }
 
+localpatch() {
+	local patches_overlay_dir patches patch locksufix
+
+	locksufix="${RANDOM}"
+
+	LOCALPATCH_OVERLAY="${LOCALPATCH_OVERLAY:-/etc/portage/patches}"
+
+	if [ -d "${LOCALPATCH_OVERLAY}" ]; then
+		if [ -d "${LOCALPATCH_OVERLAY}/${CATEGORY}/${PN}-${PV}-${PR}" ]; then
+			patches_overlay_dir="${LOCALPATCH_OVERLAY}/${CATEGORY}/${PN}-${PV}-${PR}"
+		elif [ -d "${LOCALPATCH_OVERLAY}/${CATEGORY}/${PN}-${PV}" ]; then
+			patches_overlay_dir="${LOCALPATCH_OVERLAY}/${CATEGORY}/${PN}-${PV}"
+		elif [ -d "${LOCALPATCH_OVERLAY}/${CATEGORY}/${PN}" ]; then
+			patches_overlay_dir="${LOCALPATCH_OVERLAY}/${CATEGORY}/${PN}"
+		fi
+
+		if [ -n "${patches_overlay_dir}" ]; then patches="$(find "${patches_overlay_dir}"/ -type f -regex '.*\.\(diff\|\patch\)$' | sort -n)"; fi
+	else
+		ewarn "LOCALPATCH_OVERLAY is set to '${LOCALPATCH_OVERLAY}' but there is no such directory."
+	fi
+
+	if [ -n "${patches}" ]; then
+		for patch in ${patches}; do
+			if [ -r "${patch}" ] && [ ! -f "${S}/.patch-${patch##*/}.${locksufix}" ]; then
+				for patchprefix in {0..4}; do
+					patch -d "${S}" --dry-run -p${patchprefix} -i "${patch}" --silent > /dev/null
+					if [ "$?" = 0 ]; then
+						einfo "Applying ${patch##*/} [localpatch] ..."
+						patch -d "${S}" -p${patchprefix} -i "${patch}" --silent && touch "${S}/.patch-${patch##*/}.${locksufix}"; eend $?; break
+					elif [ "${patchprefix}" -ge 4 ]; then
+						eerror "\e[1;31mLocal patch ${patch##*/} does not fit.\e[0m"; eend 1; die "localpatch failed."
+					fi
+				done
+			fi
+		done
+
+		rm "${S}"/.patch-*."${locksufix}" -f
+	fi
+}
+
 dyn_prepare() {
 
 	if [[ -e $PORTAGE_BUILDDIR/.prepared ]] ; then
@@ -376,6 +416,7 @@ dyn_prepare() {
 
 	ebuild_phase pre_src_prepare
 	vecho ">>> Preparing source in $PWD ..."
+	if hasq localpatch ${FEATURES}; then localpatch; fi
 	ebuild_phase src_prepare
 	>> "$PORTAGE_BUILDDIR/.prepared" || \
 		die "Failed to create $PORTAGE_BUILDDIR/.prepared"
