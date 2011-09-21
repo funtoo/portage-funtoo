@@ -92,7 +92,7 @@ SUPPORTED_FEATURES       = frozenset([
                            "collision-protect", "compress-build-logs",
                            "digest", "distcc", "distcc-pump", "distlocks", "ebuild-locks", "fakeroot",
                            "fail-clean", "fixpackages", "force-mirror", "getbinpkg",
-                           "installsources", "keeptemp", "keepwork", "fixlafiles", "lmirror",
+                           "installsources", "keeptemp", "keepwork", "fixlafiles", "localpatch", "lmirror",
                            "metadata-transfer", "mirror", "multilib-strict", "news",
                            "noauto", "noclean", "nodoc", "noinfo", "noman",
                            "nostrip", "notitles", "parallel-fetch", "parallel-install",
