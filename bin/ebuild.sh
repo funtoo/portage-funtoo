@@ -9,9 +9,22 @@ ROOTPATH=${ROOTPATH##:}
 ROOTPATH=${ROOTPATH%%:}
 PREROOTPATH=${PREROOTPATH##:}
 PREROOTPATH=${PREROOTPATH%%:}
-PATH=$PORTAGE_BIN_PATH/ebuild-helpers:$PREROOTPATH${PREROOTPATH:+:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${ROOTPATH:+:}$ROOTPATH
-export PATH
 
+get_path() {
+	local _ebuild_helpers_path
+	case "$1" in
+		0|1|2|3)
+			_ebuild_helpers_path="$PORTAGE_BIN_PATH/ebuild-helpers"
+			;;
+		*)
+			_ebuild_helpers_path="$PORTAGE_BIN_PATH/ebuild-helpers/4:$PORTAGE_BIN_PATH/ebuild-helpers"
+			;;
+	esac
+	echo "$PREROOTPATH${PREROOTPATH:+:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${ROOTPATH:+:}$ROOTPATH:$_ebuild_helpers_path"
+}
+
+export PATH="$(get_path)"
+ 
 # Prevent aliases from causing portage to act inappropriately.
 # Make sure it's before everything so we don't mess aliases that follow.
 unalias -a
@@ -594,8 +607,7 @@ if ! has "$EBUILD_PHASE" clean cleanrm ; then
 					;;
 			esac
 
-			PATH=$_ebuild_helpers_path:$PREROOTPATH${PREROOTPATH:+:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${ROOTPATH:+:}$ROOTPATH
-			unset _ebuild_helpers_path
+			PATH="$(get_path $EAPI)"
 
 			# Use default ABI libdir in accordance with bug #355283.
 			x=LIBDIR_${DEFAULT_ABI}
