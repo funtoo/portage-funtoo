@@ -225,25 +225,14 @@ the package name.  \fBTake caution\fR as the descriptions are also
 matched as regular expressions.
 .TP
 .BR \-\-sync
-This updates the portage tree that is located in the
-directory that the PORTDIR variable refers to (default
-location is /usr/portage). The SYNC variable specifies
-the remote URI from which files will be synchronized.
-The \fBPORTAGE_SYNC_STALE\fR variable configures
-warnings that are shown when emerge \-\-sync has not
-been executed recently.
-
-\fBWARNING:\fR
-The emerge \-\-sync action will modify and/or delete
-files located inside the directory that the PORTDIR
-variable refers to (default location is /usr/portage).
-For more information, see the PORTDIR documentation in
-the make.conf(5) man page.
-
-\fBNOTE:\fR
-The \fBemerge\-webrsync\fR program will download the entire
-portage tree as a tarball, which is much faster than emerge
-\-\-sync for first time syncs.
+This updates the portage tree that is located in the directory that the PORTDIR
+variable refers to (default location is /usr/portage). If PORTDIR exists, the
+settings in the tree's .git directory define the location from where to pull
+updates.  If PORTDIR doesn't exist, then a new Portage tree will be cloned from
+the location specified in the SYNC variable.  SYNC_USER and SYNC_UMASK
+(defaulting to root and 022) define the user and umask that will be used during
+the sync operation -- for both initial Portage tree cloning and existing
+Portage tree updates.
 
 .TP
 .BR "\-\-unmerge " (\fB\-C\fR)
