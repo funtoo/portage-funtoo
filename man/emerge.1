@@ -246,20 +246,18 @@ The \fBPORTAGE_SYNC_STALE\fR variable configures
 warnings that are shown when emerge \-\-sync has not
 been executed recently.
 
-\fBWARNING:\fR
-The emerge \-\-sync action will revert local changes (e.g. modifications or
-additions of files) inside repositories synchronized using rsync.
+When using git and the repository exists, the settings in the .git directory 
+define the location from where to pull updates.  If it doesn't exist, then
+a new copy will be cloned from the location specified in the repository
+configuration.  SYNC_USER and SYNC_UMASK (defaulting to root and 022) define
+the user and umask that will be used during the sync operation -- for both
+the initial clone and further updates.
 
 \fBNOTE:\fR
 The emerge \-\-sync command is a compatibility command.  Sync operations are
 now performed using the the new emaint sync module. This new emaint sync module
 has greater functionality and flexibility.  Please refer to \fBemaint(1)\fR for
 more information about sync operations.
-
-\fBNOTE:\fR
-The \fBemerge\-webrsync\fR program will download the entire
-portage tree as a tarball, which is much faster than emerge
-\-\-sync for first time syncs.
 
 .TP
 .BR "\-\-unmerge " (\fB\-C\fR)
