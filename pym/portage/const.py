@@ -97,7 +97,7 @@ SUPPORTED_FEATURES       = frozenset([
                            "nostrip", "notitles", "parallel-fetch", "parallel-install",
                            "parse-eapi-ebuild-head",
                            "prelink-checksums", "preserve-libs",
-                           "protect-owned", "python-trace", "sandbox",
+                           "protect-owned", "python-trace", "safetydance", "sandbox",
                            "selinux", "sesandbox", "sfperms",
                            "sign", "skiprocheck", "split-elog", "split-log", "splitdebug",
                            "strict", "stricter", "suidctl", "test", "test-fail-continue",
