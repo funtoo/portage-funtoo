@@ -30,7 +30,7 @@ import sys
 
 x_scripts = {
 	'bin': [
-		'bin/ebuild', 'bin/egencache', 'bin/emerge', 'bin/emerge-webrsync',
+		'bin/ebuild', 'bin/egencache', 'bin/emerge',
 		'bin/emirrordist', 'bin/portageq', 'bin/quickpkg', 'bin/repoman'
 	],
 	'sbin': [
