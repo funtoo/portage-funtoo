@@ -19,6 +19,9 @@ LDFLAGS=""
 FFLAGS=""
 FCFLAGS=""
 
+SYNC="git://github.com/funtoo/portage-mini-2011.git"
+SYNC_USER="root"
+
 # Default distfiles mirrors. This rotation has multiple hosts and is reliable.
 # Approved by the mirror-admin team.
 GENTOO_MIRRORS="http://distfiles.gentoo.org"
@@ -62,8 +65,15 @@ FEATURES="assume-digests binpkg-logs
 # Ignore file collisions for unowned *.pyo and *.pyc files, this helps during
 # transition from compiling python modules in live file system to compiling
 # them in src_install() function.
-COLLISION_IGNORE="/lib/modules/* *.py[co] *\$py.class"
+COLLISION_IGNORE="/lib/modules/* /lib/firmware/* *.py[co] *\$py.class"
 UNINSTALL_IGNORE="/lib/modules/*"
+
+# Enable preserve-libs for testing with portage versions that support it.
+# This setting is commented out for portage versions that don't support it.
+FEATURES="${FEATURES} preserve-libs"
+
+# Default chunksize for binhost comms
+PORTAGE_BINHOST_CHUNKSIZE="3000"
 
 # By default wait 5 secs before cleaning a package
 CLEAN_DELAY="5"
@@ -85,14 +95,6 @@ PORTAGE_FETCH_CHECKSUM_TRY_MIRRORS="5"
 
 # Minimum size of existing file for RESUMECOMMAND to be called.
 PORTAGE_FETCH_RESUME_MIN_SIZE="350K"
-
-# Number of times 'emerge --sync' will run before giving up.
-PORTAGE_RSYNC_RETRIES="-1"
-
-# Number of seconds rsync will wait before timing out.
-#RSYNC_TIMEOUT="180"
-
-PORTAGE_RSYNC_OPTS="--recursive --links --safe-links --perms --times --omit-dir-times --compress --force --whole-file --delete --stats --human-readable --timeout=180 --exclude=/distfiles --exclude=/local --exclude=/packages"
 
 # The number of days after the last `emerge --sync` that a warning
 # message should be produced.
