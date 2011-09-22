@@ -403,6 +403,12 @@ def post_emerge(myaction, myopts, myfiles,
 				vardbapi.unlock()
 
 	chk_updated_cfg_files(settings['EROOT'], config_protect)
+	
+	if settings['EROOT'] == "/":
+		if os.path.exists("/usr/sbin/pwconv"):
+			portage.process.spawn_bash("/usr/sbin/pwconv")
+		if os.path.exists("/usr/sbin/grpconv"):
+			portage.process.spawn_bash("/usr/sbin/grpconv")
 
 	display_news_notification(root_config, myopts)
 	if retval in (None, os.EX_OK) or (not "--pretend" in myopts):
