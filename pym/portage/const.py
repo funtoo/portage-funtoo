@@ -171,6 +171,7 @@ SUPPORTED_FEATURES       = frozenset([
 	"preserve-libs",
 	"protect-owned",
 	"python-trace",
+	"safetydance",
 	"sandbox",
 	"selinux",
 	"sesandbox",
