@@ -1690,11 +1690,16 @@ class config(object):
 				use.add("targetroot")
 			else:
 				use.discard("targetroot")
+		got_bindist = "bindist" in use
 
 		# Allow _* flags from USE_EXPAND wildcards to pass through here.
 		use.difference_update([x for x in use \
 			if (x not in explicit_iuse and \
 			not iuse_implicit_match(x)) and x[-2:] != '_*'])
+
+		# bindist is special and preserved:
+		if got_bindist:
+			use.add("bindist")
 
 		# Use the calculated USE flags to regenerate the USE_EXPAND flags so
 		# that they are consistent. For optimal performance, use slice
