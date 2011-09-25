@@ -3661,7 +3661,7 @@ class dblink(object):
 
 			# This check only applies when built from source, since
 			# inforoot values are written just after src_install.
-			if not is_binpkg and val != self.settings.get(var_name, ''):
+			if not is_binpkg and var_name != "SLOT" and val != self.settings.get(var_name, ''):
 				self._eqawarn('preinst',
 					[_("QA Notice: Expected %(var_name)s='%(expected_value)s', got '%(actual_value)s'\n") % \
 					{"var_name":var_name, "expected_value":self.settings.get(var_name, ''), "actual_value":val}])
