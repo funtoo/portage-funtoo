@@ -184,7 +184,6 @@ class MaskManager(object):
 		@rtype: String
 		@return: A matching atom string or None if one is not found.
 		"""
-
 		cp = cpv_getkey(cpv)
 		mask_atoms = self._pmaskdict.get(cp)
 		if mask_atoms:
@@ -218,7 +217,6 @@ class MaskManager(object):
 		@rtype: String
 		@return: A matching atom string or None if one is not found.
 		"""
-
 		cp = cpv_getkey(cpv)
 		return self._getMaskAtom(cpv, slot, repo, self._punmaskdict.get(cp))
 

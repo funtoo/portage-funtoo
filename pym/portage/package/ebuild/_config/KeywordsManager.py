@@ -196,44 +196,49 @@ class KeywordsManager(object):
 
 
 	@staticmethod
-	def _getMissingKeywords(cpv, pgroups, mygroups):
-		"""Determines the missing keywords
+	def _getMissingKeywords(cpv, accepted, ebuild_keywords):
+		return []
 
-		@param pgroups: The pkg keywords accepted
-		@type pgroups: list
-		@param mygroups: The ebuild keywords
-		@type mygroups: list
-		"""
-		match = False
-		hasstable = False
-		hastesting = False
-		for gp in mygroups:
-			if gp == "*" or (gp == "-*" and len(mygroups) == 1):
-				if gp == "*":
-					match = True
-					break
-			elif gp in pgroups:
-				match = True
-				break
-			elif gp.startswith("~"):
-				hastesting = True
-			elif not gp.startswith("-"):
-				hasstable = True
-		if not match and \
-			((hastesting and "~*" in pgroups) or \
-			(hasstable and "*" in pgroups) or "**" in pgroups):
-			match = True
-		if match:
-			missing = []
+		# pgroups values:
+		# ** = match
+		# * + hasstable = match
+		# ~* + hastesting = match
+		# == mygroups = match
+
+		# mygroups (ebuild) values:
+		# * = match
+		# ~* = (something with ~ in pgroups) == match
+		#
+
+		need_stable = False
+		need_unstable = False
+
+		accepted = set(accepted)
+
+		if "**" in accepted:
+			return []
+		elif "*" in accepted:
+			need_stable = True
+		elif "~*" in accepted:
+			need_unstable = True
+
+		missing = []
+		for e in ebuild_keywords:
+			if e == "*":
+				return []
+			elif need_unstable and e[0] == "~":
+				return []
+			elif need_stable:
+				return []
+			if e in accepted:
+				return []	
+			else:
+				missing.append(e)
+		if len(missing):
+			return missing
 		else:
-			if not mygroups:
-				# If KEYWORDS is empty then we still have to return something
-				# in order to distinguish from the case of "none missing".
-				mygroups.append("**")
-			missing = mygroups
-		return missing
-
-
+			return ["**"]
+	
 	def getPKeywords(self, cpv, slot, repo, global_accept_keywords):
 		"""Gets any package.keywords settings for cp for the given
 		cpv, slot and repo
