@@ -389,6 +389,11 @@ class _dynamic_depgraph_config(object):
 		self._ignored_deps = []
 		self._highest_pkg_cache = {}
 
+		# Binary packages that have been rejected because their USE
+		# didn't match the user's config. It maps packages to a set
+		# of flags causing the rejection.
+		self.ignored_binaries = {}
+
 		self._needed_unstable_keywords = backtrack_parameters.needed_unstable_keywords
 		self._needed_p_mask_changes = backtrack_parameters.needed_p_mask_changes
 		self._needed_license_changes = backtrack_parameters.needed_license_changes
@@ -540,6 +545,41 @@ class depgraph(object):
 		if self._frozen_config.spinner:
 			self._frozen_config.spinner.update()
 
+	def _show_ignored_binaries(self):
+		"""
+		Show binaries that have been ignored because their USE didn't
+		match the user's config.
+		"""
+		if not self._dynamic_config.ignored_binaries \
+			or '--quiet' in self._frozen_config.myopts \
+			or self._dynamic_config.myparams.get(
+			"binpkg_respect_use") in ("y", "n"):
+			return
+
+		self._show_merge_list()
+
+		writemsg("\n!!! The following binary packages have been ignored " + \
+				"due to non matching USE:\n\n", noiselevel=-1)
+
+		for pkg, flags in self._dynamic_config.ignored_binaries.items():
+			writemsg("    =%s" % pkg.cpv, noiselevel=-1)
+			if pkg.root != '/':
+				writemsg(" for %s" % (pkg.root,), noiselevel=-1)
+			writemsg("\n        use flag(s): %s\n" % ", ".join(sorted(flags)),
+				noiselevel=-1)
+
+		msg = [
+			"",
+			"NOTE: The --binpkg-respect-use=n option will prevent emerge",
+			"      from ignoring these binary packages if possible.",
+			"      Using --binpkg-respect-use=y will silence this warning."
+		]
+
+		for line in msg:
+			if line:
+				line = colorize("INFORM", line)
+			writemsg_stdout(line + "\n", noiselevel=-1)
+
 	def _show_missed_update(self):
 
 		# In order to minimize noise, show only the highest
@@ -550,6 +590,10 @@ class depgraph(object):
 			if pkg.installed:
 				# Exclude installed here since we only
 				# want to show available updates.
+				continue
+			chosen_pkg = self._dynamic_config.mydbapi[pkg.root
+				].match_pkgs(pkg.slot_atom)
+			if not chosen_pkg or chosen_pkg[-1] >= pkg:
 				continue
 			k = (pkg.root, pkg.slot_atom)
 			if k in missed_updates:
@@ -757,7 +801,8 @@ class depgraph(object):
 		"""Return a set of flags that trigger reinstallation, or None if there
 		are no such flags."""
 		if "--newuse" in self._frozen_config.myopts or \
-			"--binpkg-respect-use" in self._frozen_config.myopts:
+			self._dynamic_config.myparams.get(
+			"binpkg_respect_use") in ("y", "auto"):
 			flags = set(orig_iuse.symmetric_difference(
 				cur_iuse).difference(forced_flags))
 			flags.update(orig_iuse.intersection(orig_use).symmetric_difference(
@@ -3644,6 +3689,8 @@ class depgraph(object):
 		if not isinstance(atom, portage.dep.Atom):
 			atom = portage.dep.Atom(atom)
 		atom_cp = atom.cp
+		have_new_virt = atom_cp.startswith("virtual/") and \
+			self._have_new_virt(root, atom_cp)
 		atom_set = InternalPackageSet(initial_atoms=(atom,), allow_repo=True)
 		existing_node = None
 		myeb = None
@@ -3691,6 +3738,9 @@ class depgraph(object):
 				# USE configuration.
 				for pkg in self._iter_match_pkgs(root_config, pkg_type, atom.without_use, 
 					onlydeps=onlydeps):
+					if pkg.cp != atom_cp and have_new_virt:
+						# pull in a new-style virtual instead
+						continue
 					if pkg in self._dynamic_config._runtime_pkg_mask:
 						# The package has been masked by the backtracking logic
 						continue
@@ -3908,6 +3958,7 @@ class depgraph(object):
 						e_pkg = self._dynamic_config._slot_pkg_map[root].get(pkg.slot_atom)
 						if not e_pkg:
 							break
+
 						# Use PackageSet.findAtomForPackage()
 						# for PROVIDE support.
 						if atom_set.findAtomForPackage(e_pkg, modified_use=self._pkg_use_enabled(e_pkg)):
@@ -3928,7 +3979,8 @@ class depgraph(object):
 					if built and not useoldpkg and (not installed or matched_pkgs_ignore_use) and \
 						("--newuse" in self._frozen_config.myopts or \
 						"--reinstall" in self._frozen_config.myopts or \
-						"--binpkg-respect-use" in self._frozen_config.myopts):
+						(not installed and self._dynamic_config.myparams.get(
+						"binpkg_respect_use") in ("y", "auto"))):
 						iuses = pkg.iuse.all
 						old_use = self._pkg_use_enabled(pkg)
 						if myeb:
@@ -3942,9 +3994,11 @@ class depgraph(object):
 						cur_iuse = iuses
 						if myeb and not usepkgonly and not useoldpkg:
 							cur_iuse = myeb.iuse.all
-						if self._reinstall_for_flags(forced_flags,
-							old_use, iuses,
-							now_use, cur_iuse):
+						reinstall_for_flags = self._reinstall_for_flags(forced_flags,
+							old_use, iuses, now_use, cur_iuse)
+						if reinstall_for_flags:
+							if not pkg.installed:
+								self._dynamic_config.ignored_binaries.setdefault(pkg, set()).update(reinstall_for_flags)
 							break
 					# Compare current config to installed package
 					# and do not reinstall if possible.
@@ -4436,7 +4490,7 @@ class depgraph(object):
 							# matches (this can happen if an atom lacks a
 							# category).
 							show_invalid_depstring_notice(
-								pkg, depstr, str(e))
+								pkg, depstr, _unicode_decode("%s") % (e,))
 							del e
 							raise
 						if not success:
@@ -4467,7 +4521,8 @@ class depgraph(object):
 						except portage.exception.InvalidAtom as e:
 							depstr = " ".join(vardb.aux_get(pkg.cpv, dep_keys))
 							show_invalid_depstring_notice(
-								pkg, depstr, "Invalid Atom: %s" % (e,))
+								pkg, depstr,
+								_unicode_decode("Invalid Atom: %s") % (e,))
 							return False
 				for cpv in stale_cache:
 					del blocker_cache[cpv]
@@ -6124,6 +6179,8 @@ class depgraph(object):
 			self._show_slot_collision_notice()
 		else:
 			self._show_missed_update()
+
+		self._show_ignored_binaries()
 
 		self._display_autounmask()
 
