@@ -7206,7 +7206,6 @@ def _get_masking_status(pkg, pkgsettings, root_config, myrepo=None, use=None):
 	mreasons = _getmaskingstatus(
 		pkg, settings=pkgsettings,
 		portdb=root_config.trees["porttree"].dbapi, myrepo=myrepo)
-
 	if not pkg.installed:
 		if not pkgsettings._accept_chost(pkg.cpv, pkg.metadata):
 			mreasons.append(_MaskReason("CHOST", "CHOST: %s" % \
