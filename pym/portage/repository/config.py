@@ -315,7 +315,7 @@ class RepoConfigLoader(object):
 			else:
 				prepos[repo.name] = repo
 
-	def __init__(self, paths, settings):
+	def __init__(self, paths, repo_vars):
 		"""Load config from files in paths"""
 
 		prepos = {}
@@ -324,8 +324,8 @@ class RepoConfigLoader(object):
 		ignored_map = {}
 		ignored_location_map = {}
 
-		portdir = settings.get('PORTDIR', '')
-		portdir_overlay = settings.get('PORTDIR_OVERLAY', '')
+		portdir = repo_vars["PORTDIR"]
+		portdir_overlay = repo_vars["PORTDIR_OVERLAY"]
 
 		self._parse(paths, prepos, ignored_map, ignored_location_map)
 
@@ -413,10 +413,6 @@ class RepoConfigLoader(object):
 
 		if portdir in location_map:
 			portdir_repo = prepos[location_map[portdir]]
-			portdir_sync = settings.get('SYNC', '')
-			#if SYNC variable is set and not overwritten by repos.conf
-			if portdir_sync and not portdir_repo.sync:
-				portdir_repo.sync = portdir_sync
 
 		if prepos['DEFAULT'].main_repo is None or \
 			prepos['DEFAULT'].main_repo not in prepos:
@@ -427,7 +423,7 @@ class RepoConfigLoader(object):
 				prepos['DEFAULT'].main_repo = ignored_location_map[portdir]
 			else:
 				prepos['DEFAULT'].main_repo = None
-				writemsg(_("!!! main-repo not set in DEFAULT and PORTDIR is empty. \n"), noiselevel=-1)
+				writemsg(_("!!! Portage repository is currently empty.\n"), noiselevel=-1)
 
 		self.prepos = prepos
 		self.prepos_order = prepos_order
@@ -563,10 +559,7 @@ class RepoConfigLoader(object):
 		for repo_name in self.prepos_order:
 			yield self.prepos[repo_name]
 
-def load_repository_config(settings):
+def load_repository_config(repo_vars):
 	#~ repoconfigpaths = [os.path.join(settings.global_config_path, "repos.conf")]
-	repoconfigpaths = []
-	if settings.local_config:
-		repoconfigpaths.append(os.path.join(settings["PORTAGE_CONFIGROOT"],
-			USER_CONFIG_PATH, "repos.conf"))
-	return RepoConfigLoader(repoconfigpaths, settings)
+	repoconfigpaths = [ "/etc" ]
+	return RepoConfigLoader(repoconfigpaths, repo_vars)

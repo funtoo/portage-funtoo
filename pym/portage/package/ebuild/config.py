@@ -12,6 +12,7 @@ import platform
 import re
 import sys
 import warnings
+import codecs
 
 from _emerge.Package import Package
 import portage
@@ -19,12 +20,12 @@ portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.data:portage_gid',
 )
 from portage import bsd_chflags, \
-	load_mod, os, selinux, _unicode_decode
+	load_mod, os, selinux, _encodings, _unicode_encode, _unicode_decode
 from portage.const import CACHE_PATH, \
 	DEPCACHE_PATH, INCREMENTALS, MAKE_CONF_FILE, \
 	MODULES_FILE_PATH, PORTAGE_BIN_PATH, PORTAGE_PYM_PATH, \
 	PRIVATE_PATH, PROFILE_PATH, USER_CONFIG_PATH, \
-	USER_VIRTUALS_FILE
+	USER_VIRTUALS_FILE, GLOBAL_CONFIG_PATH
 from portage.const import _SANDBOX_COMPAT_LEVEL
 from portage.dbapi import dbapi
 from portage.dbapi.porttree import portdbapi
@@ -33,7 +34,7 @@ from portage.dep import Atom, isvalidatom, match_from_list, use_reduce, _repo_se
 from portage.eapi import eapi_exports_AA, eapi_exports_merge_type, \
 	eapi_supports_prefix, eapi_exports_replace_vars
 from portage.env.loaders import KeyValuePairFileLoader
-from portage.exception import InvalidDependString, PortageException
+from portage.exception import DirectoryNotFound, ParseError, InvalidDependString, PortageException
 from portage.localization import _
 from portage.output import colorize
 from portage.process import fakeroot_capable, sandbox_capable
@@ -50,7 +51,7 @@ from portage.package.ebuild._config.features_set import features_set
 from portage.package.ebuild._config.KeywordsManager import KeywordsManager
 from portage.package.ebuild._config.LicenseManager import LicenseManager
 from portage.package.ebuild._config.UseManager import UseManager
-from portage.package.ebuild._config.LocationsManager import LocationsManager
+#from portage.package.ebuild._config.LocationsManager import LocationsManager
 from portage.package.ebuild._config.MaskManager import MaskManager
 from portage.package.ebuild._config.VirtualsManager import VirtualsManager
 from portage.package.ebuild._config.helper import ordered_by_atom_specificity, prune_incremental
@@ -134,6 +135,62 @@ class config(object):
 	_environ_whitelist_re = special_env_vars.environ_whitelist_re
 	_global_only_vars = special_env_vars.global_only_vars
 
+	def _check_directory(self, varname, var):
+		if not os.path.isdir(var):
+			writemsg(_("!!! Error: %s='%s' is not a directory. " "Please correct this.\n") % (varname, var), noiselevel=-1)
+			raise DirectoryNotFound(var)
+
+	def _addProfile(self, rootPath, currentPath):
+		# _addProfile implements the "cascading" profile support in Portage by recursively iterating through profiles and
+		# creating a list of all referenced profiles in self.profiles.
+
+		# self.profiles is evaluated from beginning to end, so the first profile in the list is the top parent profile, but
+		# its values can get overridden by the profiles that follow it.
+
+		# define locations for "parents" and "EAPI" files:
+		
+		parentsFile = os.path.join(currentPath, "parent")
+		eapi_file = os.path.join(currentPath, "eapi")
+	
+		# if eapi file exists, try to open it. If IOError, just continue. But if we open it and the EAPI listed isn't supported,
+		# then throw an error:
+
+		if os.path.exists(eapi_file):
+			try:
+				eapi = codecs.open(_unicode_encode(eapi_file, encoding=_encodings['fs'], errors='strict'), mode='r', encoding=_encodings['content'], errors='replace').readline().strip()
+			except IOError:
+				pass
+			else:
+				if not eapi_is_supported(eapi):
+					raise ParseError(_( "Profile contains unsupported " "EAPI '%s': %s") % (eapi, os.path.realpath(eapi_file),))
+
+		# Does the parents file exist in this profile? If so, grab its contents:
+		if os.path.exists(parentsFile):
+			
+			parents = grabfile(parentsFile)
+		
+			# For each line in the parents file, use the line as a relative path to modify "currentPath", our current path:
+			for parentPath in parents:
+				if parentPath[0] == ":":
+					# an ":" in "parents" file means "relative to $PORTDIR/profiles" (ie. rootPath, an argument).	
+					parentPath = rootPath + "/" + parentPath[1:]
+				elif parentPath[0] == "/":
+					# use parentPath as an absolute path, such as "/var/lib/layman"...
+					pass
+				else:
+					parentPath = normalize_path(os.path.join(currentPath, parentPath))
+
+				# if this path exists, recursively add this profile (recursive call):
+
+				if os.path.exists(parentPath):
+					self._addProfile(rootPath, parentPath)
+				else:
+					raise ParseError( _("Parent '%s' from %s not found (did you mean '%s'?)") % (parentPath, parentsFile, ":"+parentPath[1:]))
+
+		# after recursively processing parents, add our own profile to the list:
+
+		self.profiles.append(currentPath)
+
 	def __init__(self, clone=None, mycpv=None, config_profile_path=None,
 		config_incrementals=None, config_root=None, target_root=None,
 		_eprefix=None, local_config=True, env=None, _unmatched_removal=False):
@@ -186,7 +243,6 @@ class config(object):
 		self._accept_chost_re = None
 		self._accept_properties = None
 		self._features_overrides = []
-		self._make_defaults = None
 
 		# _unknown_features records unknown features that
 		# have triggered warning messages, and ensures that
@@ -214,7 +270,6 @@ class config(object):
 			self.usemask = clone.usemask
 			self.useforce = clone.useforce
 			self.puse = clone.puse
-			self.user_profile_dir = clone.user_profile_dir
 			self.local_config = clone.local_config
 			self.make_defaults_use = clone.make_defaults_use
 			self.mycpv = clone.mycpv
@@ -238,7 +293,6 @@ class config(object):
 				self.configdict['pkginternal'],
 				self.configdict['globals'],
 				self.configdict['defaults'],
-				self.configdict['conf'],
 				self.configdict['pkg'],
 				self.configdict['env'],
 			]
@@ -268,32 +322,198 @@ class config(object):
 			self._expand_map = copy.deepcopy(clone._expand_map)
 
 		else:
-			locations_manager = LocationsManager(config_root=config_root,
-				config_profile_path=config_profile_path, eprefix=eprefix,
-				local_config=local_config, target_root=target_root)
 
-			eprefix = locations_manager.eprefix
-			config_root = locations_manager.config_root
-			self.profiles = locations_manager.profiles
-			self.profile_path = locations_manager.profile_path
-			self.user_profile_dir = locations_manager.user_profile_dir
-			abs_user_config = locations_manager.abs_user_config
+	# NOTICE:
 
-			make_conf = getconfig(
-				os.path.join(config_root, MAKE_CONF_FILE),
-				tolerant=tolerant, allow_sourcing=True) or {}
+	# IMPORTANT: THE FOLLOWING PHASES OF CODE ARE CLEARLY DOCUMENTED TO MAKE THEM EASIER TO UNDERSTAND, BUT ALSO TO HELP DEVELOPERS TRACK INTERDEPENDENCIES
+	# BETWEEN THE VARIOUS PARTS. THIS IS CRITICAL FOR KEEPING THIS CODE MANAGEABLE AND MAINTAINED. IF YOU MODIFY THIS CODE, YOU MUST CAREFULLY DOCUMENT
+	# EVERY PORTION YOU ADD WITH COMMENTS THAT PROVIDE CONTEXT FOR THE ACTIONS BEING TAKEN, EXPLAINING HOW THEY RELATE TO THE OTHER PARTS, AND ANY USER
+	# IMPACT, IF ANY. SECTIONS OF CODE SHOULD BE ORGANIZED INTO LOGICAL GROUPS WITH MINIMAL INTER- DEPENDENCIES TO OTHER PARTS. THIS CODE CAN EASILY
+	# DEGENERATE INTO SPAGHETTI CODE WITH LOTS OF UGLY UNTRACKED INTER-DEPENDENCIES IF IT IS NOT PROPERLY MAINTAINED. THIS APPLIES TO ALL PORTAGE CODE BUT
+	# ESPECIALLY TO THIS PART OF PORTAGE. DEFINE: WHAT PARTS OF CODE USE EACH VARIABLE, IF ANY. WHAT VARIABLES ARE EXPECTED TO BE DEFINED IN EACH SECTION
+	# IN "Requires: " LINES, ETC.
 
-			make_conf.update(getconfig(
-				os.path.join(abs_user_config, 'make.conf'),
-				tolerant=tolerant, allow_sourcing=True,
-				expand=make_conf) or {})
+	# ENV CONFIG BEGIN:
 
-			# Allow ROOT setting to come from make.conf if it's not overridden
-			# by the constructor argument (from the calling environment).
-			locations_manager.set_root_override(make_conf.get("ROOT"))
-			target_root = locations_manager.target_root
-			eroot = locations_manager.eroot
-			self.global_config_path = locations_manager.global_config_path
+	# set up self.backupenv as the original contents of the environment.
+	# self.reset() will reset self.configdict["env"] to the contents of backupenv, so we can always get a clean environment
+
+			# backupenv is used for calculating incremental variables.
+			if env is None:
+				env = os.environ
+
+			# Avoid potential UnicodeDecodeError exceptions later.
+			env_unicode = dict((_unicode_decode(k), _unicode_decode(v))
+				for k, v in env.items())
+
+			self.backupenv = env_unicode
+
+
+	# EARLY CONFIG BEGIN:
+
+	# Figure out config_root, typically "/etc" and where we will look for configuration.
+	# Figure out abs_user_config, typically "/etc/portage".
+	# Grab initial "/etc/make.conf" to bootstrap the process of getting our multi-file configuration loaded.
+	# Update "/etc/make.conf" values using values from "/etc/portage/make.conf", if it exists.
+
+	# Prepare "repo_vars" variable, which contains a minimal set of variables needed by our Portage Repository so it can properly initialize very early in
+	# this process, which will allow for our cascading profiles to leverage to be aware of the different Repositories and overlays when *they* initialize.
+	# This is a requirement for extended Portage profiles support, so that an initial "/" in a profile's "parents" file can tell Portage to load a profile
+	# relative to $PORTDIR/profiles rather than the current working directory. This in turn enables users to specify more than one profile, which in turn
+	# allows us to have leaner and meaner profiles, since users can say "I want to use an amd64 profile and a server profile" rather than "I want to use the
+	# amd64/server profile" (which then needs to be duplicated among all arches.)
+
+			if eprefix is None:
+				eprefix = ""
+
+			if config_root is None:
+				config_root = eprefix + os.sep
+
+			config_root = normalize_path(os.path.abspath(config_root)).rstrip(os.path.sep) + os.path.sep
+			
+			# set global_config_path (the path where Portage will look for make.globals) relative to eprefix if it is defined:	
+	
+			self.global_config_path = os.path.join(eprefix, GLOBAL_CONFIG_PATH)
+
+			# make sure config_root, ie. "/etc", is a directory. If not, complain to the user about the value of "PORTAGE_CONFIGROOT":
+
+			self._check_directory("PORTAGE_CONFIGROOT", config_root)
+
+			# set abs_user_config to "/etc/portage":
+
+			abs_user_config = os.path.join(config_root, USER_CONFIG_PATH)
+	
+			# create a dictionary of initial minimal settings that our Portage repository needs to configure itself,
+			# before we have our full-blown config enabled. We are addressing a chicken-and-egg problem. We will look for 
+			# the following settings in /etc/portage/portdir (which must be a file) and /etc/portage/overlays 
+			# (which can be a directory).
+			
+			repo_vars = {}
+		
+			mypath = os.path.join(abs_user_config,"portdir")
+			if os.path.exists(mypath):
+				repo_vars["PORTDIR"] = " ".join(grabfile(mypath))
+			else:
+				# portdir was unset:
+				repo_vars["PORTDIR"] = "/var/src/portage"
+
+			mypath = os.path.join(abs_user_config,"overlays")
+			if os.path.exists(mypath):
+				if "PORTDIR_OVERLAY" in self.backupenv:
+					
+					# /usr/bin/ebuild uses a trick if your current working directory happens to be inside a Portage
+					# tree that isn't listed in PORTDIR_OVERLAY. It updates the environment variable PORTDIR_OVERLAY,
+					# appending the Portage tree that it detected it is inside of, and then tells the portage class
+					# to re-initialize itself using the "imp.reload(portage)" call. So we *must* look for a 
+					# PORTDIR_OVERLAY setting in the environment and use it if it is found.
+
+					repo_vars["PORTDIR_OVERLAY"] = self.backupenv["PORTDIR_OVERLAY"]
+				else:
+					repo_vars["PORTDIR_OVERLAY"] = " ".join(grabfile(mypath, recursive=1))
+			else:
+				# no overlays were specified:
+				repo_vars["PORTDIR_OVERLAY"] = ""
+
+	# EARLY CONFIG END.
+
+	# ROOT CONFIG BEGIN:
+	# Requires: make_conf defined in previous section.
+	# Here, we define target_root and eroot, used later in the code.
+
+			## grab global_config_path from locations manager:
+			#root_override = make_conf.get("ROOT")
+			#if target_root is None and root_override is not None:
+			#	target_root = root_override
+			#	if not target_root.strip():
+			#		target_root = None
+
+			# if target_root is still None, default to "/":
+
+			if target_root is None:
+				target_root = "/"
+
+			# normalize the path of target_root and ensure it ends with the OS path separator (ie. "/"):
+
+			target_root = normalize_path(os.path.abspath(target_root)).rstrip(os.path.sep) + os.path.sep
+
+			# ensure_dirs will create target_root if it doesn't exists, and ensure it has proper perms:
+		
+			ensure_dirs(target_root)
+		
+			# make sure target_root is a directory, otherwise complain to the user abou their ROOT variable:
+
+			self._check_directory("ROOT", target_root)
+
+			# set self.eroot to self.target_root + self.eprefix + "/" (eprefix is typically "")
+	
+			eroot = target_root.rstrip(os.sep) + eprefix + os.sep
+
+	# ROOT CONFIG END.
+
+	# PORTAGE REPOSITORY AND OVERLAYS INIT BEGIN:
+	# Requires: repo_vars (initialized in previous phase) so that we can initialize our Portage Repository before our config object is fully functional.
+	# repo_vars contains just the settings that our Portage repository needs to bootstrap:
+
+			self.repositories = load_repository_config(repo_vars)
+	
+	# PORTAGE REPOSITORY AND OVERLAYS INIT END.
+	# Now we have the ability to introspect into our Portage tree and overlays and also look at the logical repo_name of all our repositories. This will
+	# allow Portage to eventually understand things like "repo_name /foo/bar" in a "parents" file, and thus have profiles span multiple overlays, if
+	# desired by the user.
+
+	# PROFILE CONFIG BEGIN:
+	# set self.profile_path to the path to main profile directory "/etc/make.profile".
+	# if that directory doesn't exist, try to use "/etc/portage/make.profile".
+	# Then, recursively scan self.profile_path (using the self._addProfile() recursive method), processing "parents" files and turning self.profile_path
+	# into a complete list of all cascading profiles, with the first parent at the beginning of the list.
+	# Finally, if "/etc/portage/profile" exists, tack it on the end of self.profiles so the user-defined profile has the ability to modify any settings
+	# that were defined in the profile.
+
+
+			# absolute paths in parent files will be relative to this path, typically something like /usr/portage/profiles:
+			profile_root = "%s/profiles" % self.repositories.mainRepoLocation()
+
+			if config_profile_path is None:
+				self.profile_path = "/etc/portage"
+			else:
+				# NOTE: repoman may pass in an empty string here, in order to create an empty profile  for checking dependencies of packages with empty KEYWORDS.
+				self.profile_path = config_profile_path
+
+			# create a list of all our profiles - this recursively iterates through cascading profiles and makes a list of all  of 'em:
+	
+			self.profiles = []
+			# do we have a profile directory?:
+			if self.profile_path:
+			# yes - ok, try grabbing profiles:
+				try:
+					# this does the recursive heavy lifting of looking at "parent" files and creating a list of profiles in self.profiles:
+					self._addProfile(profile_root,os.path.realpath(self.profile_path))
+				except ParseError as e:
+					# there was some error recursively parsing the profile: print exception value (specific error message)
+					writemsg(_("Warning: profile %s: %s\n") % ( self.profile_path, e.value ), noiselevel=-1)
+					self.profiles = []
+
+			# ok, we now have a list of all our profiles - convert them from mutable list to immutable tuple. We're done:
+	
+			self.profiles = tuple(self.profiles)
+
+	# PROFILE CONFIG END
+
+# COMMENTS END - PICK UP SECTION COMMENTING FROM HERE.
+	# FROM LOCATIONS_MANAGER END
+
+			#eprefix = locations_manager.eprefix
+			#config_root = locations_manager.config_root
+			#self.profiles = locations_manager.profiles
+			#self.profile_path = locations_manager.profile_path
+			#abs_user_config = locations_manager.abs_user_config
+
+						# set target_root using the setting from our make.conf, if it is defined:
+
+			#locations_manager.set_root_override(make_conf.get("ROOT"))
+
+			#target_root = locations_manager.target_root
+			#eroot = locations_manager.eroot
 
 			if config_incrementals is None:
 				self.incrementals = INCREMENTALS
@@ -304,8 +524,7 @@ class config(object):
 
 			self.module_priority    = ("user", "default")
 			self.modules            = {}
-			modules_loader = KeyValuePairFileLoader(
-				os.path.join(config_root, MODULES_FILE_PATH), None, None)
+			modules_loader = KeyValuePairFileLoader( os.path.join(config_root, MODULES_FILE_PATH), None, None)
 			modules_dict, modules_errors = modules_loader.load()
 			self.modules["user"] = modules_dict
 			if self.modules["user"] is None:
@@ -314,6 +533,30 @@ class config(object):
 				"portdbapi.metadbmodule": "portage.cache.metadata.database",
 				"portdbapi.auxdbmodule":  "portage.cache.flat_hash.database",
 			}
+
+
+	# CONFIGLIST START
+	# CONFIGDICT START
+
+	# env    				USE from the current environment variables (USE and those listed in USE_EXPAND)
+	# pkg    				Per-package USE from /etc/portage/package.use (see portage(5))
+	# conf   				USE from make.conf
+	# defaults				USE from make.defaults and package.use in the profile (see portage(5))
+	# pkginternal 				USE from ebuild(5) IUSE defaults
+	# env.d  				USE from the environment variables defined by files in /etc/env.d/
+
+	# Requires: self.profiles (for iterating through "make.defaults")
+	# Requires: self.global_config_path
+
+	# Note: "make.defaults" hard-coded
+	# Note: "make.conf" hard-coded
+	# Note: "make.globals" hard-coded
+
+
+	# configlist has order: [ "env.d", "pkginternal", "defaults", "pkg", "env" ]
+	# lookuplist has order: [ "env", "pkg", "defaults", "pkginternal", "env.d" ]
+
+	# this means that variables will be searched in "lookuplist" order ^^ -- backupenv will be looked in first.
 
 			self.configlist=[]
 
@@ -329,20 +572,6 @@ class config(object):
 
 			self.configlist.append({})
 			self.configdict["pkginternal"] = self.configlist[-1]
-
-			self.packages_list = [grabfile_package(os.path.join(x, "packages"), verify_eapi=True) for x in self.profiles]
-			self.packages      = tuple(stack_lists(self.packages_list, incremental=1))
-			del self.packages_list
-			#self.packages = grab_stacked("packages", self.profiles, grabfile, incremental_lines=1)
-
-			# revmaskdict
-			self.prevmaskdict={}
-			for x in self.packages:
-				# Negative atoms are filtered by the above stack_lists() call.
-				if not isinstance(x, Atom):
-					x = Atom(x.lstrip('*'))
-				self.prevmaskdict.setdefault(x.cp, []).append(x)
-
 			# The expand_map is used for variable substitution
 			# in getconfig() calls, and the getconfig() calls
 			# update expand_map with the value of each variable
@@ -361,23 +590,16 @@ class config(object):
 			expand_map = {}
 			self._expand_map = expand_map
 
-			env_d = getconfig(os.path.join(eroot, "etc", "profile.env"),
-				expand=expand_map)
+	# "env" START
+
+			env_d = getconfig(os.path.join(eroot, "etc", "profile.env"), expand=expand_map)
 			# env_d will be None if profile.env doesn't exist.
 			if env_d:
 				self.configdict["env.d"].update(env_d)
+
+				# copy all the settings from profile.env into expand_map:
+
 				expand_map.update(env_d)
-
-			# backupenv is used for calculating incremental variables.
-			if env is None:
-				env = os.environ
-
-			# Avoid potential UnicodeDecodeError exceptions later.
-			env_unicode = dict((_unicode_decode(k), _unicode_decode(v))
-				for k, v in env.items())
-
-			self.backupenv = env_unicode
-
 			if env_d:
 				# Remove duplicate values so they don't override updated
 				# profile.env values later (profile.env is reloaded in each
@@ -392,6 +614,9 @@ class config(object):
 
 			self.configdict["env"] = LazyItemsDict(self.backupenv)
 
+			# "env" STOP
+			# "globals" - GLOBALS start
+
 			for x in (self.global_config_path,):
 				self.mygcfg = getconfig(os.path.join(x, "make.globals"),
 					expand=expand_map)
@@ -401,11 +626,16 @@ class config(object):
 			if self.mygcfg is None:
 				self.mygcfg = {}
 
+			# set default values for ACCEPT_LICENSE, ACCEPT_KEYWORDS, and PORTAGE_BZIP_COMMAND:
+
 			for k, v in self._default_globals.items():
 				self.mygcfg.setdefault(k, v)
 
 			self.configlist.append(self.mygcfg)
 			self.configdict["globals"]=self.configlist[-1]
+
+			# GLOBALS stop
+			# "defaults" - make.defaults begin
 
 			self.make_defaults_use = []
 			self.mygcfg = {}
@@ -420,22 +650,18 @@ class config(object):
 			self.configlist.append(self.mygcfg)
 			self.configdict["defaults"]=self.configlist[-1]
 
-			self.mygcfg = getconfig(
-				os.path.join(config_root, MAKE_CONF_FILE),
-				tolerant=tolerant, allow_sourcing=True,
-				expand=expand_map) or {}
-
-			self.mygcfg.update(getconfig(
-				os.path.join(abs_user_config, 'make.conf'),
-				tolerant=tolerant, allow_sourcing=True,
-				expand=expand_map) or {})
+			# "defaults" MAKE.DEFAULTS STOP
 
 			# Don't allow the user to override certain variables in make.conf
+			# PROFILE_ONLY_VARIABLES is typically set to something like "ARCH ELIBC KERNEL USERLAND"
 			profile_only_variables = self.configdict["defaults"].get(
 				"PROFILE_ONLY_VARIABLES", "").split()
 			profile_only_variables = stack_lists([profile_only_variables])
 			non_user_variables = set()
 			non_user_variables.update(profile_only_variables)
+
+			# env_blacklist contains things like A, CATEGORY, DEPEND, EAPI, KEYWORDS - all those vars we expect the ebuild or others to provide:
+
 			non_user_variables.update(self._env_blacklist)
 			non_user_variables.update(self._global_only_vars)
 			non_user_variables = frozenset(non_user_variables)
@@ -449,14 +675,19 @@ class config(object):
 			for k in self._env_d_blacklist:
 				env_d.pop(k, None)
 
-			for k in profile_only_variables:
-				self.mygcfg.pop(k, None)
+			# for k in profile_only_variables:
+			# 	self.mygcfg.pop(k, None)
 
-			self.configlist.append(self.mygcfg)
-			self.configdict["conf"]=self.configlist[-1]
+			# self.configlist.append(self.mygcfg)
+			# self.configdict["conf"]=self.configlist[-1]
+
+			# "pkg" START
 
 			self.configlist.append(LazyItemsDict())
 			self.configdict["pkg"]=self.configlist[-1]
+
+			# "pkg" STOP
+			# "env" START
 
 			self.configdict["backupenv"] = self.backupenv
 
@@ -469,6 +700,31 @@ class config(object):
 			# make lookuplist for loading package.*
 			self.lookuplist=self.configlist[:]
 			self.lookuplist.reverse()
+
+
+	# SELF.CONFIGLIST STOP
+	# SELF.CONFIGDICT STOP
+
+
+	# SELF.PACKAGES START
+	# SELF.PREVMASKDICT START
+
+			self.packages_list = [grabfile_package(os.path.join(x, "packages"), verify_eapi=True) for x in self.profiles]
+			self.packages      = tuple(stack_lists(self.packages_list, incremental=1))
+			del self.packages_list
+			#self.packages = grab_stacked("packages", self.profiles, grabfile, incremental_lines=1)
+
+			# revmaskdict
+			self.prevmaskdict={}
+			for x in self.packages:
+				# Negative atoms are filtered by the above stack_lists() call.
+				if not isinstance(x, Atom):
+					x = Atom(x.lstrip('*'))
+				self.prevmaskdict.setdefault(x.cp, []).append(x)
+
+
+	# SELF.PACKAGES STOP
+	# SELF.PREVMASKDICT STOP
 
 			# Blacklist vars that could interfere with portage internals.
 			for blacklisted in self._env_blacklist:
@@ -492,9 +748,6 @@ class config(object):
 
 			self._ppropertiesdict = portage.dep.ExtendedAtomDict(dict)
 			self._penvdict = portage.dep.ExtendedAtomDict(dict)
-
-			#Loading Repositories
-			self.repositories = load_repository_config(self)
 
 			#filling PORTDIR and PORTDIR_OVERLAY variable for compatibility
 			main_repo = self.repositories.mainRepo()
@@ -525,7 +778,51 @@ class config(object):
 			self["PORTDIR_OVERLAY"] = " ".join(new_ov)
 			self.backup_changes("PORTDIR_OVERLAY")
 
-			locations_manager.set_port_dirs(self["PORTDIR"], self["PORTDIR_OVERLAY"])
+			# locations_manager.set_port_dirs(self["PORTDIR"], self["PORTDIR_OVERLAY"])
+#funtoo begin
+			# Define portage tree location and overlay locations. Note that in Funtoo, this call must come prior to the profile
+			# initialization calls, since we support the ability for absolute profile paths in "parent" files to begin with "/"
+			# and be relative to the Portage tree or overlay:
+			
+#SET_PROF_LOC BEGIN
+
+			# This method defines the location of the profile directories.
+
+			# we are passed the PORTDIR and PORTDIR_OVERLAY values as arguments:
+#TWEAK END
+
+			self.overlay_profiles = []
+
+			# for each overlay listed in PORTDIR_OVERLAY:
+
+			for ov in shlex_split(repo_vars["PORTDIR_OVERLAY"]):
+				ov = normalize_path(ov)
+				profiles_dir = os.path.join(ov, "profiles")
+
+				# if the overlay has a "/profiles" directory in it, then add it to self.overlay_profiles:
+
+				if os.path.isdir(profiles_dir):
+					self.overlay_profiles.append(profiles_dir)
+
+			# define self.profile_locations to include the location of our main profile in PORTDIR/profiles plus all our overlay profiles:
+
+			self.profile_locations = [os.path.join(repo_vars["PORTDIR"], "profiles")] + self.overlay_profiles
+	
+			# define self.profile_and_user_locations to contain the profile_locations list, plus optionally /etc/portage/profile if it exists:
+
+			self.profile_and_user_locations = self.profile_locations[:]
+			if self.local_config:
+				self.profile_and_user_locations.append(abs_user_config)
+
+			# convert everything to read-only tuples:
+
+			self.profile_locations = tuple(self.profile_locations)
+			self.profile_and_user_locations = tuple(self.profile_and_user_locations)
+
+			# pym/portage/package/ebuild/config.py uses both these aoove ^^ when it does its thing
+# SET_PROF_LOC_END
+
+#funtoo end
 
 			self._repo_make_defaults = {}
 			for repo in self.repositories.repos_with_profiles():
@@ -546,17 +843,16 @@ class config(object):
 			#Initialize all USE related variables we track ourselves.
 			self.usemask = self._use_manager.getUseMask()
 			self.useforce = self._use_manager.getUseForce()
-			self.configdict["conf"]["USE"] = \
+			self.configdict["defaults"]["USE"] = \
 				self._use_manager.extract_global_USE_changes( \
-					self.configdict["conf"].get("USE", ""))
+					self.configdict["defaults"].get("USE", ""))
 
 			#Read license_groups and optionally license_groups and package.license from user config
-			self._license_manager = LicenseManager(locations_manager.profile_locations, \
-				abs_user_config, user_config=local_config)
+			self._license_manager = LicenseManager(self.profile_locations, abs_user_config, user_config=local_config)
 			#Extract '*/*' entries from package.license
-			self.configdict["conf"]["ACCEPT_LICENSE"] = \
+			self.configdict["defaults"]["ACCEPT_LICENSE"] = \
 				self._license_manager.extract_global_changes( \
-					self.configdict["conf"].get("ACCEPT_LICENSE", ""))
+					self.configdict["defaults"].get("ACCEPT_LICENSE", ""))
 
 			#Read package.mask and package.unmask from profiles and optionally from user config
 			self._mask_manager = MaskManager(self.repositories, self.profiles,
@@ -572,10 +868,10 @@ class config(object):
 					allow_repo=True, verify_eapi=False)
 				v = propdict.pop("*/*", None)
 				if v is not None:
-					if "ACCEPT_PROPERTIES" in self.configdict["conf"]:
-						self.configdict["conf"]["ACCEPT_PROPERTIES"] += " " + " ".join(v)
+					if "ACCEPT_PROPERTIES" in self.configdict["defaults"]:
+						self.configdict["defaults"]["ACCEPT_PROPERTIES"] += " " + " ".join(v)
 					else:
-						self.configdict["conf"]["ACCEPT_PROPERTIES"] = " ".join(v)
+						self.configdict["defaults"]["ACCEPT_PROPERTIES"] = " ".join(v)
 				for k, v in propdict.items():
 					self._ppropertiesdict.setdefault(k.cp, {})[k] = v
 
@@ -588,7 +884,7 @@ class config(object):
 					global_wildcard_conf = {}
 					self._grab_pkg_env(v, global_wildcard_conf)
 					incrementals = self.incrementals
-					conf_configdict = self.configdict["conf"]
+					conf_configdict = self.configdict["defaults"]
 					for k, v in global_wildcard_conf.items():
 						if k in incrementals:
 							if k in conf_configdict:
@@ -603,18 +899,18 @@ class config(object):
 				for k, v in penvdict.items():
 					self._penvdict.setdefault(k.cp, {})[k] = v
 
-			#getting categories from an external file now
-			self.categories = [grabfile(os.path.join(x, "categories")) \
-				for x in locations_manager.profile_and_user_locations]
+			# Get the master list of Portage categories by combining all the categories files defined in the main Portage
+			# tree, plus all overlays, plus the user-defined profile (/etc/portage/profile):
+			
+			self.categories = [grabfile(os.path.join(x, "categories")) for x in self.profile_and_user_locations]
 			category_re = dbapi._category_re
 			self.categories = tuple(sorted(
 				x for x in stack_lists(self.categories, incremental=1)
 				if category_re.match(x) is not None))
 
-			archlist = [grabfile(os.path.join(x, "arch.list")) \
-				for x in locations_manager.profile_and_user_locations]
+			archlist = [grabfile(os.path.join(x, "arch.list")) for x in self.profile_and_user_locations]
 			archlist = stack_lists(archlist, incremental=1)
-			self.configdict["conf"]["PORTAGE_ARCHLIST"] = " ".join(archlist)
+			self.configdict["defaults"]["PORTAGE_ARCHLIST"] = " ".join(archlist)
 
 			pkgprovidedlines = [grabfile(os.path.join(x, "package.provided"), recursive=1) for x in self.profiles]
 			pkgprovidedlines = stack_lists(pkgprovidedlines, incremental=1)
@@ -841,13 +1137,6 @@ class config(object):
 
 		abs_profile_path = os.path.join(self["PORTAGE_CONFIGROOT"],
 			PROFILE_PATH)
-		if (not self.profile_path or \
-			not os.path.exists(os.path.join(self.profile_path, "parent"))) and \
-			os.path.exists(os.path.join(self["PORTDIR"], "profiles")):
-			writemsg(_("\n\n!!! %s is not a symlink and will probably prevent most merges.\n") % abs_profile_path,
-				noiselevel=-1)
-			writemsg(_("!!! It should point into a profile within %s/profiles/\n") % self["PORTDIR"])
-			writemsg(_("!!! (You can safely ignore this message when syncing. It's harmless.)\n\n\n"))
 
 		abs_user_virtuals = os.path.join(self["PORTAGE_CONFIGROOT"],
 			USER_VIRTUALS_FILE)
@@ -1025,8 +1314,6 @@ class config(object):
 				if x in remaining:
 					remaining.remove(x)
 					filtered_var_split.append(x)
-			var_split = filtered_var_split
-
 			if var_split:
 				value = ' '.join(var_split)
 			else:
@@ -1850,43 +2137,6 @@ class config(object):
 			if v is not None:
 				use_expand_dict[k] = v
 
-		# In order to best accomodate the long-standing practice of
-		# setting default USE_EXPAND variables in the profile's
-		# make.defaults, we translate these variables into their
-		# equivalent USE flags so that useful incremental behavior
-		# is enabled (for sub-profiles).
-		configdict_defaults = self.configdict['defaults']
-		if self._make_defaults is not None:
-			for i, cfg in enumerate(self._make_defaults):
-				if not cfg:
-					self.make_defaults_use.append("")
-					continue
-				use = cfg.get("USE", "")
-				expand_use = []
-				for k in use_expand_dict:
-					v = cfg.get(k)
-					if v is None:
-						continue
-					prefix = k.lower() + '_'
-					if k in myincrementals:
-						for x in v.split():
-							if x[:1] == '-':
-								expand_use.append('-' + prefix + x[1:])
-							else:
-								expand_use.append(prefix + x)
-					else:
-						for x in v.split():
-							expand_use.append(prefix + x)
-				if expand_use:
-					expand_use.append(use)
-					use  = ' '.join(expand_use)
-				self.make_defaults_use.append(use)
-			self.make_defaults_use = tuple(self.make_defaults_use)
-			configdict_defaults['USE'] = ' '.join(
-				stack_lists([x.split() for x in self.make_defaults_use]))
-			# Set to None so this code only runs once.
-			self._make_defaults = None
-
 		if not self.uvlist:
 			for x in self["USE_ORDER"].split(":"):
 				if x in self.configdict:
@@ -1944,12 +2194,6 @@ class config(object):
 						myflags.add(x)
 				else:
 					myflags.add(x)
-
-			if curdb is configdict_defaults:
-				# USE_EXPAND flags from make.defaults are handled
-				# earlier, in order to provide useful incremental
-				# behavior (for sub-profiles).
-				continue
 
 			for var in cur_use_expand:
 				var_lower = var.lower()
