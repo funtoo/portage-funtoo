@@ -1472,8 +1472,8 @@ class config(object):
 
 		defaults = []
 		for i, pkgprofileuse_dict in enumerate(self._use_manager._pkgprofileuse):
-			if self.make_defaults_use[i]:
-				defaults.append(self.make_defaults_use[i])
+			#if self.make_defaults_use[i]:
+			#	defaults.append(self.make_defaults_use[i])
 			cpdict = pkgprofileuse_dict.get(cp)
 			if cpdict:
 				pkg_defaults = ordered_by_atom_specificity(cpdict, cpv_slot)
