@@ -154,6 +154,7 @@ SUPPORTED_FEATURES       = frozenset([
 	"lmirror",
 	"merge-sync",
 	"metadata-transfer",
+        "mini-manifest",
 	"mirror",
 	"multilib-strict",
 	"network-sandbox",
