@@ -103,7 +103,7 @@ SUPPORTED_FEATURES       = frozenset([
                            "strict", "stricter", "suidctl", "test", "test-fail-continue",
                            "unknown-features-filter", "unknown-features-warn",
                            "unmerge-logs", "unmerge-orphans", "userfetch", "userpriv",
-                           "usersandbox", "usersync", "webrsync-gpg"])
+                           "usersandbox", "usersync", "webrsync-gpg", "mini-manifest"])
 
 EAPI                     = 4
 
