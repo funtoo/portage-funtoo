@@ -1967,7 +1967,6 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 			writemsg_level(("!!! %s appears to be under revision " + \
 				"control (contains %s).\n!!! Aborting rsync sync.\n") % \
 				(myportdir, vcs_dir), level=logging.ERROR, noiselevel=-1)
->>>>>>> zmedico/master
 			return 1
 
 
