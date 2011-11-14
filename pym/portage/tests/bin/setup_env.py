@@ -30,6 +30,7 @@ def binTestsInit():
 	global basedir, env
 	basedir = tempfile.mkdtemp()
 	env = os.environ.copy()
+	env["EAPI"] = "0"
 	env["D"] = os.path.join(basedir, "image")
 	env["T"] = os.path.join(basedir, "temp")
 	env["S"] = os.path.join(basedir, "workdir")
@@ -37,6 +38,9 @@ def binTestsInit():
 	env["PATH"] = bindir + ":" + env["PATH"]
 	env["PORTAGE_BIN_PATH"] = bindir
 	env["PORTAGE_PYM_PATH"] = pymdir
+	env["PORTAGE_INST_UID"] = str(os.getuid())
+	env["PORTAGE_INST_GID"] = str(os.getgid())
+	env["DESTTREE"] = "/usr"
 	os.mkdir(env["D"])
 	os.mkdir(env["T"])
 	os.mkdir(env["S"])

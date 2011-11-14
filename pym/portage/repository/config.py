@@ -3,6 +3,7 @@
 
 import io
 import logging
+import warnings
 import sys
 import re
 
@@ -15,10 +16,13 @@ try:
 except ImportError:
 	from ConfigParser import SafeConfigParser, ParsingError
 from portage import os
-from portage.const import USER_CONFIG_PATH, REPO_NAME_LOC
+from portage.const import (MANIFEST2_HASH_FUNCTIONS, MANIFEST2_REQUIRED_HASH,
+	REPO_NAME_LOC, USER_CONFIG_PATH)
 from portage.env.loaders import KeyValuePairFileLoader
-from portage.util import normalize_path, writemsg, writemsg_level, shlex_split
+from portage.util import (normalize_path, writemsg, writemsg_level,
+	shlex_split, stack_lists)
 from portage.localization import _
+from portage import _unicode_decode
 from portage import _unicode_encode
 from portage import _encodings
 from portage import manifest
@@ -41,10 +45,13 @@ def _gen_valid_repo(name):
 class RepoConfig(object):
 	"""Stores config of one repository"""
 
-	__slots__ = ['aliases', 'eclass_overrides', 'eclass_locations', 'location', 'user_location', 'masters', 'main_repo',
-		'missing_repo_name', 'name', 'priority', 'sync', 'format', 'sign_manifest', 'thin_manifest',
-		'allow_missing_manifest', 'create_manifest', 'disable_manifest', 'cache_is_authoritative',
-		'trust_authoritative_cache']
+	__slots__ = ('aliases', 'allow_missing_manifest',
+		'cache_formats', 'create_manifest', 'disable_manifest',
+		'eclass_overrides', 'eclass_locations', 'format', 'location',
+		'main_repo', 'manifest_hashes', 'masters', 'missing_repo_name',
+		'name', 'priority', 'sign_manifest', 'sync', 'thin_manifest',
+		'update_changelog', 'user_location', 'portage1_profiles',
+		'portage1_profiles_compat')
 
 	def __init__(self, name, repo_opts):
 		"""Build a RepoConfig with options in repo_opts
@@ -62,8 +69,11 @@ class RepoConfig(object):
 		#Locations are computed later.
 		self.eclass_locations = None
 
-		#Masters are only read from layout.conf.
-		self.masters = None
+		# Masters from repos.conf override layout.conf.
+		masters = repo_opts.get('masters')
+		if masters is not None:
+			masters = tuple(masters.split())
+		self.masters = masters
 
 		#The main-repo key makes only sense for the 'DEFAULT' section.
 		self.main_repo = repo_opts.get('main-repo')
@@ -97,17 +107,7 @@ class RepoConfig(object):
 
 		missing = True
 		if self.location is not None:
-			name, missing = self._read_repo_name(self.location)
-			# We must ensure that the name conforms to PMS 3.1.5
-			# in order to avoid InvalidAtom exceptions when we
-			# use it to generate atoms.
-			name = _gen_valid_repo(name)
-			if not name:
-				# name only contains invalid characters
-				name = "x-" + os.path.basename(self.location)
-				name = _gen_valid_repo(name)
-				# If basename only contains whitespace then the
-				# end result is name = 'x-'.
+			name, missing = self._read_valid_repo_name(self.location)
 
 		elif name == "DEFAULT": 
 			missing = False
@@ -118,44 +118,85 @@ class RepoConfig(object):
 		self.allow_missing_manifest = False
 		self.create_manifest = True
 		self.disable_manifest = False
-		self.cache_is_authoritative = False
+		self.manifest_hashes = None
+		self.update_changelog = False
+		self.cache_formats = None
+		self.portage1_profiles = True
+		self.portage1_profiles_compat = False
 
-		trust_authoritative_cache = repo_opts.get('trust-authoritative-cache')
-		if trust_authoritative_cache is not None:
-			trust_authoritative_cache = trust_authoritative_cache.lower() == 'true'
-		self.trust_authoritative_cache = trust_authoritative_cache
+	def iter_pregenerated_caches(self, auxdbkeys, readonly=True, force=False):
+		"""
+		Reads layout.conf cache-formats from left to right and yields cache
+		instances for each supported type that's found. If no cache-formats
+		are specified in layout.conf, 'pms' type is assumed if the
+		metadata/cache directory exists or force is True.
+		"""
+		formats = self.cache_formats
+		if not formats:
+			if not force:
+				return
+			formats = ('pms',)
+
+		for fmt in formats:
+			name = None
+			if fmt == 'pms':
+				from portage.cache.metadata import database
+				name = 'metadata/cache'
+			elif fmt == 'md5-dict':
+				from portage.cache.flat_hash import md5_database as database
+				name = 'metadata/md5-cache'
+
+			if name is not None:
+				yield database(self.location, name,
+					auxdbkeys, readonly=readonly)
+
+	def get_pregenerated_cache(self, auxdbkeys, readonly=True, force=False):
+		"""
+		Returns the first cache instance yielded from
+		iter_pregenerated_caches(), or None if no cache is available or none
+		of the available formats are supported.
+		"""
+		return next(self.iter_pregenerated_caches(
+			auxdbkeys, readonly=readonly, force=force), None)
 
 	def load_manifest(self, *args, **kwds):
 		kwds['thin'] = self.thin_manifest
 		kwds['allow_missing'] = self.allow_missing_manifest
 		kwds['allow_create'] = self.create_manifest
+		kwds['hashes'] = self.manifest_hashes
 		if self.disable_manifest:
 			kwds['from_scratch'] = True
 		return manifest.Manifest(*args, **kwds)
 
 	def update(self, new_repo):
 		"""Update repository with options in another RepoConfig"""
-		if new_repo.aliases is not None:
-			self.aliases = new_repo.aliases
-		if new_repo.eclass_overrides is not None:
-			self.eclass_overrides = new_repo.eclass_overrides
-		if new_repo.masters is not None:
-			self.masters = new_repo.masters
-		if new_repo.trust_authoritative_cache is not None:
-			self.trust_authoritative_cache = new_repo.trust_authoritative_cache
-		if new_repo.name is not None:
-			self.name = new_repo.name
-			self.missing_repo_name = new_repo.missing_repo_name
-		if new_repo.user_location is not None:
-			self.user_location = new_repo.user_location
-		if new_repo.location is not None:
-			self.location = new_repo.location
-		if new_repo.priority is not None:
-			self.priority = new_repo.priority
-		if new_repo.sync is not None:
-			self.sync = new_repo.sync
 
-	def _read_repo_name(self, repo_path):
+		for k in ('aliases', 'eclass_overrides', 'location', 'masters',
+			'name', 'priority', 'sync', 'user_location'):
+			v = getattr(new_repo, k, None)
+			if v is not None:
+				setattr(self, k, v)
+
+		if new_repo.name is not None:
+			self.missing_repo_name = new_repo.missing_repo_name
+
+	@staticmethod
+	def _read_valid_repo_name(repo_path):
+		name, missing = RepoConfig._read_repo_name(repo_path)
+		# We must ensure that the name conforms to PMS 3.1.5
+		# in order to avoid InvalidAtom exceptions when we
+		# use it to generate atoms.
+		name = _gen_valid_repo(name)
+		if not name:
+			# name only contains invalid characters
+			name = "x-" + os.path.basename(repo_path)
+			name = _gen_valid_repo(name)
+			# If basename only contains whitespace then the
+			# end result is name = 'x-'.
+		return name, missing
+
+	@staticmethod
+	def _read_repo_name(repo_path):
 		"""
 		Read repo_name from repo_path.
 		Returns repo_name, missing.
@@ -201,6 +242,19 @@ class RepoConfig(object):
 		repo_msg.append("")
 		return "\n".join(repo_msg)
 
+	def __str__(self):
+		d = {}
+		for k in self.__slots__:
+			d[k] = getattr(self, k, None)
+		return _unicode_decode("%s") % (d,)
+
+	if sys.hexversion < 0x3000000:
+
+		__unicode__ = __str__
+
+		def __str__(self):
+			return _unicode_encode(self.__unicode__())
+
 class RepoConfigLoader(object):
 	"""Loads and store config of several repositories, loaded from PORTDIR_OVERLAY or repos.conf"""
 
@@ -230,11 +284,6 @@ class RepoConfigLoader(object):
 		if prepos['DEFAULT'].masters is not None:
 			default_repo_opts['masters'] = \
 				' '.join(prepos['DEFAULT'].masters)
-		if prepos['DEFAULT'].trust_authoritative_cache is not None:
-			if prepos['DEFAULT'].trust_authoritative_cache:
-				default_repo_opts['trust-authoritative-cache'] = 'true'
-			else:
-				default_repo_opts['trust-authoritative-cache'] = 'false'
 
 		if overlays:
 			#overlay priority is negative because we want them to be looked before any other repo
@@ -255,11 +304,6 @@ class RepoConfigLoader(object):
 						if repo_conf_opts.masters is not None:
 							repo_opts['masters'] = \
 								' '.join(repo_conf_opts.masters)
-						if repo_conf_opts.trust_authoritative_cache is not None:
-							if repo_conf_opts.trust_authoritative_cache:
-								repo_opts['trust-authoritative-cache'] = 'true'
-							else:
-								repo_opts['trust-authoritative-cache'] = 'false'
 
 					repo = RepoConfig(repo.name, repo_opts)
 					if repo.name in prepos:
@@ -290,10 +334,34 @@ class RepoConfigLoader(object):
 	def _parse(paths, prepos, ignored_map, ignored_location_map):
 		"""Parse files in paths to load config"""
 		parser = SafeConfigParser()
+
+		# use read_file/readfp in order to control decoding of unicode
 		try:
-			parser.read(paths)
-		except ParsingError as e:
-			writemsg(_("!!! Error while reading repo config file: %s\n") % e, noiselevel=-1)
+			# Python >=3.2
+			read_file = parser.read_file
+		except AttributeError:
+			read_file = parser.readfp
+
+		for p in paths:
+			f = None
+			try:
+				f = io.open(_unicode_encode(p,
+					encoding=_encodings['fs'], errors='strict'),
+					mode='r', encoding=_encodings['repo.content'],
+					errors='replace')
+			except EnvironmentError:
+				pass
+			else:
+				try:
+					read_file(f)
+				except ParsingError as e:
+					writemsg(_unicode_decode(
+						_("!!! Error while reading repo config file: %s\n")
+						) % e, noiselevel=-1)
+			finally:
+				if f is not None:
+					f.close()
+
 		prepos['DEFAULT'] = RepoConfig("DEFAULT", parser.defaults())
 		for sname in parser.sections():
 			optdict = {}
@@ -348,39 +416,29 @@ class RepoConfigLoader(object):
 			if not repo.location:
 				continue
 			layout_filename = os.path.join(repo.location, "metadata", "layout.conf")
-			layout_file = KeyValuePairFileLoader(layout_filename, None, None)
-			layout_data, layout_errors = layout_file.load()
+			layout_data, layout_errors = parse_layout_conf(repo.location, repo.name)
 
-			masters = layout_data.get('masters')
-			if masters and masters.strip():
-				masters = masters.split()
-			else:
-				masters = None
-			repo.masters = masters
+			# layout.conf masters may be overridden here if we have a masters
+			# setting from the user's repos.conf
+			if repo.masters is None:
+				repo.masters = layout_data['masters']
 
-			aliases = layout_data.get('aliases')
-			if aliases and aliases.strip():
-				aliases = aliases.split()
-			else:
-				aliases = None
-			if aliases:
-				if repo.aliases:
-					aliases.extend(repo.aliases)
-				repo.aliases = tuple(sorted(set(aliases)))
+			if layout_data['aliases']:
+				aliases = repo.aliases
+				if aliases is None:
+					aliases = ()
+				# repos.conf aliases come after layout.conf aliases, giving
+				# them the ability to do incremental overrrides
+				repo.aliases = layout_data['aliases'] + tuple(aliases)
 
-			if layout_data.get('sign-manifests', '').lower() == 'false':
-				repo.sign_manifest = False
+			for value in ('allow-missing-manifest', 'cache-formats',
+				'create-manifest', 'disable-manifest', 'manifest-hashes',
+				'sign-manifest', 'thin-manifest', 'update-changelog'):
+				setattr(repo, value.lower().replace("-", "_"), layout_data[value])
 
-			if layout_data.get('thin-manifests', '').lower() == 'true':
-				repo.thin_manifest = True
-
-			manifest_policy = layout_data.get('use-manifests', 'strict').lower()
-			repo.allow_missing_manifest = manifest_policy != 'strict'
-			repo.create_manifest = manifest_policy != 'false'
-			repo.disable_manifest = manifest_policy == 'false'
-			repo.cache_is_authoritative = layout_data.get('authoritative-cache', 'false').lower() == 'true'
-			if not repo.trust_authoritative_cache:
-				repo.cache_is_authoritative = False
+			repo.portage1_profiles = any(x.startswith("portage-1") \
+				for x in layout_data['profile-formats'])
+			repo.portage1_profiles_compat = layout_data['profile-formats'] == ('portage-1-compat',)
 
 		#Take aliases into account.
 		new_prepos = {}
@@ -388,7 +446,8 @@ class RepoConfigLoader(object):
 			names = set()
 			names.add(repo_name)
 			if repo.aliases:
-				names.update(repo.aliases)
+				aliases = stack_lists([repo.aliases], incremental=True)
+				names.update(aliases)
 
 			for name in names:
 				if name in new_prepos:
@@ -570,3 +629,103 @@ def load_repository_config(settings):
 		repoconfigpaths.append(os.path.join(settings["PORTAGE_CONFIGROOT"],
 			USER_CONFIG_PATH, "repos.conf"))
 	return RepoConfigLoader(repoconfigpaths, settings)
+
+def _get_repo_name(repo_location, cached=None):
+	if cached is not None:
+		return cached
+	name, missing = RepoConfig._read_repo_name(repo_location)
+	if missing:
+		return None
+	return name
+
+def parse_layout_conf(repo_location, repo_name=None):
+
+	layout_filename = os.path.join(repo_location, "metadata", "layout.conf")
+	layout_file = KeyValuePairFileLoader(layout_filename, None, None)
+	layout_data, layout_errors = layout_file.load()
+
+	data = {}
+
+	# None indicates abscence of a masters setting, which later code uses
+	# to trigger a backward compatibility fallback that sets an implicit
+	# master. In order to avoid this fallback behavior, layout.conf can
+	# explicitly set masters to an empty value, which will result in an
+	# empty tuple here instead of None.
+	masters = layout_data.get('masters')
+	if masters is not None:
+		masters = tuple(masters.split())
+	data['masters'] = masters
+	data['aliases'] = tuple(layout_data.get('aliases', '').split())
+
+	data['sign-manifest'] = layout_data.get('sign-manifests', 'true').lower() \
+		== 'true'
+
+	data['thin-manifest'] = layout_data.get('thin-manifests', 'false').lower() \
+		== 'true'
+
+	manifest_policy = layout_data.get('use-manifests', 'strict').lower()
+	data['allow-missing-manifest'] = manifest_policy != 'strict'
+	data['create-manifest'] = manifest_policy != 'false'
+	data['disable-manifest'] = manifest_policy == 'false'
+
+	# for compatibility w/ PMS, fallback to pms; but also check if the
+	# cache exists or not.
+	cache_formats = layout_data.get('cache-formats', 'pms').lower().split()
+	if 'pms' in cache_formats and not os.path.isdir(
+		os.path.join(repo_location, 'metadata', 'cache')):
+		cache_formats.remove('pms')
+	data['cache-formats'] = tuple(cache_formats)
+
+	manifest_hashes = layout_data.get('manifest-hashes')
+	if manifest_hashes is not None:
+		manifest_hashes = frozenset(manifest_hashes.upper().split())
+		if MANIFEST2_REQUIRED_HASH not in manifest_hashes:
+			repo_name = _get_repo_name(repo_location, cached=repo_name)
+			warnings.warn((_("Repository named '%(repo_name)s' has a "
+				"'manifest-hashes' setting that does not contain "
+				"the '%(hash)s' hash which is required by this "
+				"portage version. You will have to upgrade portage "
+				"if you want to generate valid manifests for this "
+				"repository: %(layout_filename)s") %
+				{"repo_name": repo_name or 'unspecified',
+				"hash":MANIFEST2_REQUIRED_HASH,
+				"layout_filename":layout_filename}),
+				DeprecationWarning)
+		unsupported_hashes = manifest_hashes.difference(
+			MANIFEST2_HASH_FUNCTIONS)
+		if unsupported_hashes:
+			repo_name = _get_repo_name(repo_location, cached=repo_name)
+			warnings.warn((_("Repository named '%(repo_name)s' has a "
+				"'manifest-hashes' setting that contains one "
+				"or more hash types '%(hashes)s' which are not supported by "
+				"this portage version. You will have to upgrade "
+				"portage if you want to generate valid manifests for "
+				"this repository: %(layout_filename)s") %
+				{"repo_name": repo_name or 'unspecified',
+				"hashes":" ".join(sorted(unsupported_hashes)),
+				"layout_filename":layout_filename}),
+				DeprecationWarning)
+	data['manifest-hashes'] = manifest_hashes
+
+	data['update-changelog'] = layout_data.get('update-changelog', 'false').lower() \
+		== 'true'
+
+	raw_formats = layout_data.get('profile-formats')
+	if raw_formats is None:
+		raw_formats = ('portage-1-compat',)
+	else:
+		raw_formats = set(raw_formats.split())
+		unknown = raw_formats.difference(['pms', 'portage-1'])
+		if unknown:
+			repo_name = _get_repo_name(repo_location, cached=repo_name)
+			warnings.warn((_("Repository named '%(repo_name)s' has unsupported "
+				"profiles in use ('profile-formats = %(unknown_fmts)s' setting in "
+				"'%(layout_filename)s; please upgrade portage.") %
+				dict(repo_name=repo_name or 'unspecified',
+				layout_filename=layout_filename,
+				unknown_fmts=" ".join(unknown))),
+				DeprecationWarning)
+		raw_formats = tuple(raw_formats.intersection(['pms', 'portage-1']))
+	data['profile-formats'] = raw_formats
+
+	return data, layout_errors

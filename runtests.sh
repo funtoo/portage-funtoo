@@ -4,6 +4,9 @@
 
 PYTHON_VERSIONS="2.6 2.7 3.1 3.2 3.3"
 
+# has to be run from portage root dir
+cd "${0%/*}" || exit 1
+
 case "${NOCOLOR:-false}" in
 	yes|true)
 		GOOD=
@@ -23,6 +26,26 @@ interrupted() {
 }
 
 trap interrupted SIGINT
+
+unused_args=()
+
+while [ $# -gt 0 ] ; do
+	case "$1" in
+		--python-versions=*)
+			PYTHON_VERSIONS=${1#--python-versions=}
+			;;
+		--python-versions)
+			shift
+			PYTHON_VERSIONS=$1
+			;;
+		*)
+			unused_args[${#unused_args[@]}]=$1
+			;;
+	esac
+	shift
+done
+
+set -- "${unused_args[@]}"
 
 exit_status="0"
 for version in ${PYTHON_VERSIONS}; do

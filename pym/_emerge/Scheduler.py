@@ -28,7 +28,7 @@ from portage.output import colorize, create_color_func, red
 bad = create_color_func("BAD")
 from portage._sets import SETPREFIX
 from portage._sets.base import InternalPackageSet
-from portage.util import writemsg, writemsg_level
+from portage.util import ensure_dirs, writemsg, writemsg_level
 from portage.package.ebuild.digestcheck import digestcheck
 from portage.package.ebuild.digestgen import digestgen
 from portage.package.ebuild.prepare_build_dirs import prepare_build_dirs
@@ -96,7 +96,7 @@ class Scheduler(PollScheduler):
 		("merge", "jobs", "ebuild_locks", "fetch", "unpack"), prefix="")
 
 	class _build_opts_class(SlotObject):
-		__slots__ = ("buildpkg", "buildpkgonly",
+		__slots__ = ("buildpkg", "buildpkg_exclude", "buildpkgonly",
 			"fetch_all_uri", "fetchonly", "pretend")
 
 	class _binpkg_opts_class(SlotObject):
@@ -151,7 +151,7 @@ class Scheduler(PollScheduler):
 				DeprecationWarning, stacklevel=2)
 
 		self.settings = settings
-		self.target_root = settings["ROOT"]
+		self.target_root = settings["EROOT"]
 		self.trees = trees
 		self.myopts = myopts
 		self._spinner = spinner
@@ -159,8 +159,13 @@ class Scheduler(PollScheduler):
 		self._favorites = favorites
 		self._args_set = InternalPackageSet(favorites, allow_repo=True)
 		self._build_opts = self._build_opts_class()
+
 		for k in self._build_opts.__slots__:
 			setattr(self._build_opts, k, "--" + k.replace("_", "-") in myopts)
+		self._build_opts.buildpkg_exclude = InternalPackageSet( \
+			initial_atoms=" ".join(myopts.get("--buildpkg-exclude", [])).split(), \
+			allow_wildcard=True, allow_repo=True)
+
 		self._binpkg_opts = self._binpkg_opts_class()
 		for k in self._binpkg_opts.__slots__:
 			setattr(self._binpkg_opts, k, "--" + k.replace("_", "-") in myopts)
@@ -202,10 +207,7 @@ class Scheduler(PollScheduler):
 		if max_jobs is None:
 			max_jobs = 1
 		self._set_max_jobs(max_jobs)
-
-		# The root where the currently running
-		# portage instance is installed.
-		self._running_root = trees["/"]["root_config"]
+		self._running_root = trees[trees._running_eroot]["root_config"]
 		self.edebug = 0
 		if settings.get("PORTAGE_DEBUG", "") == "1":
 			self.edebug = 1
@@ -304,10 +306,11 @@ class Scheduler(PollScheduler):
 		"""
 		self._set_graph_config(graph_config)
 		self._blocker_db = {}
+		dynamic_deps = self.myopts.get("--dynamic-deps", "y") != "n"
 		for root in self.trees:
 			if graph_config is None:
 				fake_vartree = FakeVartree(self.trees[root]["root_config"],
-					pkg_cache=self._pkg_cache)
+					pkg_cache=self._pkg_cache, dynamic_deps=dynamic_deps)
 				fake_vartree.sync()
 			else:
 				fake_vartree = graph_config.trees[root]['vartree']
@@ -912,8 +915,10 @@ class Scheduler(PollScheduler):
 			root_config = x.root_config
 			settings = self.pkgsettings[root_config.root]
 			settings.setcpv(x)
-			tmpdir = tempfile.mkdtemp()
 			tmpdir_orig = settings["PORTAGE_TMPDIR"]
+			build_prefix_orig = os.path.join(tmpdir_orig, 'portage')
+			ensure_dirs(build_prefix_orig)
+			tmpdir = tempfile.mkdtemp(dir=build_prefix_orig)
 			settings["PORTAGE_TMPDIR"] = tmpdir
 
 			try:
@@ -964,7 +969,7 @@ class Scheduler(PollScheduler):
 
 				portage.package.ebuild.doebuild.doebuild_environment(ebuild_path,
 					"pretend", settings=settings,
-					db=self.trees[settings["ROOT"]][tree].dbapi)
+					db=self.trees[settings['EROOT']][tree].dbapi)
 				prepare_build_dirs(root_config.root, settings, cleanup=0)
 
 				vardb = root_config.trees['vartree'].dbapi
@@ -1557,7 +1562,7 @@ class Scheduler(PollScheduler):
 		return temp_settings
 
 	def _deallocate_config(self, settings):
-		self._config_pool[settings["ROOT"]].append(settings)
+		self._config_pool[settings['EROOT']].append(settings)
 
 	def _main_loop(self):
 

@@ -93,13 +93,13 @@ class _frozen_depgraph_config(object):
 
 	def __init__(self, settings, trees, myopts, spinner):
 		self.settings = settings
-		self.target_root = settings["ROOT"]
+		self.target_root = settings["EROOT"]
 		self.myopts = myopts
 		self.edebug = 0
 		if settings.get("PORTAGE_DEBUG", "") == "1":
 			self.edebug = 1
 		self.spinner = spinner
-		self._running_root = trees["/"]["root_config"]
+		self._running_root = trees[trees._running_eroot]["root_config"]
 		self._opts_no_restart = frozenset(["--buildpkgonly",
 			"--fetchonly", "--fetch-all-uri", "--pretend"])
 		self.pkgsettings = {}
@@ -109,6 +109,7 @@ class _frozen_depgraph_config(object):
 		# All Package instances
 		self._pkg_cache = {}
 		self._highest_license_masked = {}
+		dynamic_deps = myopts.get("--dynamic-deps", "y") != "n"
 		for myroot in trees:
 			self.trees[myroot] = {}
 			# Create a RootConfig instance that references
@@ -122,7 +123,8 @@ class _frozen_depgraph_config(object):
 			self.trees[myroot]["vartree"] = \
 				FakeVartree(trees[myroot]["root_config"],
 					pkg_cache=self._pkg_cache,
-					pkg_root_config=self.roots[myroot])
+					pkg_root_config=self.roots[myroot],
+					dynamic_deps=dynamic_deps)
 			self.pkgsettings[myroot] = portage.config(
 				clone=self.trees[myroot]["vartree"].settings)
 
@@ -514,6 +516,8 @@ class depgraph(object):
 
 		for myroot in self._frozen_config.trees:
 
+			dynamic_deps = self._dynamic_config.myparams.get(
+				"dynamic_deps", "y") != "n"
 			preload_installed_pkgs = \
 				"--nodeps" not in self._frozen_config.myopts
 
@@ -535,8 +539,11 @@ class depgraph(object):
 
 				for pkg in vardb:
 					self._spinner_update()
-					# This triggers metadata updates via FakeVartree.
-					vardb.aux_get(pkg.cpv, [])
+					if dynamic_deps:
+						# This causes FakeVartree to update the
+						# Package instance dependencies via
+						# PackageVirtualDbapi.aux_update()
+						vardb.aux_get(pkg.cpv, [])
 					fakedb.cpv_inject(pkg)
 
 		self._dynamic_config._vdb_loaded = True
@@ -554,6 +561,32 @@ class depgraph(object):
 			or '--quiet' in self._frozen_config.myopts \
 			or self._dynamic_config.myparams.get(
 			"binpkg_respect_use") in ("y", "n"):
+			return
+
+		for pkg in list(self._dynamic_config.ignored_binaries):
+
+			selected_pkg = self._dynamic_config.mydbapi[pkg.root
+				].match_pkgs(pkg.slot_atom)
+
+			if not selected_pkg:
+				continue
+
+			selected_pkg = selected_pkg[-1]
+			if selected_pkg > pkg:
+				self._dynamic_config.ignored_binaries.pop(pkg)
+				continue
+
+			if selected_pkg.installed and \
+				selected_pkg.cpv == pkg.cpv and \
+				selected_pkg.metadata.get('BUILD_TIME') == \
+				pkg.metadata.get('BUILD_TIME'):
+				# We don't care about ignored binaries when an
+				# identical installed instance is selected to
+				# fill the slot.
+				self._dynamic_config.ignored_binaries.pop(pkg)
+				continue
+
+		if not self._dynamic_config.ignored_binaries:
 			return
 
 		self._show_merge_list()
@@ -1056,7 +1089,7 @@ class depgraph(object):
 		# package selection, since we want to prompt the user
 		# for USE adjustment rather than have REQUIRED_USE
 		# affect package selection and || dep choices.
-		if not pkg.built and pkg.metadata["REQUIRED_USE"] and \
+		if not pkg.built and pkg.metadata.get("REQUIRED_USE") and \
 			eapi_has_required_use(pkg.metadata["EAPI"]):
 			required_use_is_sat = check_required_use(
 				pkg.metadata["REQUIRED_USE"],
@@ -1376,7 +1409,7 @@ class depgraph(object):
 		if removal_action:
 			depend_root = myroot
 		else:
-			depend_root = "/"
+			depend_root = self._frozen_config._running_root.root
 			root_deps = self._frozen_config.myopts.get("--root-deps")
 			if root_deps is not None:
 				if root_deps is True:
@@ -1822,7 +1855,7 @@ class depgraph(object):
 				i += 1
 			else:
 				try:
-					x = portage.dep.Atom(x)
+					x = portage.dep.Atom(x, eapi=pkg.metadata["EAPI"])
 				except portage.exception.InvalidAtom:
 					if not pkg.installed:
 						raise portage.exception.InvalidDependString(
@@ -1938,13 +1971,14 @@ class depgraph(object):
 		sets = root_config.sets
 		depgraph_sets = self._dynamic_config.sets[root_config.root]
 		myfavorites=[]
-		myroot = self._frozen_config.target_root
-		dbs = self._dynamic_config._filtered_trees[myroot]["dbs"]
-		vardb = self._frozen_config.trees[myroot]["vartree"].dbapi
-		real_vardb = self._frozen_config._trees_orig[myroot]["vartree"].dbapi
-		portdb = self._frozen_config.trees[myroot]["porttree"].dbapi
-		bindb = self._frozen_config.trees[myroot]["bintree"].dbapi
-		pkgsettings = self._frozen_config.pkgsettings[myroot]
+		eroot = root_config.root
+		root = root_config.settings['ROOT']
+		dbs = self._dynamic_config._filtered_trees[eroot]["dbs"]
+		vardb = self._frozen_config.trees[eroot]["vartree"].dbapi
+		real_vardb = self._frozen_config._trees_orig[eroot]["vartree"].dbapi
+		portdb = self._frozen_config.trees[eroot]["porttree"].dbapi
+		bindb = self._frozen_config.trees[eroot]["bintree"].dbapi
+		pkgsettings = self._frozen_config.pkgsettings[eroot]
 		args = []
 		onlydeps = "--onlydeps" in self._frozen_config.myopts
 		lookup_owners = []
@@ -1965,7 +1999,7 @@ class depgraph(object):
 				mytbz2=portage.xpak.tbz2(x)
 				mykey=mytbz2.getelements("CATEGORY")[0]+"/"+os.path.splitext(os.path.basename(x))[0]
 				if os.path.realpath(x) != \
-					os.path.realpath(self._frozen_config.trees[myroot]["bintree"].getname(mykey)):
+					os.path.realpath(bindb.bintree.getname(mykey)):
 					writemsg(colorize("BAD", "\n*** You need to adjust PKGDIR to emerge this package.\n\n"), noiselevel=-1)
 					self._dynamic_config._skip_restart = True
 					return 0, myfavorites
@@ -2011,9 +2045,9 @@ class depgraph(object):
 				args.append(PackageArg(arg=x, package=pkg,
 					root_config=root_config))
 			elif x.startswith(os.path.sep):
-				if not x.startswith(myroot):
+				if not x.startswith(eroot):
 					portage.writemsg(("\n\n!!! '%s' does not start with" + \
-						" $ROOT.\n") % x, noiselevel=-1)
+						" $EROOT.\n") % x, noiselevel=-1)
 					self._dynamic_config._skip_restart = True
 					return 0, []
 				# Queue these up since it's most efficient to handle
@@ -2022,9 +2056,9 @@ class depgraph(object):
 			elif x.startswith("." + os.sep) or \
 				x.startswith(".." + os.sep):
 				f = os.path.abspath(x)
-				if not f.startswith(myroot):
+				if not f.startswith(eroot):
 					portage.writemsg(("\n\n!!! '%s' (resolved from '%s') does not start with" + \
-						" $ROOT.\n") % (f, x), noiselevel=-1)
+						" $EROOT.\n") % (f, x), noiselevel=-1)
 					self._dynamic_config._skip_restart = True
 					return 0, []
 				lookup_owners.append(f)
@@ -2141,7 +2175,7 @@ class depgraph(object):
 			for x in lookup_owners:
 				if not search_for_multiple and os.path.isdir(x):
 					search_for_multiple = True
-				relative_paths.append(x[len(myroot)-1:])
+				relative_paths.append(x[len(root)-1:])
 
 			owners = set()
 			for pkg, relative_path in \
@@ -2977,7 +3011,7 @@ class depgraph(object):
 								raise
 						if not mreasons and \
 							not pkg.built and \
-							pkg.metadata["REQUIRED_USE"] and \
+							pkg.metadata.get("REQUIRED_USE") and \
 							eapi_has_required_use(pkg.metadata["EAPI"]):
 							if not check_required_use(
 								pkg.metadata["REQUIRED_USE"],
@@ -3032,7 +3066,7 @@ class depgraph(object):
 					continue
 
 				missing_use_adjustable.add(pkg)
-				required_use = pkg.metadata["REQUIRED_USE"]
+				required_use = pkg.metadata.get("REQUIRED_USE")
 				required_use_warning = ""
 				if required_use:
 					old_use = self._pkg_use_enabled(pkg)
@@ -3080,7 +3114,7 @@ class depgraph(object):
 					if untouchable_flags.intersection(involved_flags):
 						continue
 
-					required_use = myparent.metadata["REQUIRED_USE"]
+					required_use = myparent.metadata.get("REQUIRED_USE")
 					required_use_warning = ""
 					if required_use:
 						old_use = self._pkg_use_enabled(myparent)
@@ -3236,7 +3270,8 @@ class depgraph(object):
 
 				all_cp = set()
 				all_cp.update(vardb.cp_all())
-				all_cp.update(portdb.cp_all())
+				if "--usepkgonly" not in self._frozen_config.myopts:
+					all_cp.update(portdb.cp_all())
 				if "--usepkg" in self._frozen_config.myopts:
 					all_cp.update(bindb.cp_all())
 				# discard dir containing no ebuilds
@@ -3493,18 +3528,18 @@ class depgraph(object):
 
 		return pkg, existing
 
-	def _pkg_visibility_check(self, pkg, allow_unstable_keywords=False, allow_license_changes=False, allow_unmasks=False):
+	def _pkg_visibility_check(self, pkg, allow_unstable_keywords=False,
+		allow_license_changes=False, allow_unmasks=False, trust_graph=True):
 
 		if pkg.visible:
 			return True
 
-		if pkg in self._dynamic_config.digraph:
+		if trust_graph and pkg in self._dynamic_config.digraph:
 			# Sometimes we need to temporarily disable
 			# dynamic_config._autounmask, but for overall
-			# consistency in dependency resolution, in any
-			# case we want to respect autounmask visibity
-			# for packages that have already been added to
-			# the dependency graph.
+			# consistency in dependency resolution, in most
+			# cases we want to treat packages in the graph
+			# as though they are visible.
 			return True
 
 		if not self._dynamic_config._autounmask:
@@ -3657,7 +3692,7 @@ class depgraph(object):
 
 		if new_changes != old_changes:
 			#Don't do the change if it violates REQUIRED_USE.
-			required_use = pkg.metadata["REQUIRED_USE"]
+			required_use = pkg.metadata.get("REQUIRED_USE")
 			if required_use and check_required_use(required_use, old_use, pkg.iuse.is_valid_flag) and \
 				not check_required_use(required_use, new_use, pkg.iuse.is_valid_flag):
 				return old_use
@@ -4413,7 +4448,8 @@ class depgraph(object):
 					# packages masked by license, since the user likely wants
 					# to adjust ACCEPT_LICENSE.
 					if pkg in final_db:
-						if not self._pkg_visibility_check(pkg) and \
+						if not self._pkg_visibility_check(pkg,
+							trust_graph=False) and \
 							(pkg_in_graph or 'LICENSE' in pkg.masks):
 							self._dynamic_config._masked_installed.add(pkg)
 						else:
@@ -6170,13 +6206,14 @@ class depgraph(object):
 			self._show_circular_deps(
 				self._dynamic_config._circular_deps_for_display)
 
-		# The user is only notified of a slot conflict if
-		# there are no unresolvable blocker conflicts.
-		if self._dynamic_config._unsatisfied_blockers_for_display is not None:
+		# The slot conflict display has better noise reduction than
+		# the unsatisfied blockers display, so skip unsatisfied blockers
+		# display if there are slot conflicts (see bug #385391).
+		if self._dynamic_config._slot_collision_info:
+			self._show_slot_collision_notice()
+		elif self._dynamic_config._unsatisfied_blockers_for_display is not None:
 			self._show_unsatisfied_blockers(
 				self._dynamic_config._unsatisfied_blockers_for_display)
-		elif self._dynamic_config._slot_collision_info:
-			self._show_slot_collision_notice()
 		else:
 			self._show_missed_update()
 

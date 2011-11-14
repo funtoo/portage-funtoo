@@ -115,6 +115,38 @@ def _spawn_phase(phase, settings, actionmap=None, **kwargs):
 	ebuild_phase.wait()
 	return ebuild_phase.returncode
 
+def _doebuild_path(settings, eapi=None):
+	"""
+	Generate the PATH variable.
+	"""
+
+	# Note: PORTAGE_BIN_PATH may differ from the global constant
+	# when portage is reinstalling itself.
+	portage_bin_path = settings["PORTAGE_BIN_PATH"]
+	eprefix = settings["EPREFIX"]
+	prerootpath = [x for x in settings.get("PREROOTPATH", "").split(":") if x]
+	rootpath = [x for x in settings.get("ROOTPATH", "").split(":") if x]
+
+	prefixes = []
+	if eprefix:
+		prefixes.append(eprefix)
+	prefixes.append("/")
+
+	path = []
+
+	if eapi not in (None, "0", "1", "2", "3"):
+		path.append(os.path.join(portage_bin_path, "ebuild-helpers", "4"))
+
+	path.append(os.path.join(portage_bin_path, "ebuild-helpers"))
+	path.extend(prerootpath)
+
+	for prefix in prefixes:
+		for x in ("usr/local/sbin", "usr/local/bin", "usr/sbin", "usr/bin", "sbin", "bin"):
+			path.append(os.path.join(prefix, x))
+
+	path.extend(rootpath)
+	settings["PATH"] = ":".join(path)
+
 def doebuild_environment(myebuild, mydo, myroot=None, settings=None,
 	debug=False, use_cache=None, db=None):
 	"""
@@ -234,16 +266,6 @@ def doebuild_environment(myebuild, mydo, myroot=None, settings=None,
 	else:
 		mysettings["PVR"]=mysplit[1]+"-"+mysplit[2]
 
-	if "PATH" in mysettings:
-		mysplit=mysettings["PATH"].split(":")
-	else:
-		mysplit=[]
-	# Note: PORTAGE_BIN_PATH may differ from the global constant
-	# when portage is reinstalling itself.
-	portage_bin_path = mysettings["PORTAGE_BIN_PATH"]
-	if portage_bin_path not in mysplit:
-		mysettings["PATH"] = portage_bin_path + ":" + mysettings["PATH"]
-
 	# All temporary directories should be subdirectories of
 	# $PORTAGE_TMPDIR/portage, since it's common for /tmp and /var/tmp
 	# to be mounted with the "noexec" option (see bug #346899).
@@ -283,6 +305,19 @@ def doebuild_environment(myebuild, mydo, myroot=None, settings=None,
 			(c, style_to_ansi_code(c)))
 	mysettings["PORTAGE_COLORMAP"] = "\n".join(mycolors)
 
+	if "COLUMNS" not in mysettings:
+		# Set COLUMNS, in order to prevent unnecessary stty calls
+		# inside the set_colors function of isolated-functions.sh.
+		# We cache the result in os.environ, in order to avoid
+		# multiple stty calls in cases when get_term_size() falls
+		# back to stty due to a missing or broken curses module.
+		columns = os.environ.get("COLUMNS")
+		if columns is None:
+			rows, columns = portage.output.get_term_size()
+			columns = str(columns)
+			os.environ["COLUMNS"] = columns
+		mysettings["COLUMNS"] = columns
+
 	# All EAPI dependent code comes last, so that essential variables
 	# like PORTAGE_BUILDDIR are still initialized even in cases when
 	# UnsupportedAPIException needs to be raised, which can be useful
@@ -290,13 +325,15 @@ def doebuild_environment(myebuild, mydo, myroot=None, settings=None,
 	eapi = None
 	if mydo == 'depend' and 'EAPI' not in mysettings.configdict['pkg']:
 		if eapi is None and 'parse-eapi-ebuild-head' in mysettings.features:
-			eapi = _parse_eapi_ebuild_head(
-				io.open(_unicode_encode(ebuild_path,
+			with io.open(_unicode_encode(ebuild_path,
 				encoding=_encodings['fs'], errors='strict'),
-				mode='r', encoding=_encodings['content'], errors='replace'))
+				mode='r', encoding=_encodings['content'],
+				errors='replace') as f:
+				eapi = _parse_eapi_ebuild_head(f)
 
 		if eapi is not None:
 			if not eapi_is_supported(eapi):
+				_doebuild_path(mysettings)
 				raise UnsupportedAPIException(mycpv, eapi)
 			mysettings.configdict['pkg']['EAPI'] = eapi
 
@@ -306,6 +343,7 @@ def doebuild_environment(myebuild, mydo, myroot=None, settings=None,
 		eapi = mysettings["EAPI"]
 		if not eapi_is_supported(eapi):
 			# can't do anything with this.
+			_doebuild_path(mysettings)
 			raise UnsupportedAPIException(mycpv, eapi)
 
 		if hasattr(mydbapi, "getFetchMap") and \
@@ -332,6 +370,28 @@ def doebuild_environment(myebuild, mydo, myroot=None, settings=None,
 			else:
 				mysettings.configdict["pkg"]["AA"] = " ".join(uri_map)
 
+	_doebuild_path(mysettings, eapi=eapi)
+
+	if mydo != "depend":
+		ccache = "ccache" in mysettings.features
+		distcc = "distcc" in mysettings.features
+		if ccache or distcc:
+			# Use default ABI libdir in accordance with bug #355283.
+			libdir = None
+			default_abi = mysettings.get("DEFAULT_ABI")
+			if default_abi:
+				libdir = mysettings.get("LIBDIR_" + default_abi)
+			if not libdir:
+				libdir = "lib"
+
+			if distcc:
+				mysettings["PATH"] = os.path.join(os.sep, eprefix_lstrip,
+					 "usr", libdir, "distcc", "bin") + ":" + mysettings["PATH"]
+
+			if ccache:
+				mysettings["PATH"] = os.path.join(os.sep, eprefix_lstrip,
+					 "usr", libdir, "ccache", "bin") + ":" + mysettings["PATH"]
+
 	if not eapi_exports_KV(eapi):
 		# Discard KV for EAPIs that don't support it. Cache KV is restored
 		# from the backupenv whenever config.reset() is called.
@@ -357,7 +417,7 @@ _doebuild_commands_without_builddir = (
 	'fetch', 'fetchall', 'help', 'manifest'
 )
 
-def doebuild(myebuild, mydo, myroot, mysettings, debug=0, listonly=0,
+def doebuild(myebuild, mydo, _unused=None, settings=None, debug=0, listonly=0,
 	fetchonly=0, cleanup=0, dbkey=None, use_cache=1, fetchall=0, tree=None,
 	mydbapi=None, vartree=None, prev_mtimes=None,
 	fd_pipes=None, returnpid=False):
@@ -369,10 +429,10 @@ def doebuild(myebuild, mydo, myroot, mysettings, debug=0, listonly=0,
 	@type myebuild: String
 	@param mydo: Phase to run
 	@type mydo: String
-	@param myroot: $ROOT (usually '/', see man make.conf)
-	@type myroot: String
-	@param mysettings: Portage Configuration
-	@type mysettings: instance of portage.config
+	@param _unused: Deprecated (use settings["ROOT"] instead)
+	@type _unused: String
+	@param settings: Portage Configuration
+	@type settings: instance of portage.config
 	@param debug: Turns on various debug information (eg, debug for spawn)
 	@type debug: Boolean
 	@param listonly: Used to wrap fetch(); passed such that fetch only lists files required.
@@ -415,7 +475,18 @@ def doebuild(myebuild, mydo, myroot, mysettings, debug=0, listonly=0,
 	Other variables may not be strictly required, many have defaults that are set inside of doebuild.
 	
 	"""
-	
+
+	if settings is None:
+		raise TypeError("settings parameter is required")
+	mysettings = settings
+	myroot = settings['EROOT']
+
+	if _unused is not None and _unused != mysettings['EROOT']:
+		warnings.warn("The third parameter of the "
+			"portage.doebuild() is now unused. Use "
+			"settings['ROOT'] instead.",
+			DeprecationWarning, stacklevel=2)
+
 	if not tree:
 		writemsg("Warning: tree not specified to doebuild\n")
 		tree = "porttree"
@@ -924,7 +995,7 @@ def doebuild(myebuild, mydo, myroot, mysettings, debug=0, listonly=0,
 				# this phase. This can raise PermissionDenied if
 				# the current user doesn't have write access to $PKGDIR.
 				if hasattr(portage, 'db'):
-					bintree = portage.db[mysettings["ROOT"]]["bintree"]
+					bintree = portage.db[mysettings['EROOT']]['bintree']
 					mysettings["PORTAGE_BINPKG_TMPFILE"] = \
 						bintree.getname(mysettings.mycpv) + \
 						".%s" % (os.getpid(),)
@@ -1542,15 +1613,24 @@ def _post_src_install_chost_fix(settings):
 	"""
 	It's possible that the ebuild has changed the
 	CHOST variable, so revert it to the initial
-	setting.
+	setting. Also, revert IUSE in case it's corrupted
+	due to local environment settings like in bug #386829.
 	"""
-	if settings.get('CATEGORY') == 'virtual':
-		return
 
-	chost = settings.get('CHOST')
-	if chost:
-		write_atomic(os.path.join(settings['PORTAGE_BUILDDIR'],
-			'build-info', 'CHOST'), chost + '\n')
+	build_info_dir = os.path.join(settings['PORTAGE_BUILDDIR'], 'build-info')
+
+	for k in ('IUSE',):
+		v = settings.get(k)
+		if v is not None:
+			write_atomic(os.path.join(build_info_dir, k), v + '\n')
+
+	# The following variables are irrelevant for virtual packages.
+	if settings.get('CATEGORY') != 'virtual':
+
+		for k in ('CHOST',):
+			v = settings.get(k)
+			if v is not None:
+				write_atomic(os.path.join(build_info_dir, k), v + '\n')
 
 _vdb_use_conditional_keys = ('DEPEND', 'LICENSE', 'PDEPEND',
 	'PROPERTIES', 'PROVIDE', 'RDEPEND', 'RESTRICT',)
@@ -1798,6 +1878,32 @@ def _post_src_install_soname_symlinks(mysettings, out):
 		if f is not None:
 			f.close()
 
+	qa_no_symlink = ""
+	f = None
+	try:
+		f = io.open(_unicode_encode(os.path.join(
+			mysettings["PORTAGE_BUILDDIR"],
+			"build-info", "QA_SONAME_NO_SYMLINK"),
+			encoding=_encodings['fs'], errors='strict'),
+			mode='r', encoding=_encodings['repo.content'],
+			errors='replace')
+		qa_no_symlink = f.read()
+	except IOError as e:
+		if e.errno not in (errno.ENOENT, errno.ESTALE):
+			raise
+	finally:
+		if f is not None:
+			f.close()
+
+	qa_no_symlink = qa_no_symlink.split()
+	if qa_no_symlink:
+		if len(qa_no_symlink) > 1:
+			qa_no_symlink = "|".join("(%s)" % x for x in qa_no_symlink)
+			qa_no_symlink = "^(%s)$" % qa_no_symlink
+		else:
+			qa_no_symlink = "^%s$" % qa_no_symlink[0]
+		qa_no_symlink = re.compile(qa_no_symlink)
+
 	libpaths = set(portage.util.getlibpaths(
 		mysettings["ROOT"], env=mysettings))
 	libpath_inodes = set()
@@ -1854,6 +1960,8 @@ def _post_src_install_soname_symlinks(mysettings, out):
 			continue
 		if not is_libdir(os.path.dirname(obj)):
 			continue
+		if qa_no_symlink and qa_no_symlink.match(obj.strip(os.sep)) is not None:
+			continue
 
 		obj_file_path = os.path.join(image_dir, obj.lstrip(os.sep))
 		sym_file_path = os.path.join(os.path.dirname(obj_file_path), soname)
@@ -1870,8 +1978,7 @@ def _post_src_install_soname_symlinks(mysettings, out):
 	if not missing_symlinks:
 		return
 
-	qa_msg = ["QA Notice: Missing soname symlink(s) " + \
-		"will be automatically created:"]
+	qa_msg = ["QA Notice: Missing soname symlink(s):"]
 	qa_msg.append("")
 	qa_msg.extend("\t%s -> %s" % (os.path.join(
 		os.path.dirname(obj).lstrip(os.sep), soname),
@@ -1880,13 +1987,6 @@ def _post_src_install_soname_symlinks(mysettings, out):
 	qa_msg.append("")
 	for line in qa_msg:
 		eqawarn(line, key=mysettings.mycpv, out=out)
-
-	_preinst_bsdflags(mysettings)
-	for obj, soname in missing_symlinks:
-		obj_file_path = os.path.join(image_dir, obj.lstrip(os.sep))
-		sym_file_path = os.path.join(os.path.dirname(obj_file_path), soname)
-		os.symlink(os.path.basename(obj_file_path), sym_file_path)
-	_reapply_bsdflags_to_image(mysettings)
 
 def _merge_unicode_error(errors):
 	lines = []

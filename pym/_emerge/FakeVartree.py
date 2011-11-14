@@ -2,6 +2,7 @@
 # Distributed under the terms of the GNU General Public License v2
 
 import sys
+import warnings
 
 import portage
 from portage import os
@@ -37,8 +38,10 @@ class FakeVartree(vartree):
 	global updates are necessary (updates are performed when necessary if there
 	is not a matching ebuild in the tree). Instances of this class are not
 	populated until the sync() method is called."""
-	def __init__(self, root_config, pkg_cache=None, pkg_root_config=None):
+	def __init__(self, root_config, pkg_cache=None, pkg_root_config=None,
+		dynamic_deps=True):
 		self._root_config = root_config
+		self._dynamic_deps = dynamic_deps
 		if pkg_root_config is None:
 			pkg_root_config = self._root_config
 		self._pkg_root_config = pkg_root_config
@@ -47,7 +50,6 @@ class FakeVartree(vartree):
 		real_vartree = root_config.trees["vartree"]
 		self._real_vardb = real_vartree.dbapi
 		portdb = root_config.trees["porttree"].dbapi
-		self.root = real_vartree.root
 		self.settings = real_vartree.settings
 		mykeys = list(real_vartree.dbapi._aux_cache_keys)
 		if "_mtime_" not in mykeys:
@@ -60,13 +62,23 @@ class FakeVartree(vartree):
 		# metadata.  This ensures that the vardb lock is released ASAP, without
 		# being delayed in case cache generation is triggered.
 		self._aux_get = self.dbapi.aux_get
-		self.dbapi.aux_get = self._aux_get_wrapper
 		self._match = self.dbapi.match
-		self.dbapi.match = self._match_wrapper
+		if dynamic_deps:
+			self.dbapi.aux_get = self._aux_get_wrapper
+			self.dbapi.match = self._match_wrapper
 		self._aux_get_history = set()
 		self._portdb_keys = ["EAPI", "DEPEND", "RDEPEND", "PDEPEND"]
 		self._portdb = portdb
 		self._global_updates = None
+
+	@property
+	def root(self):
+		warnings.warn("The root attribute of "
+			"_emerge.FakeVartree.FakeVartree"
+			" is deprecated. Use "
+			"settings['ROOT'] instead.",
+			DeprecationWarning, stacklevel=3)
+		return self.settings['ROOT']
 
 	def _match_wrapper(self, cpv, use_cache=1):
 		"""
@@ -147,7 +159,8 @@ class FakeVartree(vartree):
 			self.dbapi.aux_get = self._aux_get
 			self.settings._populate_treeVirtuals_if_needed(self)
 		finally:
-			self.dbapi.aux_get = self._aux_get_wrapper
+			if self._dynamic_deps:
+				self.dbapi.aux_get = self._aux_get_wrapper
 
 	def _sync(self):
 

@@ -90,8 +90,11 @@ SUPPORTED_FEATURES       = frozenset([
                            "ccache", "chflags", "clean-logs",
                            "collision-protect", "compress-build-logs",
                            "digest", "distcc", "distcc-pump", "distlocks", "ebuild-locks", "fakeroot",
+
                            "fail-clean", "fixpackages", "force-mirror", "getbinpkg",
                            "installsources", "keeptemp", "keepwork", "fixlafiles", "localpatch", "lmirror",
+                           "fail-clean", "force-mirror", "getbinpkg",
+                           "installsources", "keeptemp", "keepwork", "fixlafiles", "lmirror",
                            "metadata-transfer", "mirror", "multilib-strict", "news",
                            "noauto", "noclean", "nodoc", "noinfo", "noman",
                            "nostrip", "notitles", "parallel-fetch", "parallel-install",
@@ -109,10 +112,35 @@ EAPI                     = 4
 
 HASHING_BLOCKSIZE        = 32768
 MANIFEST1_HASH_FUNCTIONS = ("MD5", "SHA256", "RMD160")
-MANIFEST2_HASH_FUNCTIONS = ("SHA1", "SHA256", "RMD160")
-
 MANIFEST1_REQUIRED_HASH  = "MD5"
-MANIFEST2_REQUIRED_HASH  = "SHA1"
+
+# Future events:
+#
+# After WHIRLPOOL is supported in stable portage:
+# - Add SHA256 and WHIRLPOOL to MANIFEST2_HASH_DEFAULTS.
+# - Remove SHA1 and RMD160 from MANIFEST2_HASH_*.
+# - Set manifest-hashes in gentoo-x86/metadata/layout.conf as follows:
+#     manifest-hashes = SHA256 SHA512 WHIRLPOOL
+#
+# After WHIRLPOOL is supported in stable portage for at least 1 year:
+# - Change MANIFEST2_REQUIRED_HASH to WHIRLPOOL.
+# - Remove SHA256 from MANIFEST2_HASH_*.
+# - Set manifest-hashes in gentoo-x86/metadata/layout.conf as follows:
+#     manifest-hashes = SHA512 WHIRLPOOL
+#
+# After SHA-3 is approved:
+# - Add new hashes to MANIFEST2_HASH_*.
+#
+# After SHA-3 is supported in stable portage:
+# - Set manifest-hashes in gentoo-x86/metadata/layout.conf as follows:
+#     manifest-hashes = SHA3 SHA512 WHIRLPOOL
+#
+# After layout.conf settings correspond to defaults in stable portage:
+# - Remove redundant settings from gentoo-x86/metadata/layout.conf.
+
+MANIFEST2_HASH_FUNCTIONS = ("RMD160", "SHA1", "SHA256", "SHA512", "WHIRLPOOL")
+MANIFEST2_HASH_DEFAULTS = frozenset(["SHA1", "SHA256", "RMD160"])
+MANIFEST2_REQUIRED_HASH  = "SHA256"
 
 MANIFEST2_IDENTIFIERS    = ("AUX", "MISC", "DIST", "EBUILD")
 # ===========================================================================

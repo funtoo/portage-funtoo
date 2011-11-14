@@ -41,6 +41,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import warnings
 from itertools import chain
 try:
 	from urllib.parse import urlparse
@@ -67,7 +68,7 @@ class bindbapi(fakedbapi):
 			["BUILD_TIME", "CHOST", "DEPEND", "EAPI", "IUSE", "KEYWORDS",
 			"LICENSE", "PDEPEND", "PROPERTIES", "PROVIDE",
 			"RDEPEND", "repository", "RESTRICT", "SLOT", "USE", "DEFINED_PHASES",
-			"REQUIRED_USE"])
+			])
 		self._aux_cache_slot_dict = slot_dict_class(self._aux_cache_keys)
 		self._aux_cache = {}
 
@@ -177,6 +178,34 @@ class bindbapi(fakedbapi):
 			self.bintree.populate()
 		return fakedbapi.cpv_all(self)
 
+	def getfetchsizes(self, pkg):
+		"""
+		This will raise MissingSignature if SIZE signature is not available,
+		or InvalidSignature if SIZE signature is invalid.
+		"""
+
+		if not self.bintree.populated:
+			self.bintree.populate()
+
+		pkg = getattr(pkg, 'cpv', pkg)
+
+		filesdict = {}
+		if not self.bintree.isremote(pkg):
+			pass
+		else:
+			metadata = self.bintree._remotepkgs[pkg]
+			try:
+				size = int(metadata["SIZE"])
+			except KeyError:
+				raise portage.exception.MissingSignature("SIZE")
+			except ValueError:
+				raise portage.exception.InvalidSignature(
+					"SIZE: %s" % metadata["SIZE"])
+			else:
+				filesdict[os.path.basename(self.bintree.getname(pkg))] = size
+
+		return filesdict
+
 def _pkgindex_cpv_map_latest_build(pkgindex):
 	"""
 	Given a PackageIndex instance, create a dict of cpv -> metadata map.
@@ -214,10 +243,29 @@ def _pkgindex_cpv_map_latest_build(pkgindex):
 
 class binarytree(object):
 	"this tree scans for a list of all packages available in PKGDIR"
-	def __init__(self, root, pkgdir, virtual=None, settings=None):
+	def __init__(self, _unused=None, pkgdir=None,
+		virtual=DeprecationWarning, settings=None):
+
+		if pkgdir is None:
+			raise TypeError("pkgdir parameter is required")
+
+		if settings is None:
+			raise TypeError("settings parameter is required")
+
+		if _unused is not None and _unused != settings['ROOT']:
+			warnings.warn("The root parameter of the "
+				"portage.dbapi.bintree.binarytree"
+				" constructor is now unused. Use "
+				"settings['ROOT'] instead.",
+				DeprecationWarning, stacklevel=2)
+
+		if virtual is not DeprecationWarning:
+			warnings.warn("The 'virtual' parameter of the "
+				"portage.dbapi.bintree.binarytree"
+				" constructor is unused",
+				DeprecationWarning, stacklevel=2)
+
 		if True:
-			self.root = root
-			#self.pkgdir=settings["PKGDIR"]
 			self.pkgdir = normalize_path(pkgdir)
 			self.dbapi = bindbapi(self, settings=settings)
 			self.update_ents = self.dbapi.update_ents
@@ -242,7 +290,7 @@ class binarytree(object):
 				["BUILD_TIME", "CHOST", "DEPEND", "DESCRIPTION", "EAPI",
 				"IUSE", "KEYWORDS", "LICENSE", "PDEPEND", "PROPERTIES",
 				"PROVIDE", "RDEPEND", "repository", "SLOT", "USE", "DEFINED_PHASES",
-				"REQUIRED_USE", "BASE_URI"]
+				"BASE_URI"]
 			self._pkgindex_aux_keys = list(self._pkgindex_aux_keys)
 			self._pkgindex_use_evaluated_keys = \
 				("LICENSE", "RDEPEND", "DEPEND",
@@ -268,7 +316,6 @@ class binarytree(object):
 				"SLOT"    : "0",
 				"USE"     : "",
 				"DEFINED_PHASES" : "",
-				"REQUIRED_USE" : ""
 			}
 			self._pkgindex_inherited_keys = ["CHOST", "repository"]
 
@@ -301,6 +348,15 @@ class binarytree(object):
 				self._pkgindex_inherited_keys,
 				chain(*self._pkgindex_translated_keys)
 			))
+
+	@property
+	def root(self):
+		warnings.warn("The root attribute of "
+			"portage.dbapi.bintree.binarytree"
+			" is deprecated. Use "
+			"settings['ROOT'] instead.",
+			DeprecationWarning, stacklevel=3)
+		return self.settings['ROOT']
 
 	def move_ent(self, mylist, repo_match=None):
 		if not self.populated:

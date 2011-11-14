@@ -10,6 +10,10 @@ import sys
 import textwrap
 import platform
 import portage
+import portage
+portage.proxy.lazyimport.lazyimport(globals(),
+	'portage.news:count_unread_news,display_news_notifications',
+)
 from portage import os
 from portage import _encodings
 from portage import _unicode_decode
@@ -92,6 +96,21 @@ shortmapping={
 "u":"--update",
 "v":"--verbose",   "V":"--version"
 }
+
+COWSAY_MOO = """
+
+  Larry loves Gentoo (%s)
+
+ _______________________
+< Have you mooed today? >
+ -----------------------
+        \   ^__^
+         \  (oo)\_______
+            (__)\       )\/\ 
+                ||----w |
+                ||     ||
+
+"""
 
 def chk_updated_info_files(root, infodirs, prev_mtimes, retval):
 
@@ -316,7 +335,7 @@ def post_emerge(myaction, myopts, myfiles,
 	@type myopts: dict
 	@param myfiles: emerge arguments
 	@type myfiles: list
-	@param target_root: The target ROOT for myaction
+	@param target_root: The target EROOT for myaction
 	@type target_root: String
 	@param trees: A dictionary mapping each ROOT to it's package databases
 	@type trees: dict
@@ -327,7 +346,7 @@ def post_emerge(myaction, myopts, myfiles,
 	"""
 
 	root_config = trees[target_root]["root_config"]
-	vardbapi = trees[target_root]["vartree"].dbapi
+	vardbapi = trees[target_root]['vartree'].dbapi
 	settings = vardbapi.settings
 	info_mtimes = mtimedb["info"]
 
@@ -562,19 +581,25 @@ def insert_optional_args(args):
 
 	return new_args
 
-def _find_bad_atoms(atoms):
+def _find_bad_atoms(atoms, less_strict=False):
+	"""
+	Declares all atoms as invalid that have an operator,
+	a use dependency, a blocker or a repo spec.
+	It accepts atoms with wildcards.
+	In less_strict mode it accepts operators and repo specs.
+	"""
 	bad_atoms = []
 	for x in ' '.join(atoms).split():
 		bad_atom = False
 		try:
-			atom = portage.dep.Atom(x, allow_wildcard=True)
+			atom = portage.dep.Atom(x, allow_wildcard=True, allow_repo=less_strict)
 		except portage.exception.InvalidAtom:
 			try:
-				atom = portage.dep.Atom("*/"+x, allow_wildcard=True)
+				atom = portage.dep.Atom("*/"+x, allow_wildcard=True, allow_repo=less_strict)
 			except portage.exception.InvalidAtom:
 				bad_atom = True
 
-		if bad_atom or atom.operator or atom.blocker or atom.use:
+		if bad_atom or (atom.operator and not less_strict) or atom.blocker or atom.use:
 			bad_atoms.append(x)
 	return bad_atoms
 
@@ -587,8 +612,8 @@ def parse_opts(tmpcmdline, silent=False):
 	global options, shortmapping
 
 	actions = frozenset([
-		"clean", "config", "depclean", "help",
-		"info", "list-sets", "metadata",
+		"clean", "check-news", "config", "depclean", "help",
+		"info", "list-sets", "metadata", "moo",
 		"prune", "regen",  "search",
 		"sync",  "unmerge", "version",
 	])
@@ -650,6 +675,14 @@ def parse_opts(tmpcmdline, silent=False):
 			"choices"  : true_y_or_n
 		},
 
+		"--buildpkg-exclude": {
+			"help"   :"A space separated list of package atoms for which " + \
+				"no binary packages should be built. This option overrides all " + \
+				"possible ways to enable building of binary packages.",
+
+			"action" : "append"
+		},
+
 		"--config-root": {
 			"help":"specify the location for portage configuration files",
 			"action":"store"
@@ -688,6 +721,12 @@ def parse_opts(tmpcmdline, silent=False):
 			"help"    : "remove atoms/sets from the world file",
 			"type"    : "choice",
 			"choices" : true_y_or_n
+		},
+
+		"--dynamic-deps": {
+			"help": "substitute the dependencies of installed packages with the dependencies of unbuilt ebuilds",
+			"type": "choice",
+			"choices": y_or_n
 		},
 
 		"--exclude": {
@@ -814,7 +853,8 @@ def parse_opts(tmpcmdline, silent=False):
 		"--quiet-build": {
 			"help"     : "redirect build output to logs",
 			"type"     : "choice",
-			"choices"  : true_y_or_n
+			"choices"  : true_y_or_n,
+			"default"  : "y",
 		},
 
 		"--rebuild-if-new-rev": {
@@ -966,6 +1006,12 @@ def parse_opts(tmpcmdline, silent=False):
 		myoptions.buildpkg = True
 	else:
 		myoptions.buildpkg = None
+
+	if myoptions.buildpkg_exclude:
+		bad_atoms = _find_bad_atoms(myoptions.buildpkg_exclude, less_strict=True)
+		if bad_atoms and not silent:
+			parser.error("Invalid Atom(s) in --buildpkg-exclude parameter: '%s'\n" % \
+				(",".join(bad_atoms),))
 
 	if myoptions.changed_use is not False:
 		myoptions.reinstall = "changed-use"
@@ -1209,8 +1255,7 @@ def parse_opts(tmpcmdline, silent=False):
 	if myaction is None and myoptions.deselect is True:
 		myaction = 'deselect'
 
-	if myargs and sys.hexversion < 0x3000000 and \
-		not isinstance(myargs[0], unicode):
+	if myargs and isinstance(myargs[0], bytes):
 		for i in range(len(myargs)):
 			myargs[i] = portage._unicode_decode(myargs[i])
 
@@ -1580,7 +1625,7 @@ def emerge_main(args=None):
 	# Portage needs to ensure a sane umask for the files it creates.
 	os.umask(0o22)
 	settings, trees, mtimedb = load_emerge_config()
-	portdb = trees[settings["ROOT"]]["porttree"].dbapi
+	portdb = trees[settings['EROOT']]['porttree'].dbapi
 	rval = profile_check(trees, myaction)
 	if rval != os.EX_OK:
 		return rval
@@ -1591,13 +1636,14 @@ def emerge_main(args=None):
 	tmpcmdline.extend(args)
 	myaction, myopts, myfiles = parse_opts(tmpcmdline)
 
-	if myaction not in ('help', 'info', 'version') and \
+	# skip global updates prior to sync, since it's called after sync
+	if myaction not in ('help', 'info', 'sync', 'version') and \
 		myopts.get('--package-moves') != 'n' and \
 		_global_updates(trees, mtimedb["updates"], quiet=("--quiet" in myopts)):
 		mtimedb.commit()
 		# Reload the whole config from scratch.
 		settings, trees, mtimedb = load_emerge_config(trees=trees)
-		portdb = trees[settings["ROOT"]]["porttree"].dbapi
+		portdb = trees[settings['EROOT']]['porttree'].dbapi
 
 	xterm_titles = "notitles" not in settings.features
 	if xterm_titles:
@@ -1608,7 +1654,7 @@ def emerge_main(args=None):
 		# Reload the whole config from scratch so that the portdbapi internal
 		# config is updated with new FEATURES.
 		settings, trees, mtimedb = load_emerge_config(trees=trees)
-		portdb = trees[settings["ROOT"]]["porttree"].dbapi
+		portdb = trees[settings['EROOT']]['porttree'].dbapi
 
 	# NOTE: adjust_configs() can map options to FEATURES, so any relevant
 	# options adjustments should be made prior to calling adjust_configs().
@@ -1620,9 +1666,9 @@ def emerge_main(args=None):
 
 	if myaction == 'version':
 		writemsg_stdout(getportageversion(
-			settings["PORTDIR"], settings["ROOT"],
+			settings["PORTDIR"], None,
 			settings.profile_path, settings["CHOST"],
-			trees[settings["ROOT"]]["vartree"].dbapi) + '\n', noiselevel=-1)
+			trees[settings['EROOT']]['vartree'].dbapi) + '\n', noiselevel=-1)
 		return 0
 	elif myaction == 'help':
 		_emerge.help.help()
@@ -1680,20 +1726,11 @@ def emerge_main(args=None):
 	del mytrees, mydb
 
 	if "moo" in myfiles:
-		print("""
-
-  Larry loves Gentoo (""" + platform.system() + """)
-
- _______________________
-< Have you mooed today? >
- -----------------------
-        \   ^__^
-         \  (oo)\_______
-            (__)\       )\/\ 
-                ||----w |
-                ||     ||
-
-""")
+		print(COWSAY_MOO % platform.system())
+		msg = ("The above `emerge moo` display is deprecated. "
+			"Please use `emerge --moo` instead.")
+		for line in textwrap.wrap(msg, 50):
+			print(" %s %s" % (colorize("WARN", "*"), line))
 
 	for x in myfiles:
 		ext = os.path.splitext(x)[1]
@@ -1701,9 +1738,21 @@ def emerge_main(args=None):
 			print(colorize("BAD", "\n*** emerging by path is broken and may not always work!!!\n"))
 			break
 
-	root_config = trees[settings["ROOT"]]["root_config"]
-	if myaction == "list-sets":
+	root_config = trees[settings['EROOT']]['root_config']
+	if myaction == "moo":
+		print(COWSAY_MOO % platform.system())
+		return os.EX_OK
+	elif myaction == "list-sets":
 		writemsg_stdout("".join("%s\n" % s for s in sorted(root_config.sets)))
+		return os.EX_OK
+	elif myaction == "check-news":
+		news_counts = count_unread_news(
+			root_config.trees["porttree"].dbapi,
+			root_config.trees["vartree"].dbapi)
+		if any(news_counts.values()):
+			display_news_notifications(news_counts)
+		elif "--quiet" not in myopts:
+			print("", colorize("GOOD", "*"), "No news items were found.")
 		return os.EX_OK
 
 	ensure_required_sets(trees)
@@ -1900,7 +1949,7 @@ def emerge_main(args=None):
 	# SEARCH action
 	elif "search"==myaction:
 		validate_ebuild_environment(trees)
-		action_search(trees[settings["ROOT"]]["root_config"],
+		action_search(trees[settings['EROOT']]['root_config'],
 			myopts, myfiles, spinner)
 
 	elif myaction in ('clean', 'depclean', 'deselect', 'prune', 'unmerge'):
@@ -1908,19 +1957,19 @@ def emerge_main(args=None):
 		rval = action_uninstall(settings, trees, mtimedb["ldpath"],
 			myopts, myaction, myfiles, spinner)
 		if not (myaction == 'deselect' or buildpkgonly or fetchonly or pretend):
-			post_emerge(myaction, myopts, myfiles, settings["ROOT"],
+			post_emerge(myaction, myopts, myfiles, settings['EROOT'],
 				trees, mtimedb, rval)
 		return rval
 
 	elif myaction == 'info':
 
 		# Ensure atoms are valid before calling unmerge().
-		vardb = trees[settings["ROOT"]]["vartree"].dbapi
-		portdb = trees[settings["ROOT"]]["porttree"].dbapi
-		bindb = trees[settings["ROOT"]]["bintree"].dbapi
+		vardb = trees[settings['EROOT']]['vartree'].dbapi
+		portdb = trees[settings['EROOT']]['porttree'].dbapi
+		bindb = trees[settings['EROOT']]["bintree"].dbapi
 		valid_atoms = []
 		for x in myfiles:
-			if is_valid_package_atom(x):
+			if is_valid_package_atom(x, allow_repo=True):
 				try:
 					#look at the installed files first, if there is no match
 					#look at the ebuilds, since EAPI 4 allows running pkg_info
@@ -1980,7 +2029,7 @@ def emerge_main(args=None):
 			display_news_notification(root_config, myopts)
 		retval = action_build(settings, trees, mtimedb,
 			myopts, myaction, myfiles, spinner)
-		post_emerge(myaction, myopts, myfiles, settings["ROOT"],
+		post_emerge(myaction, myopts, myfiles, settings['EROOT'],
 			trees, mtimedb, retval)
 
 		return retval

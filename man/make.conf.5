@@ -295,11 +295,6 @@ probably also want to enable \fBPORT_LOGDIR\fR in order to save the build log.
 Both the \fBebuild\fR(1) command and the \fInoclean\fR feature cause the
 \fIfail\-clean\fR feature to be automatically disabled.
 .TP
-.B fixpackages
-Runs the script that will fix the dependencies in all binary packages.  This is 
-run whenever packages are moved around in the portage tree.  Please note that this 
-can take a lot of time.
-.TP
 .B getbinpkg
 Force emerges to always try to fetch files from the \fIPORTAGE_BINHOST\fR.  See 
 \fBmake.conf\fR(5) for more information.
@@ -404,6 +399,12 @@ before computing checksums for merge and unmerge. This feature is
 useful only if \fBprelink\fR(8) is installed and accurate checksums (despite
 prelinking) are needed for some reason such as for checking the integrity of
 installed files or because the \fIunmerge\-orphans\fR feature is disabled.
+
+Note that normal emerging of packages from source computes the
+checksums before things will be prelinked, so in such cases, this
+feature isn't required either. Undoing prelinking while merging is
+only required when using tools like \fBquickpkg\fR(1) which can cause
+already prelinked files to be merged.
 .TP
 .B preserve\-libs
 Preserve libraries when the sonames change during upgrade or downgrade.
@@ -854,7 +855,8 @@ USE from \fBebuild\fR(5) IUSE defaults
 USE from make.defaults and package.use in the repo (see \fBportage\fR(5))
 .TP
 .B env.d
-USE from the environment variables defined by files in \fI/etc/env.d/\fR
+USE from the environment variables, such as LINGUAS, defined by files in
+\fI/etc/env.d/\fR
 .RE
 
 .SH "REPORTING BUGS"

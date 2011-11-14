@@ -25,6 +25,7 @@ get_path() {
 
 export PATH="$(get_path)"
  
+
 # Prevent aliases from causing portage to act inappropriately.
 # Make sure it's before everything so we don't mess aliases that follow.
 unalias -a
@@ -302,11 +303,11 @@ inherit() {
 
 		# If each var has a value, append it to the global variable E_* to
 		# be applied after everything is finished. New incremental behavior.
-		[ "${IUSE+set}"       = set ] && export E_IUSE="${E_IUSE} ${IUSE}"
-		[ "${REQUIRED_USE+set}"       = set ] && export E_REQUIRED_USE="${E_REQUIRED_USE} ${REQUIRED_USE}"
-		[ "${DEPEND+set}"     = set ] && export E_DEPEND="${E_DEPEND} ${DEPEND}"
-		[ "${RDEPEND+set}"    = set ] && export E_RDEPEND="${E_RDEPEND} ${RDEPEND}"
-		[ "${PDEPEND+set}"    = set ] && export E_PDEPEND="${E_PDEPEND} ${PDEPEND}"
+		[ "${IUSE+set}"       = set ] && export E_IUSE+="${E_IUSE:+ }${IUSE}"
+		[ "${REQUIRED_USE+set}"       = set ] && export E_REQUIRED_USE+="${E_REQUIRED_USE:+ }${REQUIRED_USE}"
+		[ "${DEPEND+set}"     = set ] && export E_DEPEND+="${E_DEPEND:+ }${DEPEND}"
+		[ "${RDEPEND+set}"    = set ] && export E_RDEPEND+="${E_RDEPEND:+ }${RDEPEND}"
+		[ "${PDEPEND+set}"    = set ] && export E_PDEPEND+="${E_PDEPEND:+ }${PDEPEND}"
 
 		[ "${B_IUSE+set}"     = set ] && IUSE="${B_IUSE}"
 		[ "${B_IUSE+set}"     = set ] || unset IUSE
@@ -557,11 +558,11 @@ if ! has "$EBUILD_PHASE" clean cleanrm ; then
 		fi
 
 		# add in dependency info from eclasses
-		IUSE="${IUSE} ${E_IUSE}"
-		DEPEND="${DEPEND} ${E_DEPEND}"
-		RDEPEND="${RDEPEND} ${E_RDEPEND}"
-		PDEPEND="${PDEPEND} ${E_PDEPEND}"
-		REQUIRED_USE="${REQUIRED_USE} ${E_REQUIRED_USE}"
+		IUSE+="${IUSE:+ }${E_IUSE}"
+		DEPEND+="${DEPEND:+ }${E_DEPEND}"
+		RDEPEND+="${RDEPEND:+ }${E_RDEPEND}"
+		PDEPEND+="${PDEPEND:+ }${E_PDEPEND}"
+		REQUIRED_USE+="${REQUIRED_USE:+ }${E_REQUIRED_USE}"
 		
 		unset ECLASS E_IUSE E_REQUIRED_USE E_DEPEND E_RDEPEND E_PDEPEND \
 			__INHERITED_QA_CACHE
@@ -598,6 +599,7 @@ if ! has "$EBUILD_PHASE" clean cleanrm ; then
 
 		if [[ $EBUILD_PHASE != depend ]] ; then
 
+
 			case "$EAPI" in
 				0|1|2|3)
 					_ebuild_helpers_path="$PORTAGE_BIN_PATH/ebuild-helpers"
@@ -614,12 +616,10 @@ if ! has "$EBUILD_PHASE" clean cleanrm ; then
 			[[ -n $DEFAULT_ABI && -n ${!x} ]] && x=${!x} || x=lib
 
 			if has distcc $FEATURES ; then
-				PATH="/usr/$x/distcc/bin:$PATH"
 				[[ -n $DISTCC_LOG ]] && addwrite "${DISTCC_LOG%/*}"
 			fi
 
 			if has ccache $FEATURES ; then
-				PATH="/usr/$x/ccache/bin:$PATH"
 
 				if [[ -n $CCACHE_DIR ]] ; then
 					addread "$CCACHE_DIR"
@@ -628,8 +628,6 @@ if ! has "$EBUILD_PHASE" clean cleanrm ; then
 
 				[[ -n $CCACHE_SIZE ]] && ccache -M $CCACHE_SIZE &> /dev/null
 			fi
-
-			unset x
 
 			if [[ -n $QA_PREBUILT ]] ; then
 

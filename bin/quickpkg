@@ -21,9 +21,9 @@ except ImportError:
 from portage import os
 from portage import xpak
 from portage.dbapi.dep_expand import dep_expand
-from portage.dep import use_reduce
-from portage.exception import InvalidAtom, InvalidData, InvalidDependString, \
-	PackageSetNotFound, PermissionDenied
+from portage.dep import Atom, extended_cp_match, use_reduce
+from portage.exception import (AmbiguousPackageName, InvalidAtom, InvalidData,
+	InvalidDependString, PackageSetNotFound, PermissionDenied)
 from portage.util import ConfigProtect, ensure_dirs, shlex_split
 from portage.dbapi.vartree import dblink, tar_contents
 from portage.checksum import perform_md5
@@ -31,8 +31,9 @@ from portage._sets import load_default_config, SETPREFIX
 
 def quickpkg_atom(options, infos, arg, eout):
 	settings = portage.settings
-	root = portage.settings["ROOT"]
-	trees = portage.db[root]
+	root = portage.settings['ROOT']
+	eroot = portage.settings['EROOT']
+	trees = portage.db[eroot]
 	vartree = trees["vartree"]
 	vardb = vartree.dbapi
 	bintree = trees["bintree"]
@@ -43,7 +44,7 @@ def quickpkg_atom(options, infos, arg, eout):
 
 	try:
 		atom = dep_expand(arg, mydb=vardb, settings=vartree.settings)
-	except ValueError as e:
+	except AmbiguousPackageName as e:
 		# Multiple matches thrown from cpv_expand
 		eout.eerror("Please use a more specific atom: %s" % \
 			" ".join(e.args[0]))
@@ -65,10 +66,7 @@ def quickpkg_atom(options, infos, arg, eout):
 	for cpv in matches:
 		excluded_config_files = []
 		bintree.prevent_collision(cpv)
-		cat, pkg = portage.catsplit(cpv)
-		dblnk = dblink(cat, pkg, root,
-			vartree.settings, treetype="vartree",
-			vartree=vartree)
+		dblnk = vardb._dblink(cpv)
 		have_lock = False
 		try:
 			dblnk.lockdb()
@@ -101,7 +99,7 @@ def quickpkg_atom(options, infos, arg, eout):
 			contents = dblnk.getcontents()
 			protect = None
 			if not include_config:
-				confprot = ConfigProtect(root,
+				confprot = ConfigProtect(eroot,
 					shlex_split(settings.get("CONFIG_PROTECT", "")),
 					shlex_split(settings.get("CONFIG_PROTECT_MASK", "")))
 				def protect(filename):
@@ -161,8 +159,8 @@ def quickpkg_atom(options, infos, arg, eout):
 		infos["missing"].append(arg)
 
 def quickpkg_set(options, infos, arg, eout):
-	root = portage.settings["ROOT"]
-	trees = portage.db[root]
+	eroot = portage.settings['EROOT']
+	trees = portage.db[eroot]
 	vartree = trees["vartree"]
 
 	settings = vartree.settings
@@ -187,9 +185,43 @@ def quickpkg_set(options, infos, arg, eout):
 	for atom in atoms:
 		quickpkg_atom(options, infos, atom, eout)
 
+
+def quickpkg_extended_atom(options, infos, atom, eout):
+	eroot = portage.settings['EROOT']
+	trees = portage.db[eroot]
+	vartree = trees["vartree"]
+	vardb = vartree.dbapi
+
+	require_metadata = atom.slot or atom.repo
+	atoms = []
+	for cpv in vardb.cpv_all():
+		cpv_atom = Atom("=%s" % cpv)
+
+		if atom == "*/*":
+			atoms.append(cpv_atom)
+			continue
+
+		if not extended_cp_match(atom.cp, cpv_atom.cp):
+			continue
+
+		if require_metadata:
+			slot, repo = vardb.aux_get(cpv, ["SLOT", "repository"])
+
+			if atom.slot and atom.slot != slot:
+				continue
+
+			if atom.repo and atom.repo != repo:
+				continue
+
+		atoms.append(cpv_atom)
+
+	for atom in atoms:
+		quickpkg_atom(options, infos, atom, eout)
+
+
 def quickpkg_main(options, args, eout):
-	root = portage.settings["ROOT"]
-	trees = portage.db[root]
+	eroot = portage.settings['EROOT']
+	trees = portage.db[eroot]
 	bintree = trees["bintree"]
 
 	try:
@@ -207,8 +239,17 @@ def quickpkg_main(options, args, eout):
 	for arg in args:
 		if arg[0] == SETPREFIX:
 			quickpkg_set(options, infos, arg, eout)
-		else:
+			continue
+		try:
+			atom = Atom(arg, allow_wildcard=True, allow_repo=True)
+		except (InvalidAtom, InvalidData):
+			# maybe it's valid but missing category (requires dep_expand)
 			quickpkg_atom(options, infos, arg, eout)
+		else:
+			if atom.extended_syntax:
+				quickpkg_extended_atom(options, infos, atom, eout)
+			else:
+				quickpkg_atom(options, infos, atom, eout)
 
 	if not infos["successes"]:
 		eout.eerror("No packages found")

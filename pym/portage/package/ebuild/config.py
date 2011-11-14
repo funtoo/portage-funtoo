@@ -126,6 +126,11 @@ class config(object):
 		'PROPERTIES', 'PROVIDE', 'RDEPEND', 'SLOT',
 		'repository', 'RESTRICT', 'LICENSE',)
 
+	_module_aliases = {
+		"cache.metadata_overlay.database" : "portage.cache.flat_hash.database",
+		"portage.cache.metadata_overlay.database" : "portage.cache.flat_hash.database",
+	}
+
 	_case_insensitive_vars = special_env_vars.case_insensitive_vars
 	_default_globals = special_env_vars.default_globals
 	_env_blacklist = special_env_vars.env_blacklist
@@ -274,9 +279,6 @@ class config(object):
 
 			eprefix = locations_manager.eprefix
 			config_root = locations_manager.config_root
-			self.profiles = locations_manager.profiles
-			self.profile_path = locations_manager.profile_path
-			self.user_profile_dir = locations_manager.user_profile_dir
 			abs_user_config = locations_manager.abs_user_config
 
 			make_conf = getconfig(
@@ -295,6 +297,13 @@ class config(object):
 			eroot = locations_manager.eroot
 			self.global_config_path = locations_manager.global_config_path
 
+			make_globals = getconfig(os.path.join(self.global_config_path, 'make.globals'))
+			if make_globals is None:
+				make_globals = {}
+
+			for k, v in self._default_globals.items():
+				make_globals.setdefault(k, v)
+
 			if config_incrementals is None:
 				self.incrementals = INCREMENTALS
 			else:
@@ -304,14 +313,20 @@ class config(object):
 
 			self.module_priority    = ("user", "default")
 			self.modules            = {}
-			modules_loader = KeyValuePairFileLoader(
-				os.path.join(config_root, MODULES_FILE_PATH), None, None)
+			modules_file = os.path.join(config_root, MODULES_FILE_PATH)
+			modules_loader = KeyValuePairFileLoader(modules_file, None, None)
 			modules_dict, modules_errors = modules_loader.load()
 			self.modules["user"] = modules_dict
 			if self.modules["user"] is None:
 				self.modules["user"] = {}
+			user_auxdbmodule = \
+				self.modules["user"].get("portdbapi.auxdbmodule")
+			if user_auxdbmodule is not None and \
+				user_auxdbmodule in self._module_aliases:
+				warnings.warn("'%s' is deprecated: %s" %
+				(user_auxdbmodule, modules_file))
+
 			self.modules["default"] = {
-				"portdbapi.metadbmodule": "portage.cache.metadata.database",
 				"portdbapi.auxdbmodule":  "portage.cache.flat_hash.database",
 			}
 
@@ -329,19 +344,6 @@ class config(object):
 
 			self.configlist.append({})
 			self.configdict["pkginternal"] = self.configlist[-1]
-
-			self.packages_list = [grabfile_package(os.path.join(x, "packages"), verify_eapi=True) for x in self.profiles]
-			self.packages      = tuple(stack_lists(self.packages_list, incremental=1))
-			del self.packages_list
-			#self.packages = grab_stacked("packages", self.profiles, grabfile, incremental_lines=1)
-
-			# revmaskdict
-			self.prevmaskdict={}
-			for x in self.packages:
-				# Negative atoms are filtered by the above stack_lists() call.
-				if not isinstance(x, Atom):
-					x = Atom(x.lstrip('*'))
-				self.prevmaskdict.setdefault(x.cp, []).append(x)
 
 			# The expand_map is used for variable substitution
 			# in getconfig() calls, and the getconfig() calls
@@ -392,40 +394,55 @@ class config(object):
 
 			self.configdict["env"] = LazyItemsDict(self.backupenv)
 
-			for x in (self.global_config_path,):
-				self.mygcfg = getconfig(os.path.join(x, "make.globals"),
-					expand=expand_map)
-				if self.mygcfg:
-					break
-
-			if self.mygcfg is None:
-				self.mygcfg = {}
-
-			for k, v in self._default_globals.items():
-				self.mygcfg.setdefault(k, v)
-
-			self.configlist.append(self.mygcfg)
+			self.configlist.append(make_globals)
 			self.configdict["globals"]=self.configlist[-1]
 
 			self.make_defaults_use = []
-			self.mygcfg = {}
+
+			known_repos = []
+			for confs in [make_globals, make_conf, self.configdict["env"]]:
+				known_repos.extend(confs.get("PORTDIR", '').split())
+				known_repos.extend(confs.get("PORTDIR_OVERLAY", '').split())
+			known_repos = frozenset(known_repos)
+
+			locations_manager.load_profiles(known_repos)
+
+			profiles_complex = locations_manager.profiles_complex
+			self.profiles = locations_manager.profiles
+			self.profile_path = locations_manager.profile_path
+			self.user_profile_dir = locations_manager.user_profile_dir
+
+			packages_list = [grabfile_package(os.path.join(x, "packages"),
+				verify_eapi=True) for x in self.profiles]
+			self.packages = tuple(stack_lists(packages_list, incremental=1))
+
+			# revmaskdict
+			self.prevmaskdict={}
+			for x in self.packages:
+				# Negative atoms are filtered by the above stack_lists() call.
+				if not isinstance(x, Atom):
+					x = Atom(x.lstrip('*'))
+				self.prevmaskdict.setdefault(x.cp, []).append(x)
+
+
+			mygcfg = {}
 			if self.profiles:
 				mygcfg_dlists = [getconfig(os.path.join(x, "make.defaults"),
 					expand=expand_map) for x in self.profiles]
 				self._make_defaults = mygcfg_dlists
-				self.mygcfg = stack_dicts(mygcfg_dlists,
+				mygcfg = stack_dicts(mygcfg_dlists,
 					incrementals=self.incrementals)
-				if self.mygcfg is None:
-					self.mygcfg = {}
-			self.configlist.append(self.mygcfg)
+				if mygcfg is None:
+					mygcfg = {}
+			self.configlist.append(mygcfg)
 			self.configdict["defaults"]=self.configlist[-1]
 
-			self.mygcfg = getconfig(
+			mygcfg = getconfig(
 				os.path.join(config_root, MAKE_CONF_FILE),
 				tolerant=tolerant, allow_sourcing=True,
 				expand=expand_map) or {}
 
-			self.mygcfg.update(getconfig(
+			mygcfg.update(getconfig(
 				os.path.join(abs_user_config, 'make.conf'),
 				tolerant=tolerant, allow_sourcing=True,
 				expand=expand_map) or {})
@@ -450,9 +467,9 @@ class config(object):
 				env_d.pop(k, None)
 
 			for k in profile_only_variables:
-				self.mygcfg.pop(k, None)
+				mygcfg.pop(k, None)
 
-			self.configlist.append(self.mygcfg)
+			self.configlist.append(mygcfg)
 			self.configdict["conf"]=self.configlist[-1]
 
 			self.configlist.append(LazyItemsDict())
@@ -538,11 +555,11 @@ class config(object):
 				self._repo_make_defaults[repo.name] = d
 
 			#Read package.keywords and package.accept_keywords.
-			self._keywords_manager = KeywordsManager(self.profiles, abs_user_config, \
+			self._keywords_manager = KeywordsManager(profiles_complex, abs_user_config, \
 				local_config, global_accept_keywords=self.configdict["defaults"].get("ACCEPT_KEYWORDS", ""))
 
 			#Read all USE related files from profiles and optionally from user config.
-			self._use_manager = UseManager(self.repositories, self.profiles, abs_user_config, user_config=local_config)
+			self._use_manager = UseManager(self.repositories, profiles_complex, abs_user_config, user_config=local_config)
 			#Initialize all USE related variables we track ourselves.
 			self.usemask = self._use_manager.getUseMask()
 			self.useforce = self._use_manager.getUseForce()
@@ -559,7 +576,7 @@ class config(object):
 					self.configdict["conf"].get("ACCEPT_LICENSE", ""))
 
 			#Read package.mask and package.unmask from profiles and optionally from user config
-			self._mask_manager = MaskManager(self.repositories, self.profiles,
+			self._mask_manager = MaskManager(self.repositories, profiles_complex,
 				abs_user_config, user_config=local_config,
 				strict_umatched_removal=_unmatched_removal)
 
@@ -607,16 +624,21 @@ class config(object):
 			self.categories = [grabfile(os.path.join(x, "categories")) \
 				for x in locations_manager.profile_and_user_locations]
 			category_re = dbapi._category_re
-			self.categories = tuple(sorted(
+			# categories used to be a tuple, but now we use a frozenset
+			# for hashed category validation in pordbapi.cp_list()
+			self.categories = frozenset(
 				x for x in stack_lists(self.categories, incremental=1)
-				if category_re.match(x) is not None))
+				if category_re.match(x) is not None)
 
 			archlist = [grabfile(os.path.join(x, "arch.list")) \
 				for x in locations_manager.profile_and_user_locations]
 			archlist = stack_lists(archlist, incremental=1)
 			self.configdict["conf"]["PORTAGE_ARCHLIST"] = " ".join(archlist)
 
-			pkgprovidedlines = [grabfile(os.path.join(x, "package.provided"), recursive=1) for x in self.profiles]
+			pkgprovidedlines = [grabfile(
+				os.path.join(x.location, "package.provided"),
+				recursive=x.portage1_directories)
+				for x in profiles_complex]
 			pkgprovidedlines = stack_lists(pkgprovidedlines, incremental=1)
 			has_invalid_data = False
 			for x in range(len(pkgprovidedlines)-1, -1, -1):
@@ -735,6 +757,11 @@ class config(object):
 
 		if mycpv:
 			self.setcpv(mycpv)
+
+	@property
+	def mygcfg(self):
+		warnings.warn("portage.config.mygcfg is deprecated", stacklevel=3)
+		return {}
 
 	def _validate_commands(self):
 		for k in special_env_vars.validate_commands:
@@ -879,7 +906,9 @@ class config(object):
 		try:
 			mod = load_mod(best_mod)
 		except ImportError:
-			if not best_mod.startswith("cache."):
+			if best_mod in self._module_aliases:
+				mod = load_mod(self._module_aliases[best_mod])
+			elif not best_mod.startswith("cache."):
 				raise
 			else:
 				best_mod = "portage." + best_mod

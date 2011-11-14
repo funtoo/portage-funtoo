@@ -17,7 +17,7 @@ portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.versions:best,catpkgsplit,_pkgsplit@pkgsplit,ver_regexp',
 )
 
-from portage.cache import metadata_overlay, volatile
+from portage.cache import volatile
 from portage.cache.cache_errors import CacheError
 from portage.cache.mappings import Mapping
 from portage.dbapi import dbapi
@@ -25,8 +25,8 @@ from portage.exception import PortageException, \
 	FileNotFound, InvalidAtom, InvalidDependString, InvalidPackageName
 from portage.localization import _
 
-from portage import eclass_cache, auxdbkeys, \
-	eapi_is_supported, dep_check, \
+from portage import eclass_cache, \
+	eapi_is_supported, \
 	_eapi_is_deprecated
 from portage import os
 from portage import _encodings
@@ -120,8 +120,6 @@ class portdbapi(dbapi):
 		self._have_root_eclass_dir = os.path.isdir(
 			os.path.join(self.settings.repositories.mainRepoLocation(), "eclass"))
 
-		self.metadbmodule = self.settings.load_best_module("portdbapi.metadbmodule")
-
 		#if the portdbapi is "frozen", then we assume that we can cache everything (that no updates to it are happening)
 		self.xcache = {}
 		self.frozen = 0
@@ -152,6 +150,9 @@ class portdbapi(dbapi):
 		self.auxdbmodule = self.settings.load_best_module("portdbapi.auxdbmodule")
 		self.auxdb = {}
 		self._pregen_auxdb = {}
+		# If the current user doesn't have depcachedir write permission,
+		# then the depcachedir cache is kept here read-only access.
+		self._ro_auxdb = {}
 		self._init_cache_dirs()
 		try:
 			depcachedir_st = os.stat(self.depcachedir)
@@ -180,49 +181,33 @@ class portdbapi(dbapi):
 				'perms'   : 0o664
 			})
 
-		# XXX: REMOVE THIS ONCE UNUSED_0 IS YANKED FROM auxdbkeys
-		# ~harring
-		filtered_auxdbkeys = [x for x in auxdbkeys if not x.startswith("UNUSED_0")]
-		filtered_auxdbkeys.sort()
 		# If secpass < 1, we don't want to write to the cache
 		# since then we won't be able to apply group permissions
 		# to the cache entries/directories.
 		if (secpass < 1 and not depcachedir_unshared) or not depcachedir_w_ok:
 			for x in self.porttrees:
+				self.auxdb[x] = volatile.database(
+					self.depcachedir, x, self._known_keys,
+					**cache_kwargs)
 				try:
-					db_ro = self.auxdbmodule(self.depcachedir, x,
-						filtered_auxdbkeys, readonly=True, **cache_kwargs)
+					self._ro_auxdb[x] = self.auxdbmodule(self.depcachedir, x,
+						self._known_keys, readonly=True, **cache_kwargs)
 				except CacheError:
-					self.auxdb[x] = volatile.database(
-						self.depcachedir, x, filtered_auxdbkeys,
-						**cache_kwargs)
-				else:
-					self.auxdb[x] = metadata_overlay.database(
-						self.depcachedir, x, filtered_auxdbkeys,
-						db_rw=volatile.database, db_ro=db_ro,
-						**cache_kwargs)
+					pass
 		else:
 			for x in self.porttrees:
 				if x in self.auxdb:
 					continue
 				# location, label, auxdbkeys
 				self.auxdb[x] = self.auxdbmodule(
-					self.depcachedir, x, filtered_auxdbkeys, **cache_kwargs)
-				if self.auxdbmodule is metadata_overlay.database:
-					self.auxdb[x].db_ro.ec = self._repo_info[x].eclass_db
+					self.depcachedir, x, self._known_keys, **cache_kwargs)
 		if "metadata-transfer" not in self.settings.features:
 			for x in self.porttrees:
 				if x in self._pregen_auxdb:
 					continue
-				if os.path.isdir(os.path.join(x, "metadata", "cache")):
-					conf = self.repositories.get_repo_for_location(x)
-					cache = self._pregen_auxdb[x] = self.metadbmodule(
-						x, "metadata/cache", filtered_auxdbkeys, readonly=True)
-					cache.is_authoritative = conf.cache_is_authoritative
-					try:
-						cache.ec = self._repo_info[x].eclass_db
-					except AttributeError:
-						pass
+				cache = self._create_pregen_cache(x)
+				if cache is not None:
+					self._pregen_auxdb[x] = cache
 		# Selectively cache metadata in order to optimize dep matching.
 		self._aux_cache_keys = set(
 			["DEPEND", "EAPI", "INHERITED", "IUSE", "KEYWORDS", "LICENSE",
@@ -231,6 +216,17 @@ class portdbapi(dbapi):
 
 		self._aux_cache = {}
 		self._broken_ebuilds = set()
+
+	def _create_pregen_cache(self, tree):
+		conf = self.repositories.get_repo_for_location(tree)
+		cache = conf.get_pregenerated_cache(
+			self._known_keys, readonly=True)
+		if cache is not None:
+			try:
+				cache.ec = self._repo_info[tree].eclass_db
+			except AttributeError:
+				pass
+		return cache
 
 	def _init_cache_dirs(self):
 		"""Create /var/cache/edb/dep and adjust permissions for the portage
@@ -361,16 +357,16 @@ class portdbapi(dbapi):
 		@returns: A new EbuildMetadataPhase instance, or None if the
 			metadata cache is already valid.
 		"""
-		metadata, st, emtime = self._pull_valid_cache(cpv, ebuild_path, repo_path)
+		metadata, ebuild_hash = self._pull_valid_cache(cpv, ebuild_path, repo_path)
 		if metadata is not None:
 			return None
 
-		process = EbuildMetadataPhase(cpv=cpv, ebuild_path=ebuild_path,
-			ebuild_mtime=emtime, metadata_callback=self._metadata_callback,
+		process = EbuildMetadataPhase(cpv=cpv,
+			ebuild_hash=ebuild_hash, metadata_callback=self._metadata_callback,
 			portdb=self, repo_path=repo_path, settings=self.doebuild_settings)
 		return process
 
-	def _metadata_callback(self, cpv, ebuild_path, repo_path, metadata, mtime):
+	def _metadata_callback(self, cpv, repo_path, metadata, ebuild_hash):
 
 		i = metadata
 		if hasattr(metadata, "items"):
@@ -383,33 +379,46 @@ class portdbapi(dbapi):
 		else:
 			metadata["_eclasses_"] = {}
 
+		try:
+			cache = self.auxdb[repo_path]
+			chf = cache.validation_chf
+			metadata['_%s_' % chf] = getattr(ebuild_hash, chf)
+		except CacheError:
+			# Normally this shouldn't happen, so we'll show
+			# a traceback for debugging purposes.
+			traceback.print_exc()
+			cache = None
+
 		metadata.pop("INHERITED", None)
-		metadata["_mtime_"] = mtime
 
 		eapi = metadata.get("EAPI")
 		if not eapi or not eapi.strip():
 			eapi = "0"
 			metadata["EAPI"] = eapi
 		if not eapi_is_supported(eapi):
-			for k in set(metadata).difference(("_mtime_", "_eclasses_")):
-				metadata[k] = ""
+			keys = set(metadata)
+			keys.discard('_eclasses_')
+			keys.discard('_mtime_')
+			keys.discard('_%s_' % chf)
+			metadata.update((k, '') for k in keys)
 			metadata["EAPI"] = "-" + eapi.lstrip("-")
 
-		try:
-			self.auxdb[repo_path][cpv] = metadata
-		except CacheError:
-			# Normally this shouldn't happen, so we'll show
-			# a traceback for debugging purposes.
-			traceback.print_exc()
+		if cache is not None:
+			try:
+				cache[cpv] = metadata
+			except CacheError:
+				# Normally this shouldn't happen, so we'll show
+				# a traceback for debugging purposes.
+				traceback.print_exc()
 		return metadata
 
 	def _pull_valid_cache(self, cpv, ebuild_path, repo_path):
 		try:
-			# Don't use unicode-wrapped os module, for better performance.
-			st = _os.stat(_unicode_encode(ebuild_path,
-				encoding=_encodings['fs'], errors='strict'))
-			emtime = st[stat.ST_MTIME]
-		except OSError:
+			ebuild_hash = eclass_cache.hashed_path(ebuild_path)
+			# snag mtime since we use it later, and to trigger stat failure
+			# if it doesn't exist
+			ebuild_hash.mtime
+		except FileNotFound:
 			writemsg(_("!!! aux_get(): ebuild for " \
 				"'%s' does not exist at:\n") % (cpv,), noiselevel=-1)
 			writemsg("!!!            %s\n" % ebuild_path, noiselevel=-1)
@@ -422,40 +431,36 @@ class portdbapi(dbapi):
 		pregen_auxdb = self._pregen_auxdb.get(repo_path)
 		if pregen_auxdb is not None:
 			auxdbs.append(pregen_auxdb)
+		ro_auxdb = self._ro_auxdb.get(repo_path)
+		if ro_auxdb is not None:
+			auxdbs.append(ro_auxdb)
 		auxdbs.append(self.auxdb[repo_path])
 		eclass_db = self._repo_info[repo_path].eclass_db
 
-		doregen = True
 		for auxdb in auxdbs:
 			try:
 				metadata = auxdb[cpv]
 			except KeyError:
-				pass
+				continue
 			except CacheError:
-				if auxdb is not pregen_auxdb:
+				if not auxdb.readonly:
 					try:
 						del auxdb[cpv]
-					except KeyError:
+					except (KeyError, CacheError):
 						pass
-					except CacheError:
-						pass
-			else:
-				eapi = metadata.get('EAPI', '').strip()
-				if not eapi:
-					eapi = '0'
-				if not (eapi[:1] == '-' and eapi_is_supported(eapi[1:])):
-					if auxdb.is_authoritative or ( \
-						emtime == metadata['_mtime_'] and \
-						eclass_db.is_eclass_data_valid(metadata['_eclasses_'])):
-						doregen = False
-
-			if not doregen:
+				continue
+			eapi = metadata.get('EAPI', '').strip()
+			if not eapi:
+				eapi = '0'
+				metadata['EAPI'] = eapi
+			if eapi[:1] == '-' and eapi_is_supported(eapi[1:]):
+				continue
+			if auxdb.validate_entry(metadata, ebuild_hash, eclass_db):
 				break
-
-		if doregen:
+		else:
 			metadata = None
 
-		return (metadata, st, emtime)
+		return (metadata, ebuild_hash)
 
 	def aux_get(self, mycpv, mylist, mytree=None, myrepo=None):
 		"stub code for returning auxilliary db information, such as SLOT, DEPEND, etc."
@@ -482,7 +487,7 @@ class portdbapi(dbapi):
 			if aux_cache is not None:
 				return [aux_cache.get(x, "") for x in mylist]
 			cache_me = True
-		global auxdbkeys, auxdbkeylen
+
 		try:
 			cat, pkg = mycpv.split("/", 1)
 		except ValueError:
@@ -496,7 +501,7 @@ class portdbapi(dbapi):
 				_("ebuild not found for '%s'") % mycpv, noiselevel=1)
 			raise KeyError(mycpv)
 
-		mydata, st, emtime = self._pull_valid_cache(mycpv, myebuild, mylocation)
+		mydata, ebuild_hash = self._pull_valid_cache(mycpv, myebuild, mylocation)
 		doregen = mydata is None
 
 		if doregen:
@@ -508,21 +513,21 @@ class portdbapi(dbapi):
 
 			if eapi is None and \
 				'parse-eapi-ebuild-head' in self.doebuild_settings.features:
-				eapi = portage._parse_eapi_ebuild_head(io.open(
-					_unicode_encode(myebuild,
+				with io.open(_unicode_encode(myebuild,
 					encoding=_encodings['fs'], errors='strict'),
 					mode='r', encoding=_encodings['repo.content'],
-					errors='replace'))
+					errors='replace') as f:
+					eapi = portage._parse_eapi_ebuild_head(f)
 
 			if eapi is not None:
 				self.doebuild_settings.configdict['pkg']['EAPI'] = eapi
 
 			if eapi is not None and not portage.eapi_is_supported(eapi):
 				mydata = self._metadata_callback(
-					mycpv, myebuild, mylocation, {'EAPI':eapi}, emtime)
+					mycpv, mylocation, {'EAPI':eapi}, ebuild_hash)
 			else:
-				proc = EbuildMetadataPhase(cpv=mycpv, ebuild_path=myebuild,
-					ebuild_mtime=emtime,
+				proc = EbuildMetadataPhase(cpv=mycpv, eapi=eapi,
+					ebuild_hash=ebuild_hash,
 					metadata_callback=self._metadata_callback, portdb=self,
 					repo_path=mylocation,
 					scheduler=PollScheduler().sched_iface,
@@ -537,19 +542,14 @@ class portdbapi(dbapi):
 
 				mydata = proc.metadata
 
-		# do we have a origin repository name for the current package
 		mydata["repository"] = self.repositories.get_name_for_location(mylocation)
-		mydata["INHERITED"] = ' '.join(mydata.get("_eclasses_", []))
-		mydata["_mtime_"] = st[stat.ST_MTIME]
-
+		mydata["_mtime_"] = ebuild_hash.mtime
 		eapi = mydata.get("EAPI")
 		if not eapi:
 			eapi = "0"
 			mydata["EAPI"] = eapi
-		if not eapi_is_supported(eapi):
-			for k in set(mydata).difference(("_mtime_", "_eclasses_")):
-				mydata[k] = ""
-			mydata["EAPI"] = "-" + eapi.lstrip("-")
+		if eapi_is_supported(eapi):
+			mydata["INHERITED"] = " ".join(mydata.get("_eclasses_", []))
 
 		#finally, we look at our internal cache entry and return the requested data.
 		returnme = [mydata.get(x, "") for x in mylist]
@@ -1058,7 +1058,7 @@ def close_portdbapi_caches():
 portage.process.atexit_register(portage.portageexit)
 
 class portagetree(object):
-	def __init__(self, root=None, virtual=None, settings=None):
+	def __init__(self, root=None, virtual=DeprecationWarning, settings=None):
 		"""
 		Constructor for a PortageTree
 		
@@ -1081,8 +1081,14 @@ class portagetree(object):
 				"settings['ROOT'] instead.",
 				DeprecationWarning, stacklevel=2)
 
+		if virtual is not DeprecationWarning:
+			warnings.warn("The 'virtual' parameter of the "
+				"portage.dbapi.porttree.portagetree"
+				" constructor is unused",
+				DeprecationWarning, stacklevel=2)
+
 		self.portroot = settings["PORTDIR"]
-		self.virtual = virtual
+		self.__virtual = virtual
 		self.dbapi = portdbapi(mysettings=settings)
 
 	@property
@@ -1091,8 +1097,16 @@ class portagetree(object):
 			"portage.dbapi.porttree.portagetree" + \
 			" is deprecated. Use " + \
 			"settings['ROOT'] instead.",
-			DeprecationWarning, stacklevel=2)
+			DeprecationWarning, stacklevel=3)
 		return self.settings['ROOT']
+
+	@property
+	def virtual(self):
+		warnings.warn("The 'virtual' attribute of " + \
+			"portage.dbapi.porttree.portagetree" + \
+			" is deprecated.",
+			DeprecationWarning, stacklevel=3)
+		return self.__virtual
 
 	def dep_bestmatch(self,mydep):
 		"compatibility method"
@@ -1123,9 +1137,6 @@ class portagetree(object):
 		mysplit = pkgname.split("/")
 		psplit = pkgsplit(mysplit[1])
 		return "/".join([self.portroot, mysplit[0], psplit[0], mysplit[1]])+".ebuild"
-
-	def depcheck(self, mycheck, use="yes", myusesplit=None):
-		return dep_check(mycheck, self.dbapi, use=use, myuse=myusesplit)
 
 	def getslot(self,mycatpkg):
 		"Get a slot for a catpkg; assume it exists."

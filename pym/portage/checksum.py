@@ -16,8 +16,31 @@ import tempfile
 hashfunc_map = {}
 hashorigin_map = {}
 
-def _generate_hash_function(hashtype, hashobject, origin="unknown"):
-	def pyhash(filename):
+def _open_file(filename):
+	try:
+		return open(_unicode_encode(filename,
+			encoding=_encodings['fs'], errors='strict'), 'rb')
+	except IOError as e:
+		func_call = "open('%s')" % filename
+		if e.errno == errno.EPERM:
+			raise portage.exception.OperationNotPermitted(func_call)
+		elif e.errno == errno.EACCES:
+			raise portage.exception.PermissionDenied(func_call)
+		elif e.errno == errno.ENOENT:
+			raise portage.exception.FileNotFound(filename)
+		else:
+			raise
+
+class _generate_hash_function(object):
+
+	__slots__ = ("_hashobject",)
+
+	def __init__(self, hashtype, hashobject, origin="unknown"):
+		self._hashobject = hashobject
+		hashfunc_map[hashtype] = self
+		hashorigin_map[hashtype] = origin
+
+	def __call__(self, filename):
 		"""
 		Run a checksum against a file.
 	
@@ -25,23 +48,11 @@ def _generate_hash_function(hashtype, hashobject, origin="unknown"):
 		@type filename: String
 		@return: The hash and size of the data
 		"""
-		try:
-			f = open(_unicode_encode(filename,
-				encoding=_encodings['fs'], errors='strict'), 'rb')
-		except IOError as e:
-			func_call = "open('%s')" % filename
-			if e.errno == errno.EPERM:
-				raise portage.exception.OperationNotPermitted(func_call)
-			elif e.errno == errno.EACCES:
-				raise portage.exception.PermissionDenied(func_call)
-			elif e.errno == errno.ENOENT:
-				raise portage.exception.FileNotFound(filename)
-			else:
-				raise
+		f = _open_file(filename)
 		blocksize = HASHING_BLOCKSIZE
 		data = f.read(blocksize)
 		size = 0
-		checksum = hashobject()
+		checksum = self._hashobject()
 		while data:
 			checksum.update(data)
 			size = size + len(data)
@@ -49,9 +60,6 @@ def _generate_hash_function(hashtype, hashobject, origin="unknown"):
 		f.close()
 
 		return (checksum.hexdigest(), size)
-	hashfunc_map[hashtype] = pyhash
-	hashorigin_map[hashtype] = origin
-	return pyhash
 
 # Define hash functions, try to use the best module available. Later definitions
 # override earlier ones
@@ -71,40 +79,72 @@ except ImportError:
 
 sha1hash = _generate_hash_function("SHA1", _new_sha1, origin="internal")
 
+# Try to use mhash if available
+# mhash causes GIL presently, so it gets less priority than hashlib and
+# pycrypto. However, it might be the only accelerated implementation of
+# WHIRLPOOL available.
+try:
+	import mhash, functools
+	md5hash = _generate_hash_function("MD5", functools.partial(mhash.MHASH, mhash.MHASH_MD5), origin="mhash")
+	sha1hash = _generate_hash_function("SHA1", functools.partial(mhash.MHASH, mhash.MHASH_SHA1), origin="mhash")
+	sha256hash = _generate_hash_function("SHA256", functools.partial(mhash.MHASH, mhash.MHASH_SHA256), origin="mhash")
+	sha512hash = _generate_hash_function("SHA512", functools.partial(mhash.MHASH, mhash.MHASH_SHA512), origin="mhash")
+	for local_name, hash_name in (("rmd160", "ripemd160"), ("whirlpool", "whirlpool")):
+		if hasattr(mhash, 'MHASH_%s' % local_name.upper()):
+			globals()['%shash' % local_name] = \
+				_generate_hash_function(local_name.upper(), \
+				functools.partial(mhash.MHASH, getattr(mhash, 'MHASH_%s' % hash_name.upper())), \
+				origin='mhash')
+except ImportError:
+	pass
+
 # Use pycrypto when available, prefer it over the internal fallbacks
+# Check for 'new' attributes, since they can be missing if the module
+# is broken somehow.
 try:
 	from Crypto.Hash import SHA256, RIPEMD
-	sha256hash = _generate_hash_function("SHA256", SHA256.new, origin="pycrypto")
-	rmd160hash = _generate_hash_function("RMD160", RIPEMD.new, origin="pycrypto")
-except ImportError as e:
+	sha256hash = getattr(SHA256, 'new', None)
+	if sha256hash is not None:
+		sha256hash = _generate_hash_function("SHA256",
+			sha256hash, origin="pycrypto")
+	rmd160hash = getattr(RIPEMD, 'new', None)
+	if rmd160hash is not None:
+		rmd160hash = _generate_hash_function("RMD160",
+			rmd160hash, origin="pycrypto")
+except ImportError:
 	pass
 
 # Use hashlib from python-2.5 if available and prefer it over pycrypto and internal fallbacks.
-# Need special handling for RMD160 as it may not always be provided by hashlib.
+# Need special handling for RMD160/WHIRLPOOL as they may not always be provided by hashlib.
 try:
-	import hashlib
+	import hashlib, functools
 	
 	md5hash = _generate_hash_function("MD5", hashlib.md5, origin="hashlib")
 	sha1hash = _generate_hash_function("SHA1", hashlib.sha1, origin="hashlib")
 	sha256hash = _generate_hash_function("SHA256", hashlib.sha256, origin="hashlib")
-	try:
-		hashlib.new('ripemd160')
-	except ValueError:
-		pass
-	else:
-		def rmd160():
-			return hashlib.new('ripemd160')
-		rmd160hash = _generate_hash_function("RMD160", rmd160, origin="hashlib")
-except ImportError as e:
+	sha512hash = _generate_hash_function("SHA512", hashlib.sha512, origin="hashlib")
+	for local_name, hash_name in (("rmd160", "ripemd160"), ("whirlpool", "whirlpool")):
+		try:
+			hashlib.new(hash_name)
+		except ValueError:
+			pass
+		else:
+			globals()['%shash' % local_name] = \
+				_generate_hash_function(local_name.upper(), \
+				functools.partial(hashlib.new, hash_name), \
+				origin='hashlib')
+
+except ImportError:
 	pass
-	
+
+if "WHIRLPOOL" not in hashfunc_map:
+	# Bundled WHIRLPOOL implementation
+	from portage.util.whirlpool import new as _new_whirlpool
+	whirlpoolhash = _generate_hash_function("WHIRLPOOL", _new_whirlpool, origin="bundled")
 
 # Use python-fchksum if available, prefer it over all other MD5 implementations
 try:
-	import fchksum
-	
-	def md5hash(filename):
-		return fchksum.fmd5t(filename)
+	from fchksum import fmd5t as md5hash
 	hashfunc_map["MD5"] = md5hash
 	hashorigin_map["MD5"] = "python-fchksum"
 
@@ -126,6 +166,15 @@ if os.path.exists(PRELINK_BINARY):
 	if (results[0] >> 8) == 0:
 		prelink_capable=1
 	del results
+
+def is_prelinkable_elf(filename):
+	f = _open_file(filename)
+	try:
+		magic = f.read(17)
+	finally:
+		f.close()
+	return (len(magic) == 17 and magic.startswith(b'\x7fELF') and
+		magic[16] in (b'\x02', b'\x03')) # 2=ET_EXEC, 3=ET_DYN
 
 def perform_md5(x, calc_prelink=0):
 	return perform_checksum(x, "MD5", calc_prelink)[0]
@@ -234,7 +283,8 @@ def perform_checksum(filename, hashname="MD5", calc_prelink=0):
 	myfilename = filename
 	prelink_tmpfile = None
 	try:
-		if calc_prelink and prelink_capable:
+		if (calc_prelink and prelink_capable and
+		    is_prelinkable_elf(filename)):
 			# Create non-prelinked temporary file to checksum.
 			# Files rejected by prelink are summed in place.
 			try:
@@ -255,8 +305,10 @@ def perform_checksum(filename, hashname="MD5", calc_prelink=0):
 					" hash function not available (needs dev-python/pycrypto)")
 			myhash, mysize = hashfunc_map[hashname](myfilename)
 		except (OSError, IOError) as e:
-			if e.errno == errno.ENOENT:
+			if e.errno in (errno.ENOENT, errno.ESTALE):
 				raise portage.exception.FileNotFound(myfilename)
+			elif e.errno == portage.exception.PermissionDenied.errno:
+				raise portage.exception.PermissionDenied(myfilename)
 			raise
 		return myhash, mysize
 	finally:
