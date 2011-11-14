@@ -1924,7 +1924,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 	if myaction == "metadata":
 		print("skipping sync")
 		updatecache_flg = True
-<<<<<<< HEAD
+
 	if portage.process.find_binary("git") is None:
 		msg = ["Command not found: git", "Type \"emerge dev-vcs/git\" to enable git support."]
 		for l in msg:
@@ -1934,7 +1934,6 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 	if not os.path.exists(myportdir):
 		if not syncuri:
 			writemsg_level("SYNC is undefined.\nPlease set SYNC to the remote location of the Portage repository.\n", noiselevel=-1, level=logging.ERROR)
-=======
 	elif ".git" in vcs_dirs:
 		# Update existing git repository, and ignore the syncuri. We are
 		# going to trust the user and assume that the user is in the branch
