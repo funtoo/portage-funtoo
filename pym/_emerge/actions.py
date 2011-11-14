@@ -2020,7 +2020,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		writemsg_level(msg + "\n")
 
 	# if initial clone or sync, 
-	exitcode = git_sync_timestamps(settings, myportdir)
+	exitcode = git_sync_timestamps(portdb, myportdir)
 	if exitcode != os.EX_OK:
 		sys.exit(retval)
 
