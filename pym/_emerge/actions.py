@@ -2081,9 +2081,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		portdb = trees[settings['EROOT']]['porttree'].dbapi
 		root_config = trees[settings['EROOT']]['root_config']
 
-<<<<<<< HEAD
 	chk_updated_cfg_files(settings["EROOT"], portage.util.shlex_split(settings.get("CONFIG_PROTECT", "")))
-=======
 	mybestpv = portdb.xmatch("bestmatch-visible",
 		portage.const.PORTAGE_PACKAGE_ATOM)
 	mypvs = portage.best(
@@ -2092,7 +2090,6 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 
 	chk_updated_cfg_files(settings["EROOT"],
 		portage.util.shlex_split(settings.get("CONFIG_PROTECT", "")))
->>>>>>> zmedico/master
 
 	if myaction != "metadata":
 		postsync = os.path.join(settings["PORTAGE_CONFIGROOT"], portage.USER_CONFIG_PATH, "bin", "post_sync")
