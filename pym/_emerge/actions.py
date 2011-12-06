@@ -2035,27 +2035,33 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		emergelog(xterm_titles, msg)
 		writemsg_level(msg + "\n")
 
-	# if initial clone or sync, 
-	exitcode = git_sync_timestamps(portdb, myportdir)
-	if exitcode != os.EX_OK:
-		sys.exit(retval)
-
-	if updatecache_flg and myaction != "metadata" and "metadata-transfer" not in settings.features:
-		updatecache_flg = False
-
 	# Reload the whole config from scratch.
 	settings, trees, mtimedb = load_emerge_config(trees=trees)
 	adjust_configs(myopts, trees)
 	root_config = trees[settings['EROOT']]['root_config']
 	portdb = trees[settings['EROOT']]['porttree'].dbapi
 
-	if updatecache_flg and os.path.exists(os.path.join(myportdir, 'metadata', 'cache')):
+	# NOTE: Do this after reloading the config, in case
+	# it did not exist prior to sync, so that the config
+	# and portdb properly account for its existence.
+	exitcode = git_sync_timestamps(portdb, myportdir)
+	if exitcode == os.EX_OK:
+		updatecache_flg = True
+
+	if updatecache_flg and  \
+		myaction != "metadata" and \
+		"metadata-transfer" not in settings.features:
+		updatecache_flg = False
+
+	if updatecache_flg and \
+		os.path.exists(os.path.join(myportdir, 'metadata', 'cache')):
 
 		# Only update cache for myportdir since that's
 		# the only one that's been synced here.
 		action_metadata(settings, portdb, myopts, porttrees=[myportdir])
 
-	if myopts.get('--package-moves') != 'n' and _global_updates(trees, mtimedb["updates"], quiet=("--quiet" in myopts)):
+	if myopts.get('--package-moves') != 'n' and \
+		_global_updates(trees, mtimedb["updates"], quiet=("--quiet" in myopts)):
 		mtimedb.commit()
 		# Reload the whole config from scratch.
 		settings, trees, mtimedb = load_emerge_config(trees=trees)
@@ -2073,11 +2079,23 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		portage.util.shlex_split(settings.get("CONFIG_PROTECT", "")))
 
 	if myaction != "metadata":
-		postsync = os.path.join(settings["PORTAGE_CONFIGROOT"], portage.USER_CONFIG_PATH, "bin", "post_sync")
+		postsync = os.path.join(settings["PORTAGE_CONFIGROOT"],
+			portage.USER_CONFIG_PATH, "bin", "post_sync")
 		if os.access(postsync, os.X_OK):
-			retval = portage.process.spawn( [postsync, syncuri], env=settings.environ())
+			retval = portage.process.spawn(
+				[postsync, dosyncuri], env=settings.environ())
 			if retval != os.EX_OK:
-				print(red(" * ") + bold("spawn failed of " + postsync))
+				writemsg_level(
+					" %s spawn failed of %s\n" % (bad("*"), postsync,),
+					level=logging.ERROR, noiselevel=-1)
+
+	if(mybestpv != mypvs) and not "--quiet" in myopts:
+		print()
+		print(red(" * ")+bold("An update to portage is available.")+" It is _highly_ recommended")
+		print(red(" * ")+"that you update portage now, before any other packages are updated.")
+		print()
+		print(red(" * ")+"To update portage, run 'emerge portage' now.")
+		print()
 
 	display_news_notification(root_config, myopts)
 	return os.EX_OK
