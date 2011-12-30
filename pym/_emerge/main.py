@@ -1794,13 +1794,6 @@ def emerge_main(args=None):
 	if "--pretend" in myopts:
 		myopts.pop("--ask", None)
 
-	# forbid --ask when not in a terminal
-	# note: this breaks `emerge --ask | tee logfile`, but that doesn't work anyway.
-	if ("--ask" in myopts) and (not sys.stdin.isatty()):
-		portage.writemsg("!!! \"--ask\" should only be used in a terminal. Exiting.\n",
-			noiselevel=-1)
-		return 1
-
 	if settings.get("PORTAGE_DEBUG", "") == "1":
 		spinner.update = spinner.update_quiet
 		portage.util.noiselimit = 0
