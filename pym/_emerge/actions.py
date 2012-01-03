@@ -2067,7 +2067,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 			portage.USER_CONFIG_PATH, "bin", "post_sync")
 		if os.access(postsync, os.X_OK):
 			retval = portage.process.spawn(
-				[postsync, dosyncuri], env=settings.environ())
+				[postsync, syncuri], env=settings.environ())
 			if retval != os.EX_OK:
 				writemsg_level(
 					" %s spawn failed of %s\n" % (bad("*"), postsync,),
