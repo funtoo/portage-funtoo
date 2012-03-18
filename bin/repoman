@@ -69,6 +69,8 @@ from portage import cvstree, normalize_path
 from portage import util
 from portage.exception import (FileNotFound, MissingParameter,
 	ParseError, PermissionDenied)
+from portage.manifest import _prohibited_filename_chars_re as \
+	disallowed_filename_chars_re
 from portage.process import find_binary, spawn
 from portage.output import bold, create_color_func, \
 	green, nocolor, red
@@ -85,7 +87,6 @@ util.initialize_logger()
 # 14 is the length of DESCRIPTION=""
 max_desc_len = 100
 allowed_filename_chars="a-zA-Z0-9._-+:"
-disallowed_filename_chars_re = re.compile(r'[^a-zA-Z0-9._\-+:]')
 pv_toolong_re = re.compile(r'[0-9]{19,}')
 bad = create_color_func("BAD")
 
@@ -186,6 +187,10 @@ def ParseArgs(argv, qahelp):
 
 	parser.add_option('-M', '--commitmsgfile', dest='commitmsgfile',
 		help='specify a path to a file that contains a commit message')
+
+	parser.add_option('--digest',
+		type='choice', choices=('y', 'n'), metavar='<y|n>',
+		help='Automatically update Manifest digests for modified files')
 
 	parser.add_option('-p', '--pretend', dest='pretend', default=False,
 		action='store_true', help='don\'t commit or fix anything; just show what would be done')
@@ -654,6 +659,9 @@ if vcs is None:
 # Gentoo's Council decided to always use the ChangeLog file.
 # TODO: shouldn't this just be switched on the repo, iso the VCS?
 check_changelog = options.echangelog not in ('y', 'force') and vcs in ('cvs', 'svn')
+
+if 'digest' in repoman_settings.features and options.digest != 'n':
+	options.digest = 'y'
 
 logging.debug("vcs: %s" % (vcs,))
 logging.debug("repo config: %s" % (repo_config,))
@@ -1169,6 +1177,12 @@ if vcs:
 	modified_changelogs.update(x for x in chain(mychanged, mynew) \
 		if os.path.basename(x) == "ChangeLog")
 
+def vcs_new_changed(relative_path):
+	for x in chain(mychanged, mynew):
+		if x == relative_path:
+			return True
+	return False
+
 have_pmasked = False
 have_dev_keywords = False
 dofail = 0
@@ -1229,8 +1243,7 @@ for x in effective_scanlist:
 	generated_manifest = False
 
 	if options.mode == "manifest" or \
-	  (options.mode != 'manifest-check' and \
-	  'digest' in repoman_settings.features) or \
+	  (options.mode != 'manifest-check' and options.digest == 'y') or \
 	  options.mode in ('commit', 'fix') and not options.pretend:
 		auto_assumed = set()
 		fetchlist_dict = portage.FetchlistDict(checkdir,
@@ -1359,6 +1372,14 @@ for x in effective_scanlist:
 
 	for y in checkdirlist:
 		m = disallowed_filename_chars_re.search(y.strip(os.sep))
+		if m is not None:
+			y_relative = os.path.join(checkdir_relative, y)
+			if vcs is not None and not vcs_new_changed(y_relative):
+				# If the file isn't in the VCS new or changed set, then
+				# assume that it's an irrelevant temporary file (Manifest
+				# entries are not generated for file names containing
+				# prohibited characters). See bug #406877.
+				m = None
 		if m is not None:
 			stats["file.name"] += 1
 			fails["file.name"].append("%s/%s: char '%s'" % \
@@ -1527,6 +1548,14 @@ for x in effective_scanlist:
 
 			m = disallowed_filename_chars_re.search(
 				os.path.basename(y.rstrip(os.sep)))
+			if m is not None:
+				y_relative = os.path.join(checkdir_relative, "files", y)
+				if vcs is not None and not vcs_new_changed(y_relative):
+					# If the file isn't in the VCS new or changed set, then
+					# assume that it's an irrelevant temporary file (Manifest
+					# entries are not generated for file names containing
+					# prohibited characters). See bug #406877.
+					m = None
 			if m is not None:
 				stats["file.name"] += 1
 				fails["file.name"].append("%s/files/%s: char '%s'" % \
