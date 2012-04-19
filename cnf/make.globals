@@ -19,7 +19,7 @@ LDFLAGS=""
 FFLAGS=""
 FCFLAGS=""
 
-SYNC="git://github.com/funtoo/ports-2012.git"
+SYNC="git://github.com/funtoo/portage-mini-2011.git"
 SYNC_USER="root"
 
 # Default distfiles mirrors. This rotation has multiple hosts and is reliable.
