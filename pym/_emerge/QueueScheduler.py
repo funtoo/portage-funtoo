@@ -10,8 +10,8 @@ class QueueScheduler(PollScheduler):
 	run() method returns when no tasks remain.
 	"""
 
-	def __init__(self, max_jobs=None, max_load=None):
-		PollScheduler.__init__(self)
+	def __init__(self, main=True, max_jobs=None, max_load=None):
+		PollScheduler.__init__(self, main=main)
 
 		if max_jobs is None:
 			max_jobs = 1
@@ -67,7 +67,7 @@ class QueueScheduler(PollScheduler):
 	def _schedule_tasks(self):
 		"""
 		@rtype: bool
-		@returns: True if there may be remaining tasks to schedule,
+		@return: True if there may be remaining tasks to schedule,
 			False otherwise.
 		"""
 		if self._terminated_tasks:

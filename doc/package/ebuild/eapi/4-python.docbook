@@ -25,10 +25,22 @@ official EAPI 4-python Specification</ulink>.
 </para>
 </section>
 </section>
+<section id='package-ebuild-eapi-4-python-package-names-allow-period-characters'>
+<title>Support for Period Characters in Package Names</title>
+<para>
+The "." character is allowed in package names.
+</para>
+</section>
 <section id='package-ebuild-eapi-4-python-use-flag-allow-period-characters'>
 <title>Support for Period Characters in USE Flags</title>
 <para>
 The "." character is allowed in USE flags.
+</para>
+</section>
+<section id='package-ebuild-eapi-4-python-globstar'>
+<title>globstar shell option enabled by default</title>
+<para>
+globstar shell option is enabled by default, which enables recursive expansion of ** pattern in pathname expansion context.
 </para>
 </section>
 <section id='package-ebuild-eapi-4-python-repository-variable'>

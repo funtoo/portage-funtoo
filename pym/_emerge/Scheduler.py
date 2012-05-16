@@ -135,8 +135,9 @@ class Scheduler(PollScheduler):
 			portage.exception.PortageException.__init__(self, value)
 
 	def __init__(self, settings, trees, mtimedb, myopts,
-		spinner, mergelist=None, favorites=None, graph_config=None):
-		PollScheduler.__init__(self)
+		spinner, mergelist=None, favorites=None, graph_config=None,
+		uninstall_only=False):
+		PollScheduler.__init__(self, main=True)
 
 		if mergelist is not None:
 			warnings.warn("The mergelist parameter of the " + \
@@ -151,6 +152,7 @@ class Scheduler(PollScheduler):
 		self._spinner = spinner
 		self._mtimedb = mtimedb
 		self._favorites = favorites
+		self._uninstall_only = uninstall_only
 		self._args_set = InternalPackageSet(favorites, allow_repo=True)
 		self._build_opts = self._build_opts_class()
 
@@ -327,6 +329,8 @@ class Scheduler(PollScheduler):
 		self._blocker_db = {}
 		dynamic_deps = self.myopts.get("--dynamic-deps", "y") != "n"
 		for root in self.trees:
+			if self._uninstall_only:
+				continue
 			if graph_config is None:
 				fake_vartree = FakeVartree(self.trees[root]["root_config"],
 					pkg_cache=self._pkg_cache, dynamic_deps=dynamic_deps)
@@ -357,7 +361,7 @@ class Scheduler(PollScheduler):
 		Check if background mode is enabled and adjust states as necessary.
 
 		@rtype: bool
-		@returns: True if background mode is enabled, False otherwise.
+		@return: True if background mode is enabled, False otherwise.
 		"""
 		background = (self._max_jobs is True or \
 			self._max_jobs > 1 or "--quiet" in self.myopts \
@@ -1435,7 +1439,7 @@ class Scheduler(PollScheduler):
 			merge order
 		@type later: set
 		@rtype: bool
-		@returns: True if the package is dependent, False otherwise.
+		@return: True if the package is dependent, False otherwise.
 		"""
 
 		graph = self._digraph
@@ -1535,7 +1539,7 @@ class Scheduler(PollScheduler):
 	def _job_delay(self):
 		"""
 		@rtype: bool
-		@returns: True if job scheduling should be delayed, False otherwise.
+		@return: True if job scheduling should be delayed, False otherwise.
 		"""
 
 		if self._jobs and self._max_load is not None:
@@ -1553,7 +1557,7 @@ class Scheduler(PollScheduler):
 	def _schedule_tasks_imp(self):
 		"""
 		@rtype: bool
-		@returns: True if state changed, False otherwise.
+		@return: True if state changed, False otherwise.
 		"""
 
 		state_change = 0
@@ -1710,7 +1714,7 @@ class Scheduler(PollScheduler):
 		Use the current resume list to calculate a new one,
 		dropping any packages with unsatisfied deps.
 		@rtype: bool
-		@returns: True if successful, False otherwise.
+		@return: True if successful, False otherwise.
 		"""
 		print(colorize("GOOD", "*** Resuming merge..."))
 

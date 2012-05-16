@@ -45,7 +45,7 @@ portage.dep._internal_warnings = True
 try:
 	import xml.etree.ElementTree
 	from xml.parsers.expat import ExpatError
-except ImportError:
+except (ImportError, SystemError):
 	msg = ["Please enable python's \"xml\" USE flag in order to use repoman."]
 	from portage.output import EOutput
 	out = EOutput()
@@ -75,7 +75,8 @@ from portage.process import find_binary, spawn
 from portage.output import bold, create_color_func, \
 	green, nocolor, red
 from portage.output import ConsoleStyleFile, StyleWriter
-from portage.util import cmp_sort_key, writemsg_level
+from portage.util import writemsg_level
+from portage.util._desktop_entry import validate_desktop_entry
 from portage.package.ebuild.digestgen import digestgen
 from portage.eapi import eapi_has_iuse_defaults, eapi_has_required_use
 
@@ -326,7 +327,7 @@ qahelp={
 	"LICENSE.virtual":"Virtuals that have a non-empty LICENSE variable",
 	"DESCRIPTION.missing":"Ebuilds that have a missing or empty DESCRIPTION variable",
 	"DESCRIPTION.toolong":"DESCRIPTION is over %d characters" % max_desc_len,
-	"EAPI.definition":"EAPI is defined after an inherit call (must be defined before)",
+	"EAPI.definition":"EAPI definition does not conform to PMS section 7.3.1 (first non-comment, non-blank line)",
 	"EAPI.deprecated":"Ebuilds that use features that are deprecated in the current EAPI",
 	"EAPI.incompatible":"Ebuilds that use features that are only available with a different EAPI",
 	"EAPI.unsupported":"Ebuilds that have an unsupported EAPI version (you must upgrade portage)",
@@ -547,7 +548,7 @@ if options.if_modified == "y" and vcs is None:
 	options.if_modified = "n"
 
 # Disable copyright/mtime check if vcs does not preserve mtime (bug #324075).
-vcs_preserves_mtime = vcs not in ('git',)
+vcs_preserves_mtime = vcs in ('cvs',)
 
 vcs_local_opts = repoman_settings.get("REPOMAN_VCS_LOCAL_OPTS", "").split()
 vcs_global_opts = repoman_settings.get("REPOMAN_VCS_GLOBAL_OPTS")
@@ -1026,7 +1027,7 @@ def fetch_metadata_dtd():
 	Fetch metadata.dtd if it doesn't exist or the ctime is older than
 	metadata_dtd_ctime_interval.
 	@rtype: bool
-	@returns: True if successful, otherwise False
+	@return: True if successful, otherwise False
 	"""
 
 	must_fetch = True
@@ -1186,6 +1187,9 @@ def vcs_new_changed(relative_path):
 have_pmasked = False
 have_dev_keywords = False
 dofail = 0
+
+# NOTE: match-all caches are not shared due to potential
+# differences between profiles in _get_implicit_iuse.
 arch_caches={}
 arch_xmatch_caches = {}
 shared_xmatch_caches = {"cp-list":{}}
@@ -1348,17 +1352,6 @@ for x in effective_scanlist:
 			pkgs[pf] = Package(cpv=cpv, metadata=myaux,
 				root_config=root_config, type_name="ebuild")
 
-	# Sort ebuilds in ascending order for the KEYWORDS.dropped check.
-	pkgsplits = {}
-	for i in range(len(ebuildlist)):
-		ebuild_split = portage.pkgsplit(ebuildlist[i])
-		pkgsplits[ebuild_split] = ebuildlist[i]
-		ebuildlist[i] = ebuild_split
-	ebuildlist.sort(key=cmp_sort_key(portage.pkgcmp))
-	for i in range(len(ebuildlist)):
-		ebuildlist[i] = pkgsplits[ebuildlist[i]]
-	del pkgsplits
-
 	slot_keywords = {}
 
 	if len(pkgs) != len(ebuildlist):
@@ -1369,6 +1362,10 @@ for x in effective_scanlist:
 		# positives confuse users.
 		can_force = False
 		continue
+
+	# Sort ebuilds in ascending order for the KEYWORDS.dropped check.
+	ebuildlist = sorted(pkgs.values())
+	ebuildlist = [pkg.pf for pkg in ebuildlist]
 
 	for y in checkdirlist:
 		m = disallowed_filename_chars_re.search(y.strip(os.sep))
@@ -1562,15 +1559,14 @@ for x in effective_scanlist:
 					(checkdir, y, m.group(0)))
 
 			if desktop_file_validate and desktop_pattern.match(y):
-				status, cmd_output = subprocess_getstatusoutput(
-					"'%s' '%s'" % (desktop_file_validate, full_path))
-				if os.WIFEXITED(status) and os.WEXITSTATUS(status) != os.EX_OK:
+				cmd_output = validate_desktop_entry(full_path)
+				if cmd_output:
 					# Note: in the future we may want to grab the
 					# warnings in addition to the errors. We're
 					# just doing errors now since we don't want
 					# to generate too much noise at first.
 					error_re = re.compile(r'.*\s*error:\s*(.*)')
-					for line in cmd_output.splitlines():
+					for line in cmd_output:
 						error_match = error_re.match(line)
 						if error_match is None:
 							continue
@@ -1794,7 +1790,7 @@ for x in effective_scanlist:
 		Ebuilds that inherit a "Live" eclass (darcs,subversion,git,cvs,etc..) should
 		not be allowed to be marked stable
 		"""
-		if live_ebuild:
+		if live_ebuild and repo_config.name == "gentoo":
 			bad_stable_keywords = []
 			for keyword in keywords:
 				if not keyword.startswith("~") and \
@@ -1866,7 +1862,11 @@ for x in effective_scanlist:
 					if atom == "||":
 						continue
 
-					if not portdb.xmatch("match-all", atom) and \
+					# Skip dependency.unknown for blockers, so that we
+					# don't encourage people to remove necessary blockers,
+					# as discussed in bug #382407.
+					if atom.blocker is None and \
+						not portdb.xmatch("match-all", atom) and \
 						not atom.cp.startswith("virtual/"):
 						unknown_pkgs.add((mytype, atom.unevaluated_atom))
 
@@ -1958,12 +1958,12 @@ for x in effective_scanlist:
 		#keyword checks
 		myuse = myaux["KEYWORDS"].split()
 		for mykey in myuse:
-			myskey=mykey[:]
-			if myskey[0]=="-":
-				myskey=myskey[1:]
-			if myskey[0]=="~":
-				myskey=myskey[1:]
-			if mykey!="-*":
+			if mykey not in ("-*", "*", "~*"):
+				myskey = mykey
+				if myskey[:1] == "-":
+					myskey = myskey[1:]
+				if myskey[:1] == "~":
+					myskey = myskey[1:]
 				if myskey not in kwlist:
 					stats["KEYWORDS.invalid"] += 1
 					fails["KEYWORDS.invalid"].append(x+"/"+y+".ebuild: %s" % mykey)
@@ -2618,7 +2618,7 @@ else:
 
 	if options.ask and userquery('Commit changes?', True) != 'Yes':
 		print("* aborting commit.")
-		sys.exit(1)
+		sys.exit(128 + signal.SIGINT)
 
 	# Handle the case where committed files have keywords which
 	# will change and need a priming commit before the Manifest

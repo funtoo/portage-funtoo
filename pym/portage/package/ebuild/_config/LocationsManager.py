@@ -28,6 +28,9 @@ _PORTAGE1_DIRECTORIES = frozenset([
 _profile_node = collections.namedtuple('_profile_node',
 	'location portage1_directories')
 
+_allow_directories = frozenset(
+	["portage-1-compat", "portage-1"])
+
 class LocationsManager(object):
 
 	def __init__(self, config_root=None, eprefix=None, config_profile_path=None, local_config=True, \
@@ -52,11 +55,20 @@ class LocationsManager(object):
 		self.abs_user_config = os.path.join(self.config_root, USER_CONFIG_PATH)
 		self.config_profile_path = config_profile_path
 
-	def load_profiles(self, known_repository_paths):
-		known_repos = set(os.path.realpath(x) for x in known_repository_paths)
-		# force a trailing '/' for ease of doing startswith checks
-		known_repos = tuple((x + '/', parse_layout_conf(x)[0])
-			for x in known_repos)
+	def load_profiles(self, repositories, known_repository_paths):
+		known_repository_paths = set(os.path.realpath(x)
+			for x in known_repository_paths)
+
+		known_repos = []
+		for x in known_repository_paths:
+			try:
+				layout_data = {"profile-formats":
+					repositories.get_repo_for_location(x).profile_formats}
+			except KeyError:
+				layout_data = parse_layout_conf(x)[0]
+			# force a trailing '/' for ease of doing startswith checks
+			known_repos.append((x + '/', layout_data))
+		known_repos = tuple(known_repos)
 
 		if self.config_profile_path is None:
 			self.config_profile_path = \
@@ -90,6 +102,7 @@ class LocationsManager(object):
 					self.profile_path, noiselevel=-1)
 				writemsg("!!! ParseError: %s\n" % str(e), noiselevel=-1)
 				self.profiles = []
+				self.profiles_complex = []
 
 		if self._user_config and self.profiles:
 			custom_prof = os.path.join(
@@ -120,7 +133,7 @@ class LocationsManager(object):
 			# protect against nested repositories.  Insane configuration, but the longest
 			# path will be the correct one.
 			repo_loc, layout_data = max(intersecting_repos, key=lambda x:len(x[0]))
-			allow_directories = any(x.startswith("portage-1")
+			allow_directories = any(x in _allow_directories
 				for x in layout_data['profile-formats'])
 			compat_mode = layout_data['profile-formats'] == ('portage-1-compat',)
 

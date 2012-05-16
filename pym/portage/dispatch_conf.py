@@ -1,5 +1,5 @@
 # archive_conf.py -- functionality common to archive-conf and dispatch-conf
-# Copyright 2003-2011 Gentoo Foundation
+# Copyright 2003-2012 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 
@@ -8,12 +8,12 @@
 
 from __future__ import print_function
 
-import os, sys, shutil
+import os, shutil, subprocess, sys
 
 import portage
 from portage.env.loaders import KeyValuePairFileLoader
 from portage.localization import _
-from portage.util import varexpand
+from portage.util import shlex_split, varexpand
 
 RCS_BRANCH = '1.1.1'
 RCS_LOCK = 'rcs -ko -M -l'
@@ -26,17 +26,21 @@ DIFF3_MERGE = "diff3 -mE '%s' '%s' '%s' > '%s'"
 def diffstatusoutput(cmd, file1, file2):
     """
     Execute the string cmd in a shell with getstatusoutput() and return a
-    2-tuple (status, output). If getstatusoutput() raises
-    UnicodeDecodeError (known to happen with python3.1), return a
-    2-tuple (1, 1). This provides a simple way to check for non-zero
-    output length of diff commands, while providing simple handling of
-    UnicodeDecodeError when necessary.
+    2-tuple (status, output).
     """
-    try:
-        status, output = portage.subprocess_getstatusoutput(cmd % (file1, file2))
-        return (status, output)
-    except UnicodeDecodeError:
-        return (1, 1)
+    # Use Popen to emulate getstatusoutput(), since getstatusoutput() may
+    # raise a UnicodeDecodeError which makes the output inaccessible.
+    args = shlex_split(cmd % (file1, file2))
+    if sys.hexversion < 0x3000000 or sys.hexversion >= 0x3020000:
+        # Python 3.1 does not support bytes in Popen args.
+        args = [portage._unicode_encode(x, errors='strict') for x in args]
+    proc = subprocess.Popen(args,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    output = portage._unicode_decode(proc.communicate()[0])
+    if output and output[-1] == "\n":
+        # getstatusoutput strips one newline
+        output = output[:-1]
+    return (proc.wait(), output)
 
 def read_config(mandatory_opts):
     eprefix = portage.const.EPREFIX

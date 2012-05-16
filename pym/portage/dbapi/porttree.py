@@ -1,4 +1,4 @@
-# Copyright 1998-2011 Gentoo Foundation
+# Copyright 1998-2012 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 __all__ = [
@@ -14,7 +14,7 @@ portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.package.ebuild.doebuild:doebuild',
 	'portage.util:ensure_dirs,shlex_split,writemsg,writemsg_level',
 	'portage.util.listdir:listdir',
-	'portage.versions:best,catpkgsplit,_pkgsplit@pkgsplit,ver_regexp',
+	'portage.versions:best,catpkgsplit,_pkgsplit@pkgsplit,ver_regexp,_pkg_str',
 )
 
 from portage.cache import volatile
@@ -36,8 +36,6 @@ from _emerge.EbuildMetadataPhase import EbuildMetadataPhase
 from _emerge.PollScheduler import PollScheduler
 
 import os as _os
-import io
-import stat
 import sys
 import traceback
 import warnings
@@ -97,6 +95,7 @@ class portdbapi(dbapi):
 		# this purpose because doebuild makes many changes to the config
 		# instance that is passed in.
 		self.doebuild_settings = config(clone=self.settings)
+		self._scheduler = PollScheduler().sched_iface
 		self.depcachedir = os.path.realpath(self.settings.depcachedir)
 		
 		if os.environ.get("SANDBOX_ON") == "1":
@@ -254,7 +253,7 @@ class portdbapi(dbapi):
 		@param canonical_repo_path: the canonical path of a repository, as
 			resolved by os.path.realpath()
 		@type canonical_repo_path: String
-		@returns: The repo_name for the corresponding repository, or None
+		@return: The repo_name for the corresponding repository, or None
 			if the path does not correspond a known repository
 		@rtype: String or None
 		"""
@@ -326,34 +325,7 @@ class portdbapi(dbapi):
 				return (filename, x)
 		return (None, 0)
 
-	def _metadata_process(self, cpv, ebuild_path, repo_path):
-		"""
-		Create an EbuildMetadataPhase instance to generate metadata for the
-		give ebuild.
-		@rtype: EbuildMetadataPhase
-		@returns: A new EbuildMetadataPhase instance, or None if the
-			metadata cache is already valid.
-		"""
-		metadata, ebuild_hash = self._pull_valid_cache(cpv, ebuild_path, repo_path)
-		if metadata is not None:
-			return None
-
-		process = EbuildMetadataPhase(cpv=cpv,
-			ebuild_hash=ebuild_hash, metadata_callback=self._metadata_callback,
-			portdb=self, repo_path=repo_path, settings=self.doebuild_settings)
-		return process
-
-	def _metadata_callback(self, cpv, repo_path, metadata, ebuild_hash):
-
-		i = metadata
-		if hasattr(metadata, "items"):
-			i = iter(metadata.items())
-		metadata = dict(i)
-
-		if metadata.get("INHERITED", False):
-			metadata["_eclasses_"] = self.repositories.get_repo_for_location(repo_path).eclass_db.get_eclass_data(metadata["INHERITED"].split())
-		else:
-			metadata["_eclasses_"] = {}
+	def _write_cache(self, cpv, repo_path, metadata, ebuild_hash):
 
 		try:
 			cache = self.auxdb[repo_path]
@@ -365,20 +337,6 @@ class portdbapi(dbapi):
 			traceback.print_exc()
 			cache = None
 
-		metadata.pop("INHERITED", None)
-
-		eapi = metadata.get("EAPI")
-		if not eapi or not eapi.strip():
-			eapi = "0"
-			metadata["EAPI"] = eapi
-		if not eapi_is_supported(eapi):
-			keys = set(metadata)
-			keys.discard('_eclasses_')
-			keys.discard('_mtime_')
-			keys.discard('_%s_' % chf)
-			metadata.update((k, '') for k in keys)
-			metadata["EAPI"] = "-" + eapi.lstrip("-")
-
 		if cache is not None:
 			try:
 				cache[cpv] = metadata
@@ -386,7 +344,6 @@ class portdbapi(dbapi):
 				# Normally this shouldn't happen, so we'll show
 				# a traceback for debugging purposes.
 				traceback.print_exc()
-		return metadata
 
 	def _pull_valid_cache(self, cpv, ebuild_path, repo_path):
 		try:
@@ -429,7 +386,10 @@ class portdbapi(dbapi):
 			if not eapi:
 				eapi = '0'
 				metadata['EAPI'] = eapi
-			if eapi[:1] == '-' and eapi_is_supported(eapi[1:]):
+			if not eapi_is_supported(eapi):
+				# Since we're supposed to be able to efficiently obtain the
+				# EAPI from _parse_eapi_ebuild_head, we disregard cache entries
+				# for unsupported EAPIs.
 				continue
 			if auxdb.validate_entry(metadata, ebuild_hash, eclass_db):
 				break
@@ -484,39 +444,19 @@ class portdbapi(dbapi):
 			if myebuild in self._broken_ebuilds:
 				raise KeyError(mycpv)
 
-			self.doebuild_settings.setcpv(mycpv)
-			eapi = None
+			proc = EbuildMetadataPhase(cpv=mycpv,
+				ebuild_hash=ebuild_hash, portdb=self,
+				repo_path=mylocation, scheduler=self._scheduler,
+				settings=self.doebuild_settings)
 
-			if eapi is None and \
-				'parse-eapi-ebuild-head' in self.doebuild_settings.features:
-				with io.open(_unicode_encode(myebuild,
-					encoding=_encodings['fs'], errors='strict'),
-					mode='r', encoding=_encodings['repo.content'],
-					errors='replace') as f:
-					eapi = portage._parse_eapi_ebuild_head(f)
+			proc.start()
+			proc.wait()
 
-			if eapi is not None:
-				self.doebuild_settings.configdict['pkg']['EAPI'] = eapi
+			if proc.returncode != os.EX_OK:
+				self._broken_ebuilds.add(myebuild)
+				raise KeyError(mycpv)
 
-			if eapi is not None and not portage.eapi_is_supported(eapi):
-				mydata = self._metadata_callback(
-					mycpv, mylocation, {'EAPI':eapi}, ebuild_hash)
-			else:
-				proc = EbuildMetadataPhase(cpv=mycpv, eapi=eapi,
-					ebuild_hash=ebuild_hash,
-					metadata_callback=self._metadata_callback, portdb=self,
-					repo_path=mylocation,
-					scheduler=PollScheduler().sched_iface,
-					settings=self.doebuild_settings)
-
-				proc.start()
-				proc.wait()
-
-				if proc.returncode != os.EX_OK:
-					self._broken_ebuilds.add(myebuild)
-					raise KeyError(mycpv)
-
-				mydata = proc.metadata
+			mydata = proc.metadata
 
 		mydata["repository"] = self.repositories.get_name_for_location(mylocation)
 		mydata["_mtime_"] = ebuild_hash.mtime
@@ -551,7 +491,7 @@ class portdbapi(dbapi):
 		@param mytree: The canonical path of the tree in which the ebuild
 			is located, or None for automatic lookup
 		@type mypkg: String
-		@returns: A dict which maps each file name to a set of alternative
+		@return: A dict which maps each file name to a set of alternative
 			URIs.
 		@rtype: dict
 		"""
@@ -570,7 +510,7 @@ class portdbapi(dbapi):
 			# since callers already handle it.
 			raise portage.exception.InvalidDependString(
 				"getFetchMap(): '%s' has unsupported EAPI: '%s'" % \
-				(mypkg, eapi.lstrip("-")))
+				(mypkg, eapi))
 
 		return _parse_uri_map(mypkg, {'EAPI':eapi,'SRC_URI':myuris},
 			use=useflags)
@@ -715,7 +655,8 @@ class portdbapi(dbapi):
 		return l
 
 	def cp_list(self, mycp, use_cache=1, mytree=None):
-
+		# NOTE: Cache can be safely shared with the match cache, since the
+		# match cache uses the result from dep_expand for the cache_key.
 		if self.frozen and mytree is not None \
 			and len(self.porttrees) == 1 \
 			and mytree == self.porttrees[0]:
@@ -728,10 +669,8 @@ class portdbapi(dbapi):
 			if cachelist is not None:
 				# Try to propagate this to the match-all cache here for
 				# repoman since he uses separate match-all caches for each
-				# profile (due to old-style virtuals). Do not propagate
-				# old-style virtuals since cp_list() doesn't expand them.
-				if not (not cachelist and mycp.startswith("virtual/")):
-					self.xcache["match-all"][mycp] = cachelist
+				# profile (due to differences in _get_implicit_iuse).
+				self.xcache["match-all"][(mycp, mycp)] = cachelist
 				return cachelist[:]
 		mysplit = mycp.split("/")
 		invalid_category = mysplit[0] not in self._categories
@@ -769,7 +708,7 @@ class portdbapi(dbapi):
 						writemsg(_("\nInvalid ebuild version: %s\n") % \
 							os.path.join(oroot, mycp, x), noiselevel=-1)
 						continue
-					d[mysplit[0]+"/"+pf] = None
+					d[_pkg_str(mysplit[0]+"/"+pf)] = None
 		if invalid_category and d:
 			writemsg(_("\n!!! '%s' has a category that is not listed in " \
 				"%setc/portage/categories\n") % \
@@ -783,10 +722,7 @@ class portdbapi(dbapi):
 		if self.frozen and mytree is None:
 			cachelist = mylist[:]
 			self.xcache["cp-list"][mycp] = cachelist
-			# Do not propagate old-style virtuals since
-			# cp_list() doesn't expand them.
-			if not (not cachelist and mycp.startswith("virtual/")):
-				self.xcache["match-all"][mycp] = cachelist
+			self.xcache["match-all"][(mycp, mycp)] = cachelist
 		return mylist
 
 	def freeze(self):
@@ -809,18 +745,20 @@ class portdbapi(dbapi):
 				"has been renamed to match-visible",
 				DeprecationWarning, stacklevel=2)
 
-		#if no updates are being made to the tree, we can consult our xcache...
-		if self.frozen:
-			try:
-				return self.xcache[level][origdep][:]
-			except KeyError:
-				pass
-
 		if mydep is None:
 			#this stuff only runs on first call of xmatch()
 			#create mydep, mykey from origdep
 			mydep = dep_expand(origdep, mydb=self, settings=self.settings)
 			mykey = mydep.cp
+
+		#if no updates are being made to the tree, we can consult our xcache...
+		cache_key = None
+		if self.frozen:
+			cache_key = (mydep, mydep.unevaluated_atom)
+			try:
+				return self.xcache[level][cache_key][:]
+			except KeyError:
+				pass
 
 		myval = None
 		mytree = None
@@ -930,10 +868,9 @@ class portdbapi(dbapi):
 		if self.frozen:
 			xcache_this_level = self.xcache.get(level)
 			if xcache_this_level is not None:
-				xcache_this_level[mydep] = myval
-				if origdep and origdep != mydep:
-					xcache_this_level[origdep] = myval
-				myval = myval[:]
+				xcache_this_level[cache_key] = myval
+				if not isinstance(myval, _pkg_str):
+					myval = myval[:]
 
 		return myval
 

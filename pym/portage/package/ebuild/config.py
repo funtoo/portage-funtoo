@@ -1,4 +1,4 @@
-# Copyright 2010-2011 Gentoo Foundation
+# Copyright 2010-2012 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 __all__ = [
@@ -43,7 +43,7 @@ from portage.util import ensure_dirs, getconfig, grabdict, \
 	grabdict_package, grabfile, grabfile_package, LazyItemsDict, \
 	normalize_path, shlex_split, stack_dictlist, stack_dicts, stack_lists, \
 	writemsg, writemsg_level
-from portage.versions import catpkgsplit, catsplit, cpv_getkey
+from portage.versions import catpkgsplit, catsplit, cpv_getkey, _pkg_str
 
 from portage.package.ebuild._config import special_env_vars
 from portage.package.ebuild._config.env_var_validation import validate_cmd_var
@@ -313,14 +313,14 @@ class config(object):
 			# Notably absent is "env", since we want to avoid any
 			# interaction with the calling environment that might
 			# lead to unexpected results.
-			expand_map = {}
+
+			env_d = getconfig(os.path.join(eroot, "etc", "profile.env"),
+				expand=False) or {}
+			expand_map = env_d.copy()
 			self._expand_map = expand_map
 
 			# Allow make.globals to set default paths relative to ${EPREFIX}.
 			expand_map["EPREFIX"] = eprefix
-
-			env_d = getconfig(os.path.join(eroot, "etc", "profile.env"),
-				expand=expand_map)
 
 			make_globals = getconfig(os.path.join(
 				self.global_config_path, 'make.globals'), expand=expand_map)
@@ -404,13 +404,30 @@ class config(object):
 
 			self.make_defaults_use = []
 
+			#Loading Repositories
+			self["PORTAGE_CONFIGROOT"] = config_root
+			self["ROOT"] = target_root
+			self["EPREFIX"] = eprefix
+			self["EROOT"] = eroot
 			known_repos = []
+			portdir = ""
+			portdir_overlay = ""
 			for confs in [make_globals, make_conf, self.configdict["env"]]:
-				known_repos.extend(confs.get("PORTDIR", '').split())
-				known_repos.extend(confs.get("PORTDIR_OVERLAY", '').split())
+				v = confs.get("PORTDIR")
+				if v is not None:
+					portdir = v
+					known_repos.append(v)
+				v = confs.get("PORTDIR_OVERLAY")
+				if v is not None:
+					portdir_overlay = v
+					known_repos.extend(shlex_split(v))
 			known_repos = frozenset(known_repos)
+			self["PORTDIR"] = portdir
+			self["PORTDIR_OVERLAY"] = portdir_overlay
+			self.lookuplist = [self.configdict["env"]]
+			self.repositories = load_repository_config(self)
 
-			locations_manager.load_profiles(known_repos)
+			locations_manager.load_profiles(self.repositories, known_repos)
 
 			profiles_complex = locations_manager.profiles_complex
 			self.profiles = locations_manager.profiles
@@ -517,14 +534,10 @@ class config(object):
 			self._ppropertiesdict = portage.dep.ExtendedAtomDict(dict)
 			self._penvdict = portage.dep.ExtendedAtomDict(dict)
 
-			#Loading Repositories
-			self.repositories = load_repository_config(self)
-
 			#filling PORTDIR and PORTDIR_OVERLAY variable for compatibility
 			main_repo = self.repositories.mainRepo()
 			if main_repo is not None:
-				main_repo = main_repo.user_location
-				self["PORTDIR"] = main_repo
+				self["PORTDIR"] = main_repo.user_location
 				self.backup_changes("PORTDIR")
 
 			# repoman controls PORTDIR_OVERLAY via the environment, so no
@@ -776,9 +789,6 @@ class config(object):
 			if bsd_chflags:
 				self.features.add('chflags')
 
-			if 'parse-eapi-ebuild-head' in self.features:
-				portage._validate_cache_for_unsupported_eapis = False
-
 			self._iuse_implicit_match = _iuse_implicit_match_cache(self)
 
 			self._validate_commands()
@@ -787,6 +797,11 @@ class config(object):
 				if k in self:
 					self[k] = self[k].lower()
 					self.backup_changes(k)
+
+			if main_repo is not None and not main_repo.sync:
+				main_repo_sync = self.get("SYNC")
+				if main_repo_sync:
+					main_repo.sync = main_repo_sync
 
 			# The first constructed config object initializes these modules,
 			# and subsequent calls to the _init() functions have no effect.
@@ -1224,7 +1239,7 @@ class config(object):
 			slot = pkg_configdict["SLOT"]
 			iuse = pkg_configdict["IUSE"]
 			if pkg is None:
-				cpv_slot = "%s:%s" % (self.mycpv, slot)
+				cpv_slot = _pkg_str(self.mycpv, slot=slot, repo=repository)
 			else:
 				cpv_slot = pkg
 			pkginternaluse = []
@@ -1682,11 +1697,13 @@ class config(object):
 		@return: A list of properties that have not been accepted.
 		"""
 		accept_properties = self._accept_properties
+		if not hasattr(cpv, 'slot'):
+			cpv = _pkg_str(cpv, slot=metadata["SLOT"],
+				repo=metadata.get("repository"))
 		cp = cpv_getkey(cpv)
 		cpdict = self._ppropertiesdict.get(cp)
 		if cpdict:
-			cpv_slot = "%s:%s" % (cpv, metadata["SLOT"])
-			pproperties_list = ordered_by_atom_specificity(cpdict, cpv_slot, repo=metadata.get('repository'))
+			pproperties_list = ordered_by_atom_specificity(cpdict, cpv)
 			if pproperties_list:
 				accept_properties = list(self._accept_properties)
 				for x in pproperties_list:

@@ -381,7 +381,9 @@ def post_emerge(myaction, myopts, myfiles,
 	_flush_elog_mod_echo()
 
 	if not vardbapi._pkgs_changed:
-		display_news_notification(root_config, myopts)
+		# GLEP 42 says to display news *after* an emerge --pretend
+		if "--pretend" in myopts:
+			display_news_notification(root_config, myopts)
 		# If vdb state has not changed then there's nothing else to do.
 		return
 
@@ -402,6 +404,7 @@ def post_emerge(myaction, myopts, myfiles,
 			if vdb_lock:
 				vardbapi.unlock()
 
+	display_preserved_libs(vardbapi, myopts)
 	chk_updated_cfg_files(settings['EROOT'], config_protect)
 	
 	if settings['EROOT'] == "/":
@@ -411,8 +414,6 @@ def post_emerge(myaction, myopts, myfiles,
 			portage.process.spawn_bash("/usr/sbin/grpconv")
 
 	display_news_notification(root_config, myopts)
-	if retval in (None, os.EX_OK) or (not "--pretend" in myopts):
-		display_preserved_libs(vardbapi, myopts)	
 
 	postemerge = os.path.join(settings["PORTAGE_CONFIGROOT"],
 		portage.USER_CONFIG_PATH, "bin", "post_emerge")
@@ -1848,7 +1849,7 @@ def emerge_main(args=None):
 						portage_group_warning()
 					if userquery("Would you like to add --pretend to options?",
 						"--ask-enter-invalid" in myopts) == "No":
-						return 1
+						return 128 + signal.SIGINT
 					myopts["--pretend"] = True
 					del myopts["--ask"]
 				else:
@@ -2032,6 +2033,7 @@ def emerge_main(args=None):
 				level=logging.ERROR, noiselevel=-1)
 			return 1
 
+		# GLEP 42 says to display news *after* an emerge --pretend
 		if "--pretend" not in myopts:
 			display_news_notification(root_config, myopts)
 		retval = action_build(settings, trees, mtimedb,

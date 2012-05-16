@@ -1,4 +1,4 @@
-# Copyright 1999-2011 Gentoo Foundation
+# Copyright 1999-2012 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 import sys
@@ -9,9 +9,9 @@ from portage.cache.mappings import slot_dict_class
 from portage.const import EBUILD_PHASES
 from portage.dep import Atom, check_required_use, use_reduce, \
 	paren_enclose, _slot_re, _slot_separator, _repo_separator
+from portage.versions import _pkg_str, _unknown_repo
 from portage.eapi import eapi_has_iuse_defaults, eapi_has_required_use
 from portage.exception import InvalidDependString
-from portage.repository.config import _gen_valid_repo
 from _emerge.Task import Task
 
 if sys.hexversion >= 0x3000000:
@@ -26,7 +26,7 @@ class Package(Task):
 		"root_config", "type_name",
 		"category", "counter", "cp", "cpv_split",
 		"inherited", "invalid", "iuse", "masks", "mtime",
-		"pf", "pv_split", "root", "slot", "slot_atom", "visible",) + \
+		"pf", "root", "slot", "slot_atom", "version", "visible",) + \
 	("_raw_metadata", "_use",)
 
 	metadata_keys = [
@@ -38,7 +38,7 @@ class Package(Task):
 
 	_dep_keys = ('DEPEND', 'PDEPEND', 'RDEPEND',)
 	_use_conditional_misc_keys = ('LICENSE', 'PROPERTIES', 'RESTRICT')
-	UNKNOWN_REPO = "__unknown__"
+	UNKNOWN_REPO = _unknown_repo
 
 	def __init__(self, **kwargs):
 		Task.__init__(self, **kwargs)
@@ -49,7 +49,6 @@ class Package(Task):
 		self.metadata = _PackageMetadataWrapper(self, self._raw_metadata)
 		if not self.built:
 			self.metadata['CHOST'] = self.root_config.settings.get('CHOST', '')
-		self.cp = portage.cpv_getkey(self.cpv)
 		slot = self.slot
 		if _slot_re.match(slot) is None:
 			self._invalid_metadata('SLOT.invalid',
@@ -57,6 +56,11 @@ class Package(Task):
 			# Avoid an InvalidAtom exception when creating slot_atom.
 			# This package instance will be masked due to empty SLOT.
 			slot = '0'
+		self.cpv = _pkg_str(self.cpv, slot=slot,
+			repo=self.metadata.get('repository', ''))
+		self.cp = self.cpv.cp
+		# sync metadata with validated repo (may be UNKNOWN_REPO)
+		self.metadata['repository'] = self.cpv.repo
 		if (self.iuse.enabled or self.iuse.disabled) and \
 			not eapi_has_iuse_defaults(self.metadata["EAPI"]):
 			if not self.installed:
@@ -64,14 +68,10 @@ class Package(Task):
 					"IUSE contains defaults, but EAPI doesn't allow them")
 		self.slot_atom = portage.dep.Atom("%s%s%s" % (self.cp, _slot_separator, slot))
 		self.category, self.pf = portage.catsplit(self.cpv)
-		self.cpv_split = portage.catpkgsplit(self.cpv)
-		self.pv_split = self.cpv_split[1:]
+		self.cpv_split = self.cpv.cpv_split
+		self.version = self.cpv.version
 		if self.inherited is None:
 			self.inherited = frozenset()
-		repo = _gen_valid_repo(self.metadata.get('repository', ''))
-		if not repo:
-			repo = self.UNKNOWN_REPO
-		self.metadata['repository'] = repo
 
 		self._validate_deps()
 		self.masks = self._masks()
@@ -84,7 +84,7 @@ class Package(Task):
 
 		self._hash_key = Package._gen_hash_key(cpv=self.cpv,
 			installed=self.installed, onlydeps=self.onlydeps,
-			operation=self.operation, repo_name=repo,
+			operation=self.operation, repo_name=self.cpv.repo,
 			root_config=self.root_config,
 			type_name=self.type_name)
 		self._hash_value = hash(self._hash_key)
@@ -491,7 +491,7 @@ class Package(Task):
 
 		def is_valid_flag(self, flags):
 			"""
-			@returns: True if all flags are valid USE values which may
+			@return: True if all flags are valid USE values which may
 				be specified in USE dependencies, False otherwise.
 			"""
 			if isinstance(flags, basestring):
@@ -505,7 +505,7 @@ class Package(Task):
 
 		def get_missing_iuse(self, flags):
 			"""
-			@returns: A list of flags missing from IUSE.
+			@return: A list of flags missing from IUSE.
 			"""
 			if isinstance(flags, basestring):
 				flags = [flags]
@@ -529,28 +529,28 @@ class Package(Task):
 	def __lt__(self, other):
 		if other.cp != self.cp:
 			return False
-		if portage.pkgcmp(self.pv_split, other.pv_split) < 0:
+		if portage.vercmp(self.version, other.version) < 0:
 			return True
 		return False
 
 	def __le__(self, other):
 		if other.cp != self.cp:
 			return False
-		if portage.pkgcmp(self.pv_split, other.pv_split) <= 0:
+		if portage.vercmp(self.version, other.version) <= 0:
 			return True
 		return False
 
 	def __gt__(self, other):
 		if other.cp != self.cp:
 			return False
-		if portage.pkgcmp(self.pv_split, other.pv_split) > 0:
+		if portage.vercmp(self.version, other.version) > 0:
 			return True
 		return False
 
 	def __ge__(self, other):
 		if other.cp != self.cp:
 			return False
-		if portage.pkgcmp(self.pv_split, other.pv_split) >= 0:
+		if portage.vercmp(self.version, other.version) >= 0:
 			return True
 		return False
 

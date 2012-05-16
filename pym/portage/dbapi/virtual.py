@@ -1,9 +1,10 @@
-# Copyright 1998-2007 Gentoo Foundation
+# Copyright 1998-2012 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 
 from portage.dbapi import dbapi
-from portage import cpv_getkey
+from portage.dbapi.dep_expand import dep_expand
+from portage.versions import cpv_getkey, _pkg_str
 
 class fakedbapi(dbapi):
 	"""A fake dbapi that allows consumers to inject/remove packages to/from it
@@ -31,27 +32,30 @@ class fakedbapi(dbapi):
 			self._match_cache = {}
 
 	def match(self, origdep, use_cache=1):
-		result = self._match_cache.get(origdep, None)
+		atom = dep_expand(origdep, mydb=self, settings=self.settings)
+		cache_key = (atom, atom.unevaluated_atom)
+		result = self._match_cache.get(cache_key)
 		if result is not None:
 			return result[:]
-		result = dbapi.match(self, origdep, use_cache=use_cache)
-		self._match_cache[origdep] = result
+		result = list(self._iter_match(atom, self.cp_list(atom.cp)))
+		self._match_cache[cache_key] = result
 		return result[:]
 
 	def cpv_exists(self, mycpv, myrepo=None):
 		return mycpv in self.cpvdict
 
 	def cp_list(self, mycp, use_cache=1, myrepo=None):
-		cachelist = self._match_cache.get(mycp)
-		# cp_list() doesn't expand old-style virtuals
-		if cachelist and cachelist[0].startswith(mycp):
+		# NOTE: Cache can be safely shared with the match cache, since the
+		# match cache uses the result from dep_expand for the cache_key.
+		cache_key = (mycp, mycp)
+		cachelist = self._match_cache.get(cache_key)
+		if cachelist is not None:
 			return cachelist[:]
 		cpv_list = self.cpdict.get(mycp)
 		if cpv_list is None:
 			cpv_list = []
 		self._cpv_sort_ascending(cpv_list)
-		if not (not cpv_list and mycp.startswith("virtual/")):
-			self._match_cache[mycp] = cpv_list
+		self._match_cache[cache_key] = cpv_list
 		return cpv_list[:]
 
 	def cp_all(self):
@@ -70,7 +74,13 @@ class fakedbapi(dbapi):
 		@param metadata: dict
 		"""
 		self._clear_cache()
-		mycp = cpv_getkey(mycpv)
+		if not hasattr(mycpv, 'cp'):
+			if metadata is None:
+				mycpv = _pkg_str(mycpv)
+			else:
+				mycpv = _pkg_str(mycpv, slot=metadata.get('SLOT'),
+					repo=metadata.get('repository'))
+		mycp = mycpv.cp
 		self.cpvdict[mycpv] = metadata
 		myslot = None
 		if self._exclusive_slots and metadata:

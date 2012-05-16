@@ -33,17 +33,17 @@ from itertools import chain
 
 import portage
 portage.proxy.lazyimport.lazyimport(globals(),
-	'portage.util:cmp_sort_key',
+	'portage.util:cmp_sort_key,writemsg',
 )
 
 from portage import _unicode_decode
 from portage.eapi import eapi_has_slot_deps, eapi_has_src_uri_arrows, \
 	eapi_has_use_deps, eapi_has_strong_blocks, eapi_has_use_dep_defaults, \
-	eapi_has_repo_deps
+	eapi_has_repo_deps, eapi_allows_dots_in_PN, eapi_allows_dots_in_use_flags
 from portage.exception import InvalidAtom, InvalidData, InvalidDependString
 from portage.localization import _
 from portage.versions import catpkgsplit, catsplit, \
-	pkgcmp, vercmp, ververify, _cp, _cpv
+	vercmp, ververify, _cp, _cpv, _pkg_str, _unknown_repo
 import portage.cache.mappings
 
 if sys.hexversion >= 0x3000000:
@@ -62,7 +62,7 @@ def cpvequal(cpv1, cpv2):
 	@param cpv2: CategoryPackageVersion (no operators) Example: "sys-apps/portage-2.1"
 	@type cpv2: String
 	@rtype: Boolean
-	@returns:
+	@return:
 	1.  True if cpv1 = cpv2
 	2.  False Otherwise
 	3.  Throws PortageException if cpv1 or cpv2 is not a CPV
@@ -74,16 +74,27 @@ def cpvequal(cpv1, cpv2):
 
 	"""
 
-	split1 = catpkgsplit(cpv1)
-	split2 = catpkgsplit(cpv2)
-	
-	if not split1 or not split2:
+	try:
+		try:
+			split1 = cpv1.cpv_split
+		except AttributeError:
+			cpv1 = _pkg_str(cpv1)
+			split1 = cpv1.cpv_split
+
+		try:
+			split2 = cpv2.cpv_split
+		except AttributeError:
+			cpv2 = _pkg_str(cpv2)
+			split2 = cpv2.cpv_split
+
+	except InvalidData:
 		raise portage.exception.PortageException(_("Invalid data '%s, %s', parameter was not a CPV") % (cpv1, cpv2))
-	
-	if split1[0] != split2[0]:
+
+	if split1[0] != split2[0] or \
+		split1[1] != split2[1]:
 		return False
-	
-	return (pkgcmp(split1[1:], split2[1:]) == 0)
+
+	return vercmp(cpv1.version, cpv2.version) == 0
 
 def strip_empty(myarr):
 	"""
@@ -642,8 +653,8 @@ def flatten(mylist):
 
 
 _usedep_re = {
-	"0":        re.compile("^(?P<prefix>[!-]?)(?P<flag>[A-Za-z0-9][A-Za-z0-9+_@-]*)(?P<default>(\(\+\)|\(\-\))?)(?P<suffix>[?=]?)$"),
-	"4-python": re.compile("^(?P<prefix>[!-]?)(?P<flag>[A-Za-z0-9][A-Za-z0-9+_@.-]*)(?P<default>(\(\+\)|\(\-\))?)(?P<suffix>[?=]?)$"),
+	"dots_disallowed_in_use_flags": re.compile("^(?P<prefix>[!-]?)(?P<flag>[A-Za-z0-9][A-Za-z0-9+_@-]*)(?P<default>(\(\+\)|\(\-\))?)(?P<suffix>[?=]?)$"),
+	"dots_allowed_in_use_flags":    re.compile("^(?P<prefix>[!-]?)(?P<flag>[A-Za-z0-9][A-Za-z0-9+_@.-]*)(?P<default>(\(\+\)|\(\-\))?)(?P<suffix>[?=]?)$"),
 }
 
 def _get_usedep_re(eapi):
@@ -656,10 +667,10 @@ def _get_usedep_re(eapi):
 	@return: A regular expression object that matches valid USE deps for the
 		given eapi.
 	"""
-	if eapi in (None, "4-python",):
-		return _usedep_re["4-python"]
+	if eapi is None or eapi_allows_dots_in_use_flags(eapi):
+		return _usedep_re["dots_allowed_in_use_flags"]
 	else:
-		return _usedep_re["0"]
+		return _usedep_re["dots_disallowed_in_use_flags"]
 
 class _use_dep(object):
 
@@ -1075,6 +1086,7 @@ class Atom(_atom_base):
 
 		_atom_base.__init__(s)
 
+		atom_re = _get_atom_re(eapi)
 		if eapi_has_repo_deps(eapi):
 			allow_repo = True
 
@@ -1087,11 +1099,11 @@ class Atom(_atom_base):
 		else:
 			blocker = False
 		self.__dict__['blocker'] = blocker
-		m = _atom_re.match(s)
+		m = atom_re.match(s)
 		extended_syntax = False
 		if m is None:
 			if allow_wildcard:
-				m = _atom_wildcard_re.match(s)
+				m = _get_atom_wildcard_re(eapi).match(s)
 				if m is None:
 					raise InvalidAtom(self)
 				op = None
@@ -1106,38 +1118,44 @@ class Atom(_atom_base):
 			else:
 				raise InvalidAtom(self)
 		elif m.group('op') is not None:
-			base = _atom_re.groupindex['op']
+			base = atom_re.groupindex['op']
 			op = m.group(base + 1)
 			cpv = m.group(base + 2)
 			cp = m.group(base + 3)
-			slot = m.group(_atom_re.groups - 2)
-			repo = m.group(_atom_re.groups - 1)
-			use_str = m.group(_atom_re.groups)
+			slot = m.group(atom_re.groups - 2)
+			repo = m.group(atom_re.groups - 1)
+			use_str = m.group(atom_re.groups)
 			if m.group(base + 4) is not None:
 				raise InvalidAtom(self)
 		elif m.group('star') is not None:
-			base = _atom_re.groupindex['star']
+			base = atom_re.groupindex['star']
 			op = '=*'
 			cpv = m.group(base + 1)
 			cp = m.group(base + 2)
-			slot = m.group(_atom_re.groups - 2)
-			repo = m.group(_atom_re.groups - 1)
-			use_str = m.group(_atom_re.groups)
+			slot = m.group(atom_re.groups - 2)
+			repo = m.group(atom_re.groups - 1)
+			use_str = m.group(atom_re.groups)
 			if m.group(base + 3) is not None:
 				raise InvalidAtom(self)
 		elif m.group('simple') is not None:
 			op = None
-			cpv = cp = m.group(_atom_re.groupindex['simple'] + 1)
-			slot = m.group(_atom_re.groups - 2)
-			repo = m.group(_atom_re.groups - 1)
-			use_str = m.group(_atom_re.groups)
-			if m.group(_atom_re.groupindex['simple'] + 2) is not None:
+			cpv = cp = m.group(atom_re.groupindex['simple'] + 1)
+			slot = m.group(atom_re.groups - 2)
+			repo = m.group(atom_re.groups - 1)
+			use_str = m.group(atom_re.groups)
+			if m.group(atom_re.groupindex['simple'] + 2) is not None:
 				raise InvalidAtom(self)
 
 		else:
 			raise AssertionError(_("required group not found in atom: '%s'") % self)
 		self.__dict__['cp'] = cp
-		self.__dict__['cpv'] = cpv
+		try:
+			self.__dict__['cpv'] = _pkg_str(cpv)
+			self.__dict__['version'] = self.cpv.version
+		except InvalidData:
+			# plain cp, wildcard, or something
+			self.__dict__['cpv'] = cpv
+			self.__dict__['version'] = None
 		self.__dict__['repo'] = repo
 		self.__dict__['slot'] = slot
 		self.__dict__['operator'] = op
@@ -1640,20 +1658,45 @@ _repo_separator = "::"
 _repo_name = r'[\w][\w-]*'
 _repo = r'(?:' + _repo_separator + '(' + _repo_name + ')' + ')?'
 
-_atom_re = re.compile('^(?P<without_use>(?:' +
-	'(?P<op>' + _op + _cpv + ')|' +
-	'(?P<star>=' + _cpv + r'\*)|' +
-	'(?P<simple>' + _cp + '))' + 
-	'(' + _slot_separator + _slot + ')?' + _repo + ')(' + _use + ')?$', re.VERBOSE)
+_atom_re = {
+	"dots_disallowed_in_PN": re.compile('^(?P<without_use>(?:' +
+		'(?P<op>' + _op + _cpv['dots_disallowed_in_PN'] + ')|' +
+		'(?P<star>=' + _cpv['dots_disallowed_in_PN'] + r'\*)|' +
+		'(?P<simple>' + _cp['dots_disallowed_in_PN'] + '))' + 
+		'(' + _slot_separator + _slot + ')?' + _repo + ')(' + _use + ')?$', re.VERBOSE),
+	"dots_allowed_in_PN": re.compile('^(?P<without_use>(?:' +
+		'(?P<op>' + _op + _cpv['dots_allowed_in_PN'] + ')|' +
+		'(?P<star>=' + _cpv['dots_allowed_in_PN'] + r'\*)|' +
+		'(?P<simple>' + _cp['dots_allowed_in_PN'] + '))' + 
+		'(' + _slot_separator + _slot + ')?' + _repo + ')(' + _use + ')?$', re.VERBOSE),
+}
+
+def _get_atom_re(eapi):
+	if eapi is None or eapi_allows_dots_in_PN(eapi):
+		return _atom_re["dots_allowed_in_PN"]
+	else:
+		return _atom_re["dots_disallowed_in_PN"]
 	
 _extended_cat = r'[\w+*][\w+.*-]*'
-_extended_pkg = r'[\w+*][\w+*-]*?'
+_extended_pkg = {
+	"dots_disallowed_in_PN": r'[\w+*][\w+*-]*?',
+	"dots_allowed_in_PN":    r'[\w+*][\w+.*-]*?',
+}
 
-_atom_wildcard_re = re.compile('(?P<simple>(' + _extended_cat + ')/(' + _extended_pkg + '))(:(?P<slot>' + _slot + '))?(' + _repo_separator + '(?P<repo>' + _repo_name + '))?$')
+_atom_wildcard_re = {
+	"dots_disallowed_in_PN": re.compile('(?P<simple>(' + _extended_cat + ')/(' + _extended_pkg['dots_disallowed_in_PN'] + '))(:(?P<slot>' + _slot + '))?(' + _repo_separator + '(?P<repo>' + _repo_name + '))?$'),
+	"dots_allowed_in_PN":    re.compile('(?P<simple>(' + _extended_cat + ')/(' + _extended_pkg['dots_allowed_in_PN'] + '))(:(?P<slot>' + _slot + '))?(' + _repo_separator + '(?P<repo>' + _repo_name + '))?$'),
+}
+
+def _get_atom_wildcard_re(eapi):
+	if eapi is None or eapi_allows_dots_in_PN(eapi):
+		return _atom_wildcard_re["dots_allowed_in_PN"]
+	else:
+		return _atom_wildcard_re["dots_disallowed_in_PN"]
 
 _useflag_re = {
-	"0":        re.compile(r'^[A-Za-z0-9][A-Za-z0-9+_@-]*$'),
-	"4-python": re.compile(r'^[A-Za-z0-9][A-Za-z0-9+_@.-]*$'),
+	"dots_disallowed_in_use_flags": re.compile(r'^[A-Za-z0-9][A-Za-z0-9+_@-]*$'),
+	"dots_allowed_in_use_flags":    re.compile(r'^[A-Za-z0-9][A-Za-z0-9+_@.-]*$'),
 }
 
 def _get_useflag_re(eapi):
@@ -1666,10 +1709,10 @@ def _get_useflag_re(eapi):
 	@return: A regular expression object that matches valid USE flags for the
 		given eapi.
 	"""
-	if eapi in (None, "4-python",):
-		return _useflag_re["4-python"]
+	if eapi is None or eapi_allows_dots_in_use_flags(eapi):
+		return _useflag_re["dots_allowed_in_use_flags"]
 	else:
-		return _useflag_re["0"]
+		return _useflag_re["dots_disallowed_in_use_flags"]
 
 def isvalidatom(atom, allow_blockers=False, allow_wildcard=False, allow_repo=False):
 	"""
@@ -1842,9 +1885,10 @@ def best_match_to_list(mypkg, mylist):
 			# For >, <, >=, and <=, the one with the version
 			# closest to mypkg is the best match.
 			if mypkg_cpv is None:
-				mypkg_cpv = getattr(mypkg, "cpv", None)
-				if mypkg_cpv is None:
-					mypkg_cpv = remove_slot(mypkg)
+				try:
+					mypkg_cpv = mypkg.cpv
+				except AttributeError:
+					mypkg_cpv = _pkg_str(remove_slot(mypkg))
 			if bestm.cpv == mypkg_cpv or bestm.cpv == x.cpv:
 				pass
 			elif x.cpv == mypkg_cpv:
@@ -1852,11 +1896,8 @@ def best_match_to_list(mypkg, mylist):
 			else:
 				# Sort the cpvs to find the one closest to mypkg_cpv
 				cpv_list = [bestm.cpv, mypkg_cpv, x.cpv]
-				ver_map = {}
-				for cpv in cpv_list:
-					ver_map[cpv] = '-'.join(catpkgsplit(cpv)[2:])
 				def cmp_cpv(cpv1, cpv2):
-					return vercmp(ver_map[cpv1], ver_map[cpv2])
+					return vercmp(cpv1.version, cpv2.version)
 				cpv_list.sort(key=cmp_sort_key(cmp_cpv))
 				if cpv_list[0] is mypkg_cpv or cpv_list[-1] is mypkg_cpv:
 					if cpv_list[1] is x.cpv:
@@ -1882,7 +1923,6 @@ def match_from_list(mydep, candidate_list):
 	if not candidate_list:
 		return []
 
-	from portage.util import writemsg
 	if "!" == mydep[:1]:
 		if "!" == mydep[1:2]:
 			mydep = mydep[2:]
@@ -1947,7 +1987,7 @@ def match_from_list(mydep, candidate_list):
 		myver = mysplit[2].lstrip("0")
 		if not myver or not myver[0].isdigit():
 			myver = "0"+myver
-		mycpv = mysplit[0]+"/"+mysplit[1]+"-"+myver
+		mycpv_cmp = mysplit[0]+"/"+mysplit[1]+"-"+myver
 		for x in candidate_list:
 			xs = getattr(x, "cpv_split", None)
 			if xs is None:
@@ -1956,7 +1996,7 @@ def match_from_list(mydep, candidate_list):
 			if not myver or not myver[0].isdigit():
 				myver = "0"+myver
 			xcpv = xs[0]+"/"+xs[1]+"-"+myver
-			if xcpv.startswith(mycpv):
+			if xcpv.startswith(mycpv_cmp):
 				mylist.append(x)
 
 	elif operator == "~": # version, any revision, match
@@ -1973,15 +2013,19 @@ def match_from_list(mydep, candidate_list):
 			mylist.append(x)
 
 	elif operator in [">", ">=", "<", "<="]:
-		mysplit = ["%s/%s" % (cat, pkg), ver, rev]
 		for x in candidate_list:
-			xs = getattr(x, "cpv_split", None)
-			if xs is None:
-				xs = catpkgsplit(remove_slot(x))
-			xcat, xpkg, xver, xrev = xs
-			xs = ["%s/%s" % (xcat, xpkg), xver, xrev]
+			if hasattr(x, 'cp'):
+				pkg = x
+			else:
+				try:
+					pkg = _pkg_str(remove_slot(x))
+				except InvalidData:
+					continue
+
+			if pkg.cp != mydep.cp:
+				continue
 			try:
-				result = pkgcmp(xs, mysplit)
+				result = vercmp(pkg.version, mydep.version)
 			except ValueError: # pkgcmp may return ValueError during int() conversion
 				writemsg(_("\nInvalid package name: %s\n") % x, noiselevel=-1)
 				raise
@@ -2058,7 +2102,8 @@ def match_from_list(mydep, candidate_list):
 			repo = getattr(x, "repo", False)
 			if repo is False:
 				repo = dep_getrepo(x)
-			if repo is not None and repo != mydep.repo:
+			if repo is not None and repo != _unknown_repo and \
+				repo != mydep.repo:
 				continue
 			mylist.append(x)
 

@@ -30,8 +30,8 @@ portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.util.movefile:movefile',
 	'portage.util._dyn_libs.PreservedLibsRegistry:PreservedLibsRegistry',
 	'portage.util._dyn_libs.LinkageMapELF:LinkageMapELF@LinkageMap',
-	'portage.versions:best,catpkgsplit,catsplit,cpv_getkey,pkgcmp,' + \
-		'_pkgsplit@pkgsplit',
+	'portage.versions:best,catpkgsplit,catsplit,cpv_getkey,vercmp,' + \
+		'_pkgsplit@pkgsplit,_pkg_str',
 	'subprocess',
 	'tarfile',
 )
@@ -63,6 +63,7 @@ from _emerge.PollScheduler import PollScheduler
 from _emerge.MiscFunctionsProcess import MiscFunctionsProcess
 
 import errno
+import fnmatch
 import gc
 import grp
 import io
@@ -86,6 +87,9 @@ except ImportError:
 if sys.hexversion >= 0x3000000:
 	basestring = str
 	long = int
+	_unicode = str
+else:
+	_unicode = unicode
 
 class vardbapi(dbapi):
 
@@ -385,7 +389,7 @@ class vardbapi(dbapi):
 				continue
 			if len(mysplit) > 1:
 				if ps[0] == mysplit[1]:
-					returnme.append(mysplit[0]+"/"+x)
+					returnme.append(_pkg_str(mysplit[0]+"/"+x))
 		self._cpv_sort_ascending(returnme)
 		if use_cache:
 			self.cpcache[mycp] = [mystat, returnme[:]]
@@ -484,6 +488,7 @@ class vardbapi(dbapi):
 		"caching match function"
 		mydep = dep_expand(
 			origdep, mydb=self, use_cache=use_cache, settings=self.settings)
+		cache_key = (mydep, mydep.unevaluated_atom)
 		mykey = dep_getkey(mydep)
 		mycat = catsplit(mykey)[0]
 		if not use_cache:
@@ -505,8 +510,8 @@ class vardbapi(dbapi):
 		if mydep not in self.matchcache[mycat]:
 			mymatch = list(self._iter_match(mydep,
 				self.cp_list(mydep.cp, use_cache=use_cache)))
-			self.matchcache[mycat][mydep] = mymatch
-		return self.matchcache[mycat][mydep][:]
+			self.matchcache[mycat][cache_key] = mymatch
+		return self.matchcache[mycat][cache_key][:]
 
 	def findname(self, mycpv, myrepo=None):
 		return self.getpath(str(mycpv), filename=catsplit(mycpv)[1]+".ebuild")
@@ -678,7 +683,8 @@ class vardbapi(dbapi):
 					cache_data.update(metadata)
 				for aux_key in cache_these:
 					cache_data[aux_key] = mydata[aux_key]
-				self._aux_cache["packages"][mycpv] = (mydir_mtime, cache_data)
+				self._aux_cache["packages"][_unicode(mycpv)] = \
+					(mydir_mtime, cache_data)
 				self._aux_cache["modified"].add(mycpv)
 
 		if _slot_re.match(mydata['SLOT']) is None:
@@ -921,7 +927,7 @@ class vardbapi(dbapi):
 		@param myroot: ignored, self._eroot is used instead
 		@param mycpv: ignored
 		@rtype: int
-		@returns: new counter value
+		@return: new counter value
 		"""
 		myroot = None
 		mycpv = None
@@ -1057,7 +1063,7 @@ class vardbapi(dbapi):
 				counter = int(counter)
 			except ValueError:
 				counter = 0
-			return (cpv, counter, mtime)
+			return (_unicode(cpv), counter, mtime)
 
 	class _owners_db(object):
 
@@ -1430,8 +1436,13 @@ class dblink(object):
 		self.cat = cat
 		self.pkg = pkg
 		self.mycpv = self.cat + "/" + self.pkg
-		self.mysplit = list(catpkgsplit(self.mycpv)[1:])
-		self.mysplit[0] = "%s/%s" % (self.cat, self.mysplit[0])
+		if self.mycpv == settings.mycpv and \
+			isinstance(settings.mycpv, _pkg_str):
+			self.mycpv = settings.mycpv
+		else:
+			self.mycpv = _pkg_str(self.mycpv)
+		self.mysplit = list(self.mycpv.cpv_split[1:])
+		self.mysplit[0] = self.mycpv.cp
 		self.treetype = treetype
 		if vartree is None:
 			vartree = portage.db[self._eroot]["vartree"]
@@ -1452,7 +1463,7 @@ class dblink(object):
 		self._contents_inodes = None
 		self._contents_basenames = None
 		self._linkmap_broken = False
-		self._md5_merge_map = {}
+		self._hardlink_merge_map = {}
 		self._hash_key = (self._eroot, self.mycpv)
 		self._protect_obj = None
 		self._pipe = pipe
@@ -1732,7 +1743,7 @@ class dblink(object):
 			PreservedLibsRegistry yet.
 		@type preserve_paths: set
 		@rtype: Integer
-		@returns:
+		@return:
 		1. os.EX_OK if everything went well.
 		2. return code of the failed phase (for prerm, postrm, cleanrm)
 		"""
@@ -2547,7 +2558,7 @@ class dblink(object):
 		@param destroot:
 		@type destroot:
 		@rtype: Boolean
-		@returns:
+		@return:
 		1. True if this package owns the file.
 		2. False if this package does not own the file.
 		"""
@@ -3076,9 +3087,13 @@ class dblink(object):
 
 			os = _os_merge
 
-			collision_ignore = set([normalize_path(myignore) for myignore in \
-				portage.util.shlex_split(
-				self.settings.get("COLLISION_IGNORE", ""))])
+			collision_ignore = []
+			for x in portage.util.shlex_split(
+				self.settings.get("COLLISION_IGNORE", "")):
+				if os.path.isdir(os.path.join(self._eroot, x.lstrip(os.sep))):
+					x = normalize_path(x)
+					x += "/*"
+				collision_ignore.append(x)
 
 			# For collisions with preserved libraries, the current package
 			# will assume ownership and the libraries will be unregistered.
@@ -3179,15 +3194,12 @@ class dblink(object):
 				if not isowned and self.isprotected(full_path):
 					isowned = True
 				if not isowned:
+					f_match = full_path[len(self._eroot)-1:]
 					stopmerge = True
-					if collision_ignore:
-						if f in collision_ignore:
+					for pattern in collision_ignore:
+						if fnmatch.fnmatch(f_match, pattern):
 							stopmerge = False
-						else:
-							for myignore in collision_ignore:
-								if f.startswith(myignore + os.path.sep):
-									stopmerge = False
-									break
+							break
 					if stopmerge:
 						collisions.append(f)
 			return collisions, symlink_collisions, plib_collisions
@@ -3377,7 +3389,7 @@ class dblink(object):
 		@param prev_mtimes: { Filename:mtime } mapping for env_update
 		@type prev_mtimes: Dictionary
 		@rtype: Boolean
-		@returns:
+		@return:
 		1. 0 on success
 		2. 1 on failure
 		
@@ -3662,6 +3674,21 @@ class dblink(object):
 			self._collision_protect(srcroot, destroot,
 			others_in_slot + blockers, myfilelist, mylinklist)
 
+		if symlink_collisions:
+			# Symlink collisions need to be distinguished from other types
+			# of collisions, in order to avoid confusion (see bug #409359).
+			msg = _("Package '%s' has one or more collisions "
+				"between symlinks and directories, which is explicitly "
+				"forbidden by PMS section 13.4 (see bug #326685):") % \
+				(self.settings.mycpv,)
+			msg = textwrap.wrap(msg, 70)
+			msg.append("")
+			for f in symlink_collisions:
+				msg.append("\t%s" % os.path.join(destroot,
+					f.lstrip(os.path.sep)))
+			msg.append("")
+			self._elog("eerror", "preinst", msg)
+
 		if collisions:
 			collision_protect = "collision-protect" in self.settings.features
 			protect_owned = "protect-owned" in self.settings.features
@@ -3743,12 +3770,20 @@ class dblink(object):
 					eerror([_("None of the installed"
 						" packages claim the file(s)."), ""])
 
+			symlink_abort_msg =_("Package '%s' NOT merged since it has "
+				"one or more collisions between symlinks and directories, "
+				"which is explicitly forbidden by PMS section 13.4 "
+				"(see bug #326685).")
+
 			# The explanation about the collision and how to solve
 			# it may not be visible via a scrollback buffer, especially
 			# if the number of file collisions is large. Therefore,
 			# show a summary at the end.
 			abort = False
-			if collision_protect:
+			if symlink_collisions:
+				abort = True
+				msg = symlink_abort_msg % (self.settings.mycpv,)
+			elif collision_protect:
 				abort = True
 				msg = _("Package '%s' NOT merged due to file collisions.") % \
 					self.settings.mycpv
@@ -3756,12 +3791,6 @@ class dblink(object):
 				abort = True
 				msg = _("Package '%s' NOT merged due to file collisions.") % \
 					self.settings.mycpv
-			elif symlink_collisions:
-				abort = True
-				msg = _("Package '%s' NOT merged due to collision " + \
-				"between a symlink and a directory which is explicitly " + \
-				"forbidden by PMS (see bug #326685).") % \
-				(self.settings.mycpv,)
 			else:
 				msg = _("Package '%s' merged despite file collisions.") % \
 					self.settings.mycpv
@@ -3828,9 +3857,8 @@ class dblink(object):
 			# Always behave like --noconfmem is enabled for downgrades
 			# so that people who don't know about this option are less
 			# likely to get confused when doing upgrade/downgrade cycles.
-			pv_split = catpkgsplit(self.mycpv)[1:]
 			for other in others_in_slot:
-				if pkgcmp(pv_split, catpkgsplit(other.mycpv)[1:]) < 0:
+				if vercmp(self.mycpv.version, other.mycpv.version) < 0:
 					cfgfiledict["IGNORE"] = 1
 					break
 
@@ -4177,7 +4205,7 @@ class dblink(object):
 		@param thismtime: The current time (typically long(time.time())
 		@type thismtime: Long
 		@rtype: None or Boolean
-		@returns:
+		@return:
 		1. True on failure
 		2. None otherwise
 		
@@ -4484,10 +4512,10 @@ class dblink(object):
 					# as hardlinks (having identical st_dev and st_ino).
 					hardlink_key = (mystat.st_dev, mystat.st_ino)
 
-					hardlink_candidates = self._md5_merge_map.get(hardlink_key)
+					hardlink_candidates = self._hardlink_merge_map.get(hardlink_key)
 					if hardlink_candidates is None:
 						hardlink_candidates = []
-						self._md5_merge_map[hardlink_key] = hardlink_candidates
+						self._hardlink_merge_map[hardlink_key] = hardlink_candidates
 
 					mymtime = movefile(mysrc, mydest, newmtime=thismtime,
 						sstat=mystat, mysettings=self.settings,
@@ -4495,8 +4523,7 @@ class dblink(object):
 						encoding=_encodings['merge'])
 					if mymtime is None:
 						return 1
-					if hardlink_candidates is not None:
-						hardlink_candidates.append(mydest)
+					hardlink_candidates.append(mydest)
 					zing = ">>>"
 
 				if mymtime != None:

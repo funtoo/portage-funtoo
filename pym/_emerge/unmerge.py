@@ -1,9 +1,10 @@
-# Copyright 1999-2011 Gentoo Foundation
+# Copyright 1999-2012 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 from __future__ import print_function
 
 import logging
+import signal
 import sys
 import textwrap
 import portage
@@ -12,7 +13,7 @@ from portage.dbapi._expand_new_virt import expand_new_virt
 from portage.output import bold, colorize, darkgreen, green
 from portage._sets import SETPREFIX
 from portage._sets.base import EditablePackageSet
-from portage.util import cmp_sort_key
+from portage.versions import cpv_sort_key, _pkg_str
 
 from _emerge.emergelog import emergelog
 from _emerge.Package import Package
@@ -467,20 +468,22 @@ def _unmerge_display(root_config, myopts, unmerge_action,
 			if not quiet:
 				writemsg_level((mytype + ": ").rjust(14), noiselevel=-1)
 			if pkgmap[x][mytype]:
-				sorted_pkgs = [portage.catpkgsplit(mypkg)[1:] for mypkg in pkgmap[x][mytype]]
-				sorted_pkgs.sort(key=cmp_sort_key(portage.pkgcmp))
-				for pn, ver, rev in sorted_pkgs:
-					if rev == "r0":
-						myversion = ver
-					else:
-						myversion = ver + "-" + rev
+				sorted_pkgs = []
+				for mypkg in pkgmap[x][mytype]:
+					try:
+						sorted_pkgs.append(mypkg.cpv)
+					except AttributeError:
+						sorted_pkgs.append(_pkg_str(mypkg))
+				sorted_pkgs.sort(key=cpv_sort_key())
+				for mypkg in sorted_pkgs:
 					if mytype == "selected":
 						writemsg_level(
-							colorize("UNMERGE_WARN", myversion + " "),
+							colorize("UNMERGE_WARN", mypkg.version + " "),
 							noiselevel=-1)
 					else:
 						writemsg_level(
-							colorize("GOOD", myversion + " "), noiselevel=-1)
+							colorize("GOOD", mypkg.version + " "),
+							noiselevel=-1)
 			else:
 				writemsg_level("none ", noiselevel=-1)
 			if not quiet:
@@ -503,7 +506,8 @@ def unmerge(root_config, myopts, unmerge_action,
 	clean_world=1, clean_delay=1, ordered=0, raise_on_error=0,
 	scheduler=None, writemsg_level=portage.util.writemsg_level):
 	"""
-	Returns 1 if successful, otherwise 0.
+	Returns os.EX_OK if no errors occur, 1 if an error occurs, and
+	130 if interrupted due to a 'no' answer for --ask.
 	"""
 
 	if clean_world:
@@ -515,7 +519,7 @@ def unmerge(root_config, myopts, unmerge_action,
 		writemsg_level=writemsg_level)
 
 	if rval != os.EX_OK:
-		return 0
+		return rval
 
 	enter_invalid = '--ask-enter-invalid' in myopts
 	vartree = root_config.trees["vartree"]
@@ -526,7 +530,7 @@ def unmerge(root_config, myopts, unmerge_action,
 
 	if "--pretend" in myopts:
 		#we're done... return
-		return 1
+		return os.EX_OK
 	if "--ask" in myopts:
 		if userquery("Would you like to unmerge these packages?",
 			enter_invalid) == "No":
@@ -535,15 +539,28 @@ def unmerge(root_config, myopts, unmerge_action,
 			print()
 			print("Quitting.")
 			print()
-			return 0
+			return 128 + signal.SIGINT
 	#the real unmerging begins, after a short delay....
 	if clean_delay and not autoclean:
 		countdown(int(settings["CLEAN_DELAY"]), ">>> Unmerging")
 
+	all_selected = set()
+	all_selected.update(*[x["selected"] for x in pkgmap])
+
+	# Set counter variables
+	curval = 1
+	maxval = len(all_selected)
+
 	for x in range(len(pkgmap)):
 		for y in pkgmap[x]["selected"]:
-			writemsg_level(">>> Unmerging "+y+"...\n", noiselevel=-1)
 			emergelog(xterm_titles, "=== Unmerging... ("+y+")")
+			message = ">>> Unmerging ({0} of {1}) {2}...\n".format(
+				colorize("MERGE_LIST_PROGRESS", str(curval)),
+				colorize("MERGE_LIST_PROGRESS", str(maxval)),
+				y)
+			writemsg_level(message, noiselevel=-1)
+			curval += 1
+
 			mysplit = y.split("/")
 			#unmerge...
 			retval = portage.unmerge(mysplit[0], mysplit[1],
@@ -574,5 +591,5 @@ def unmerge(root_config, myopts, unmerge_action,
 			sets["selected"].remove(SETPREFIX + s)
 		sets["selected"].unlock()
 
-	return 1
+	return os.EX_OK
 

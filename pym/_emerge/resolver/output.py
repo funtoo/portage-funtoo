@@ -16,7 +16,7 @@ from portage.dbapi.dep_expand import dep_expand
 from portage.dep import cpvequal, _repo_separator
 from portage.exception import InvalidDependString, SignatureException
 from portage.package.ebuild._spawn_nofetch import spawn_nofetch
-from portage.output import ( blue, bold, colorize, create_color_func,
+from portage.output import ( blue, colorize, create_color_func,
 	darkblue, darkgreen, green, nc_len, red, teal, turquoise, yellow )
 bad = create_color_func("BAD")
 from portage.util import writemsg_stdout
@@ -514,8 +514,8 @@ class Display(object):
 	def _insert_slot(self, pkg, pkg_info, myinslotlist):
 		"""Adds slot info to the message
 
-		@returns addl: formatted slot info
-		@returns myoldbest: installed version list
+		@return addl: formatted slot info
+		@return myoldbest: installed version list
 		Modifies self.counters.downgrades, self.counters.upgrades,
 			self.counters.binary
 		"""
@@ -541,8 +541,8 @@ class Display(object):
 	def _new_slot(self, pkg, pkg_info):
 		"""New slot, mark it new.
 
-		@returns addl: formatted slot info
-		@returns myoldbest: installed version list
+		@return addl: formatted slot info
+		@return myoldbest: installed version list
 		Modifies self.counters.newslot, self.counters.binary
 		"""
 		addl = " " + green("NS") + pkg_info.fetch_symbol + "  "
@@ -598,13 +598,9 @@ class Display(object):
 	def print_changelog(self):
 		"""Prints the changelog text to std_out
 		"""
-		if not self.changelogs:
-			return
-		writemsg_stdout('\n', noiselevel=-1)
-		for revision, text in self.changelogs:
-			writemsg_stdout(bold('*'+revision) + '\n' + text,
+		for chunk in self.changelogs:
+			writemsg_stdout(chunk,
 				noiselevel=-1)
-		return
 
 
 	def get_display_list(self, mylist):
