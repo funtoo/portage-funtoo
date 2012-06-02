@@ -1068,11 +1068,11 @@ class Atom(_atom_base):
 		def __init__(self, forbid_overlap=False):
 			self.overlap = self._overlap(forbid=forbid_overlap)
 
-	def __new__(cls, s, unevaluated_atom=None, allow_wildcard=False, allow_repo=False,
+	def __new__(cls, s, unevaluated_atom=None, allow_wildcard=False, allow_repo=None,
 		_use=None, eapi=None, is_valid_flag=None):
 		return _atom_base.__new__(cls, s)
 
-	def __init__(self, s, unevaluated_atom=None, allow_wildcard=False, allow_repo=False,
+	def __init__(self, s, unevaluated_atom=None, allow_wildcard=False, allow_repo=None,
 		_use=None, eapi=None, is_valid_flag=None):
 		if isinstance(s, Atom):
 			# This is an efficiency assertion, to ensure that the Atom
@@ -1087,8 +1087,13 @@ class Atom(_atom_base):
 		_atom_base.__init__(s)
 
 		atom_re = _get_atom_re(eapi)
-		if eapi_has_repo_deps(eapi):
-			allow_repo = True
+
+		if eapi is not None:
+			# Ignore allow_repo when eapi is specified.
+			allow_repo = eapi_has_repo_deps(eapi)
+		else:
+			if allow_repo is None:
+				allow_repo = True
 
 		if "!" == s[:1]:
 			blocker = self._blocker(forbid_overlap=("!" == s[1:2]))
@@ -2076,21 +2081,19 @@ def match_from_list(mydep, candidate_list):
 					missing_disabled = mydep.use.missing_disabled.difference(x.iuse.all)
 
 					if mydep.use.enabled:
-						if mydep.use.enabled.intersection(missing_disabled):
+						if any(f in mydep.use.enabled for f in missing_disabled):
 							continue
 						need_enabled = mydep.use.enabled.difference(use.enabled)
 						if need_enabled:
-							need_enabled = need_enabled.difference(missing_enabled)
-							if need_enabled:
+							if any(f not in missing_enabled for f in need_enabled):
 								continue
 
 					if mydep.use.disabled:
-						if mydep.use.disabled.intersection(missing_enabled):
+						if any(f in mydep.use.disabled for f in missing_enabled):
 							continue
 						need_disabled = mydep.use.disabled.intersection(use.enabled)
 						if need_disabled:
-							need_disabled = need_disabled.difference(missing_disabled)
-							if need_disabled:
+							if any(f not in missing_disabled for f in need_disabled):
 								continue
 
 			mylist.append(x)

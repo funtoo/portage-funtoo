@@ -181,6 +181,7 @@ class config(object):
 		# can practically render the api unusable for api consumers.
 		tolerant = hasattr(portage, '_initializing_globals')
 		self._tolerant = tolerant
+		self._unmatched_removal = _unmatched_removal
 
 		self.locked   = 0
 		self.mycpv    = None
@@ -205,6 +206,7 @@ class config(object):
 			# For immutable attributes, use shallow copy for
 			# speed and memory conservation.
 			self._tolerant = clone._tolerant
+			self._unmatched_removal = clone._unmatched_removal
 			self.categories = clone.categories
 			self.depcachedir = clone.depcachedir
 			self.incrementals = clone.incrementals
@@ -227,9 +229,12 @@ class config(object):
 			self._setcpv_args_hash = clone._setcpv_args_hash
 
 			# immutable attributes (internal policy ensures lack of mutation)
-			self._keywords_manager = clone._keywords_manager
+			self._locations_manager = clone._locations_manager
 			self._use_manager = clone._use_manager
-			self._mask_manager = clone._mask_manager
+			# force instantiation of lazy immutable objects when cloning, so
+			# that they're not instantiated more than once
+			self._keywords_manager_obj = clone._keywords_manager
+			self._mask_manager_obj = clone._mask_manager
 
 			# shared mutable attributes
 			self._unknown_features = clone._unknown_features
@@ -266,7 +271,9 @@ class config(object):
 			#all LicenseManager instances.
 			self._license_manager = clone._license_manager
 
-			self._virtuals_manager = copy.deepcopy(clone._virtuals_manager)
+			# force instantiation of lazy objects when cloning, so
+			# that they're not instantiated more than once
+			self._virtuals_manager_obj = copy.deepcopy(clone._virtuals_manager)
 
 			self._accept_properties = copy.deepcopy(clone._accept_properties)
 			self._ppropertiesdict = copy.deepcopy(clone._ppropertiesdict)
@@ -274,9 +281,15 @@ class config(object):
 			self._expand_map = copy.deepcopy(clone._expand_map)
 
 		else:
+			# lazily instantiated objects
+			self._keywords_manager_obj = None
+			self._mask_manager_obj = None
+			self._virtuals_manager_obj = None
+
 			locations_manager = LocationsManager(config_root=config_root,
 				config_profile_path=config_profile_path, eprefix=eprefix,
 				local_config=local_config, target_root=target_root)
+			self._locations_manager = locations_manager
 
 			eprefix = locations_manager.eprefix
 			config_root = locations_manager.config_root
@@ -574,10 +587,6 @@ class config(object):
 						d.pop(k, None)
 				self._repo_make_defaults[repo.name] = d
 
-			#Read package.keywords and package.accept_keywords.
-			self._keywords_manager = KeywordsManager(profiles_complex, abs_user_config, \
-				local_config, global_accept_keywords=self.configdict["defaults"].get("ACCEPT_KEYWORDS", ""))
-
 			#Read all USE related files from profiles and optionally from user config.
 			self._use_manager = UseManager(self.repositories, profiles_complex, abs_user_config, user_config=local_config)
 			#Initialize all USE related variables we track ourselves.
@@ -594,13 +603,6 @@ class config(object):
 			self.configdict["conf"]["ACCEPT_LICENSE"] = \
 				self._license_manager.extract_global_changes( \
 					self.configdict["conf"].get("ACCEPT_LICENSE", ""))
-
-			#Read package.mask and package.unmask from profiles and optionally from user config
-			self._mask_manager = MaskManager(self.repositories, profiles_complex,
-				abs_user_config, user_config=local_config,
-				strict_umatched_removal=_unmatched_removal)
-
-			self._virtuals_manager = VirtualsManager(self.profiles)
 
 			if local_config:
 				#package.properties
@@ -880,6 +882,32 @@ class config(object):
 					noiselevel=-1)
 				writemsg("!!! %s\n" % str(e),
 					noiselevel=-1)
+
+	@property
+	def _keywords_manager(self):
+		if self._keywords_manager_obj is None:
+			self._keywords_manager_obj = KeywordsManager(
+				self._locations_manager.profiles_complex,
+				self._locations_manager.abs_user_config,
+				self.local_config,
+				global_accept_keywords=self.configdict["defaults"].get("ACCEPT_KEYWORDS", ""))
+		return self._keywords_manager_obj
+
+	@property
+	def _mask_manager(self):
+		if self._mask_manager_obj is None:
+			self._mask_manager_obj = MaskManager(self.repositories,
+				self._locations_manager.profiles_complex,
+				self._locations_manager.abs_user_config,
+				user_config=self.local_config,
+				strict_umatched_removal=self._unmatched_removal)
+		return self._mask_manager_obj
+
+	@property
+	def _virtuals_manager(self):
+		if self._virtuals_manager_obj is None:
+			self._virtuals_manager_obj = VirtualsManager(self.profiles)
+		return self._virtuals_manager_obj
 
 	@property
 	def pkeywordsdict(self):
