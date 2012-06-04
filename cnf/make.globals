@@ -57,16 +57,12 @@ FEATURES="assume-digests binpkg-logs
           sandbox sfperms strict unknown-features-warn unmerge-logs
           unmerge-orphans userfetch"
 
-# Ignore file collisions in /lib/modules since files inside this directory
-# are never unmerged, and therefore collisions must be ignored in order for
-# FEATURES=protect-owned to operate smoothly in all cases.
-
-COLLISION_IGNORE="/lib/modules /lib/firmware"
 
 # Ignore file collisions for unowned *.pyo and *.pyc files, this helps during
 # transition from compiling python modules in live file system to compiling
 # them in src_install() function.
 COLLISION_IGNORE="/lib/modules/* *.py[co]"
+COLLISION_IGNORE="${COLLISION_IGNORE} /lib/firmware/*"
 
 
 # Enable preserve-libs for testing with portage versions that support it.
