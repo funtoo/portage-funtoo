@@ -13,20 +13,6 @@ __all__ = [
 	'_repo_separator', '_slot_separator',
 ]
 
-# DEPEND SYNTAX:
-#
-# 'use?' only affects the immediately following word!
-# Nesting is the only legal way to form multiple '[!]use?' requirements.
-#
-# Where: 'a' and 'b' are use flags, and 'z' is a depend atom.
-#
-# "a? z"           -- If 'a' in [use], then b is valid.
-# "a? ( z )"       -- Syntax with parenthesis.
-# "a? b? z"        -- Deprecated.
-# "a? ( b? z )"    -- Valid
-# "a? ( b? ( z ) ) -- Valid
-#
-
 import re, sys
 import warnings
 from itertools import chain
@@ -36,10 +22,8 @@ portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.util:cmp_sort_key,writemsg',
 )
 
-from portage import _unicode_decode
-from portage.eapi import eapi_has_slot_deps, eapi_has_src_uri_arrows, \
-	eapi_has_use_deps, eapi_has_strong_blocks, eapi_has_use_dep_defaults, \
-	eapi_has_repo_deps, eapi_allows_dots_in_PN, eapi_allows_dots_in_use_flags
+from portage import _encodings, _unicode_decode, _unicode_encode
+from portage.eapi import _get_eapi_attrs
 from portage.exception import InvalidAtom, InvalidData, InvalidDependString
 from portage.localization import _
 from portage.versions import catpkgsplit, catsplit, \
@@ -48,11 +32,176 @@ import portage.cache.mappings
 
 if sys.hexversion >= 0x3000000:
 	basestring = str
+	_unicode = str
+else:
+	_unicode = unicode
 
 # Api consumers included in portage should set this to True.
 # Once the relevant api changes are in a portage release with
 # stable keywords, make these warnings unconditional.
 _internal_warnings = False
+
+# \w is [a-zA-Z0-9_]
+
+# PMS 3.1.3: A slot name may contain any of the characters [A-Za-z0-9+_.-].
+# It must not begin with a hyphen or a dot.
+_slot_separator = ":"
+_slot = r'([\w+][\w+.-]*)'
+# loosly match SLOT, which may have an optional ABI part
+_slot_loose = r'([\w+./*=-]+)'
+
+_use = r'\[.*\]'
+_op = r'([=~]|[><]=?)'
+
+_repo_separator = "::"
+_repo_name = r'[\w][\w-]*'
+_repo = r'(?:' + _repo_separator + '(' + _repo_name + ')' + ')?'
+
+_extended_cat = r'[\w+*][\w+.*-]*'
+
+_slot_re_cache = {}
+
+def _get_slot_re(eapi_attrs):
+	cache_key = eapi_attrs.slot_abi
+	slot_re = _slot_re_cache.get(cache_key)
+	if slot_re is not None:
+		return slot_re
+
+	if eapi_attrs.slot_abi:
+		slot_re = _slot + r'(/' + _slot + r'=?)?'
+	else:
+		slot_re = _slot
+
+	slot_re = re.compile('^' + slot_re + '$', re.VERBOSE)
+
+	_slot_re_cache[cache_key] = slot_re
+	return slot_re
+
+_slot_dep_re_cache = {}
+
+def _get_slot_dep_re(eapi_attrs):
+	cache_key = eapi_attrs.slot_abi
+	slot_re = _slot_dep_re_cache.get(cache_key)
+	if slot_re is not None:
+		return slot_re
+
+	if eapi_attrs.slot_abi:
+		slot_re = _slot + r'?(\*|=|/' + _slot + r'=?)?'
+	else:
+		slot_re = _slot
+
+	slot_re = re.compile('^' + slot_re + '$', re.VERBOSE)
+
+	_slot_dep_re_cache[cache_key] = slot_re
+	return slot_re
+
+def _match_slot(atom, pkg):
+	if pkg.slot == atom.slot:
+		if not atom.slot_abi:
+			return True
+		elif atom.slot_abi == pkg.slot_abi:
+			return True
+	return False
+
+_atom_re_cache = {}
+
+def _get_atom_re(eapi_attrs):
+	cache_key = eapi_attrs.dots_in_PN
+	atom_re = _atom_re_cache.get(cache_key)
+	if atom_re is not None:
+		return atom_re
+
+	if eapi_attrs.dots_in_PN:
+		cp_re =  _cp['dots_allowed_in_PN']
+		cpv_re = _cpv['dots_allowed_in_PN']
+	else:
+		cp_re =  _cp['dots_disallowed_in_PN']
+		cpv_re = _cpv['dots_disallowed_in_PN']
+
+	atom_re = re.compile('^(?P<without_use>(?:' +
+		'(?P<op>' + _op + cpv_re + ')|' +
+		'(?P<star>=' + cpv_re + r'\*)|' +
+		'(?P<simple>' + cp_re + '))' + 
+		'(' + _slot_separator + _slot_loose + ')?' +
+		_repo + ')(' + _use + ')?$', re.VERBOSE)
+
+	_atom_re_cache[cache_key] = atom_re
+	return atom_re
+
+_atom_wildcard_re_cache = {}
+
+def _get_atom_wildcard_re(eapi_attrs):
+	cache_key = eapi_attrs.dots_in_PN
+	atom_re = _atom_wildcard_re_cache.get(cache_key)
+	if atom_re is not None:
+		return atom_re
+
+	if eapi_attrs.dots_in_PN:
+		pkg_re = r'[\w+*][\w+.*-]*?'
+	else:
+		pkg_re = r'[\w+*][\w+*-]*?'
+
+	atom_re = re.compile(r'(?P<simple>(' +
+		_extended_cat + r')/(' + pkg_re +
+		r'))(:(?P<slot>' + _slot_loose + r'))?(' +
+		_repo_separator + r'(?P<repo>' + _repo_name + r'))?$')
+
+	_atom_wildcard_re_cache[cache_key] = atom_re
+	return atom_re
+
+_usedep_re_cache = {}
+
+def _get_usedep_re(eapi_attrs):
+	"""
+	@param eapi_attrs: The EAPI attributes from _get_eapi_attrs
+	@type eapi_attrs: _eapi_attrs
+	@rtype: regular expression object
+	@return: A regular expression object that matches valid USE deps for the
+		given eapi.
+	"""
+	cache_key = eapi_attrs.dots_in_use_flags
+	usedep_re = _usedep_re_cache.get(cache_key)
+	if usedep_re is not None:
+		return usedep_re
+
+	if eapi_attrs.dots_in_use_flags:
+		_flag_re = r'[A-Za-z0-9][A-Za-z0-9+_@.-]*'
+	else:
+		_flag_re = r'[A-Za-z0-9][A-Za-z0-9+_@-]*'
+
+	usedep_re = re.compile(r'^(?P<prefix>[!-]?)(?P<flag>' +
+		_flag_re + r')(?P<default>(\(\+\)|\(\-\))?)(?P<suffix>[?=]?)$')
+
+	_usedep_re_cache[cache_key] = usedep_re
+	return usedep_re
+
+_useflag_re_cache = {}
+
+def _get_useflag_re(eapi):
+	"""
+	When eapi is None then validation is not as strict, since we want the
+	same to work for multiple EAPIs that may have slightly different rules.
+	@param eapi: The EAPI
+	@type eapi: String or None
+	@rtype: regular expression object
+	@return: A regular expression object that matches valid USE flags for the
+		given eapi.
+	"""
+	eapi_attrs = _get_eapi_attrs(eapi)
+	cache_key = eapi_attrs.dots_in_use_flags
+	useflag_re = _useflag_re_cache.get(cache_key)
+	if useflag_re is not None:
+		return useflag_re
+
+	if eapi_attrs.dots_in_use_flags:
+		flag_re = r'[A-Za-z0-9][A-Za-z0-9+_@.-]*'
+	else:
+		flag_re = r'[A-Za-z0-9][A-Za-z0-9+_@-]*'
+
+	useflag_re = re.compile(r'^' + flag_re + r'$')
+
+	_useflag_re_cache[cache_key] = useflag_re
+	return useflag_re
 
 def cpvequal(cpv1, cpv2):
 	"""
@@ -250,7 +399,7 @@ class paren_normalize(list):
 					self._zap_parens(x, dest)
 		return dest
 
-def paren_enclose(mylist, unevaluated_atom=False):
+def paren_enclose(mylist, unevaluated_atom=False, opconvert=False):
 	"""
 	Convert a list to a string with sublists enclosed with parens.
 
@@ -267,7 +416,10 @@ def paren_enclose(mylist, unevaluated_atom=False):
 	mystrparts = []
 	for x in mylist:
 		if isinstance(x, list):
-			mystrparts.append("( "+paren_enclose(x)+" )")
+			if opconvert and x and x[0] == "||":
+				mystrparts.append("%s ( %s )" % (x[0], paren_enclose(x[1:])))
+			else:
+				mystrparts.append("( %s )" % paren_enclose(x))
 		else:
 			if unevaluated_atom:
 				x = getattr(x, 'unevaluated_atom', x)
@@ -320,6 +472,7 @@ def use_reduce(depstr, uselist=[], masklist=[], matchall=False, excludeall=[], i
 	if matchall and matchnone:
 		raise ValueError("portage.dep.use_reduce: 'matchall' and 'matchnone' are mutually exclusive")
 
+	eapi_attrs = _get_eapi_attrs(eapi)
 	useflag_re = _get_useflag_re(eapi)
 
 	def is_active(conditional):
@@ -535,7 +688,7 @@ def use_reduce(depstr, uselist=[], masklist=[], matchall=False, excludeall=[], i
 			if not is_src_uri:
 				raise InvalidDependString(
 					_("SRC_URI arrow are only allowed in SRC_URI: token %s") % (pos+1,))
-			if eapi is None or not eapi_has_src_uri_arrows(eapi):
+			if not eapi_attrs.src_uri_arrows:
 				raise InvalidDependString(
 					_("SRC_URI arrow not allowed in EAPI %s: token %s") % (eapi, pos+1))
 			need_simple_token = True
@@ -651,30 +804,9 @@ def flatten(mylist):
 			newlist.append(x)
 	return newlist
 
-
-_usedep_re = {
-	"dots_disallowed_in_use_flags": re.compile("^(?P<prefix>[!-]?)(?P<flag>[A-Za-z0-9][A-Za-z0-9+_@-]*)(?P<default>(\(\+\)|\(\-\))?)(?P<suffix>[?=]?)$"),
-	"dots_allowed_in_use_flags":    re.compile("^(?P<prefix>[!-]?)(?P<flag>[A-Za-z0-9][A-Za-z0-9+_@.-]*)(?P<default>(\(\+\)|\(\-\))?)(?P<suffix>[?=]?)$"),
-}
-
-def _get_usedep_re(eapi):
-	"""
-	When eapi is None then validation is not as strict, since we want the
-	same to work for multiple EAPIs that may have slightly different rules.
-	@param eapi: The EAPI
-	@type eapi: String or None
-	@rtype: regular expression object
-	@return: A regular expression object that matches valid USE deps for the
-		given eapi.
-	"""
-	if eapi is None or eapi_allows_dots_in_use_flags(eapi):
-		return _usedep_re["dots_allowed_in_use_flags"]
-	else:
-		return _usedep_re["dots_disallowed_in_use_flags"]
-
 class _use_dep(object):
 
-	__slots__ = ("__weakref__", "eapi", "conditional", "missing_enabled", "missing_disabled",
+	__slots__ = ("_eapi_attrs", "conditional", "missing_enabled", "missing_disabled",
 		"disabled", "enabled", "tokens", "required")
 
 	class _conditionals_class(object):
@@ -700,10 +832,10 @@ class _use_dep(object):
 		'not_equal':   '!%s=',
 	}
 
-	def __init__(self, use, eapi, enabled_flags=None, disabled_flags=None, missing_enabled=None, \
+	def __init__(self, use, eapi_attrs, enabled_flags=None, disabled_flags=None, missing_enabled=None,
 		missing_disabled=None, conditional=None, required=None):
 
-		self.eapi = eapi
+		self._eapi_attrs = eapi_attrs
 
 		if enabled_flags is not None:
 			#A shortcut for the classe's own methods.
@@ -732,7 +864,7 @@ class _use_dep(object):
 		no_default = set()
 
 		conditional = {}
-		usedep_re = _get_usedep_re(self.eapi)
+		usedep_re = _get_usedep_re(self._eapi_attrs)
 
 		for x in use:
 			m = usedep_re.match(x)
@@ -800,6 +932,14 @@ class _use_dep(object):
 			return ""
 		return "[%s]" % (",".join(self.tokens),)
 
+	if sys.hexversion < 0x3000000:
+
+		__unicode__ = __str__
+
+		def __str__(self):
+			return _unicode_encode(self.__unicode__(),
+				encoding=_encodings['content'], errors='backslashreplace')
+
 	def __repr__(self):
 		return "portage.dep._use_dep(%s)" % repr(self.tokens)
 
@@ -835,7 +975,7 @@ class _use_dep(object):
 		disabled_flags = set(self.disabled)
 
 		tokens = []
-		usedep_re = _get_usedep_re(self.eapi)
+		usedep_re = _get_usedep_re(self._eapi_attrs)
 
 		for x in self.tokens:
 			m = usedep_re.match(x)
@@ -871,7 +1011,7 @@ class _use_dep(object):
 			else:
 				tokens.append(x)
 
-		return _use_dep(tokens, self.eapi, enabled_flags=enabled_flags, disabled_flags=disabled_flags, \
+		return _use_dep(tokens, self._eapi_attrs, enabled_flags=enabled_flags, disabled_flags=disabled_flags,
 			missing_enabled=self.missing_enabled, missing_disabled=self.missing_disabled, required=self.required)
 
 	def violated_conditionals(self, other_use, is_valid_flag, parent_use=None):
@@ -893,7 +1033,7 @@ class _use_dep(object):
 		def validate_flag(flag):
 			return is_valid_flag(flag) or flag in all_defaults
 
-		usedep_re = _get_usedep_re(self.eapi)
+		usedep_re = _get_usedep_re(self._eapi_attrs)
 
 		for x in self.tokens:
 			m = usedep_re.match(x)
@@ -985,7 +1125,7 @@ class _use_dep(object):
 						tokens.append(x)
 						conditional.setdefault("disabled", set()).add(flag)
 
-		return _use_dep(tokens, self.eapi, enabled_flags=enabled_flags, disabled_flags=disabled_flags, \
+		return _use_dep(tokens, self._eapi_attrs, enabled_flags=enabled_flags, disabled_flags=disabled_flags,
 			missing_enabled=self.missing_enabled, missing_disabled=self.missing_disabled, \
 			conditional=conditional, required=self.required)
 
@@ -1005,7 +1145,7 @@ class _use_dep(object):
 		missing_disabled = self.missing_disabled
 
 		tokens = []
-		usedep_re = _get_usedep_re(self.eapi)
+		usedep_re = _get_usedep_re(self._eapi_attrs)
 
 		for x in self.tokens:
 			m = usedep_re.match(x)
@@ -1041,15 +1181,10 @@ class _use_dep(object):
 			else:
 				tokens.append(x)
 
-		return _use_dep(tokens, self.eapi, enabled_flags=enabled_flags, disabled_flags=disabled_flags, \
+		return _use_dep(tokens, self._eapi_attrs, enabled_flags=enabled_flags, disabled_flags=disabled_flags,
 			missing_enabled=missing_enabled, missing_disabled=missing_disabled, required=self.required)
 
-if sys.hexversion < 0x3000000:
-	_atom_base = unicode
-else:
-	_atom_base = str
-
-class Atom(_atom_base):
+class Atom(_unicode):
 
 	"""
 	For compatibility with existing atom string manipulation code, this
@@ -1070,7 +1205,7 @@ class Atom(_atom_base):
 
 	def __new__(cls, s, unevaluated_atom=None, allow_wildcard=False, allow_repo=None,
 		_use=None, eapi=None, is_valid_flag=None):
-		return _atom_base.__new__(cls, s)
+		return _unicode.__new__(cls, s)
 
 	def __init__(self, s, unevaluated_atom=None, allow_wildcard=False, allow_repo=None,
 		_use=None, eapi=None, is_valid_flag=None):
@@ -1078,19 +1213,20 @@ class Atom(_atom_base):
 			# This is an efficiency assertion, to ensure that the Atom
 			# constructor is not called redundantly.
 			raise TypeError(_("Expected %s, got %s") % \
-				(_atom_base, type(s)))
+				(_unicode, type(s)))
 
-		if not isinstance(s, _atom_base):
-			# Avoid TypeError from _atom_base.__init__ with PyPy.
+		if not isinstance(s, _unicode):
+			# Avoid TypeError from _unicode.__init__ with PyPy.
 			s = _unicode_decode(s)
 
-		_atom_base.__init__(s)
+		_unicode.__init__(s)
 
-		atom_re = _get_atom_re(eapi)
+		eapi_attrs = _get_eapi_attrs(eapi)
+		atom_re = _get_atom_re(eapi_attrs)
 
 		if eapi is not None:
 			# Ignore allow_repo when eapi is specified.
-			allow_repo = eapi_has_repo_deps(eapi)
+			allow_repo = eapi_attrs.repo_deps
 		else:
 			if allow_repo is None:
 				allow_repo = True
@@ -1108,7 +1244,7 @@ class Atom(_atom_base):
 		extended_syntax = False
 		if m is None:
 			if allow_wildcard:
-				m = _get_atom_wildcard_re(eapi).match(s)
+				m = _get_atom_wildcard_re(eapi_attrs).match(s)
 				if m is None:
 					raise InvalidAtom(self)
 				op = None
@@ -1162,7 +1298,34 @@ class Atom(_atom_base):
 			self.__dict__['cpv'] = cpv
 			self.__dict__['version'] = None
 		self.__dict__['repo'] = repo
-		self.__dict__['slot'] = slot
+		if slot is None:
+			self.__dict__['slot'] = None
+			self.__dict__['slot_abi'] = None
+			self.__dict__['slot_abi_op'] = None
+		else:
+			slot_re = _get_slot_dep_re(eapi_attrs)
+			slot_match = slot_re.match(slot)
+			if slot_match is None:
+				raise InvalidAtom(self)
+			if eapi_attrs.slot_abi:
+				self.__dict__['slot'] = slot_match.group(1)
+				slot_abi =  slot_match.group(2)
+				if slot_abi is not None:
+					slot_abi = slot_abi.lstrip("/")
+				if slot_abi in ("*", "="):
+					self.__dict__['slot_abi'] = None
+					self.__dict__['slot_abi_op'] = slot_abi
+				else:
+					slot_abi_op = None
+					if slot_abi is not None and slot_abi[-1:] == "=":
+						slot_abi_op = slot_abi[-1:]
+						slot_abi = slot_abi[:-1]
+					self.__dict__['slot_abi'] = slot_abi
+					self.__dict__['slot_abi_op'] = slot_abi_op
+			else:
+				self.__dict__['slot'] = slot
+				self.__dict__['slot_abi'] = None
+				self.__dict__['slot_abi_op'] = None
 		self.__dict__['operator'] = op
 		self.__dict__['extended_syntax'] = extended_syntax
 
@@ -1173,7 +1336,7 @@ class Atom(_atom_base):
 			if _use is not None:
 				use = _use
 			else:
-				use = _use_dep(use_str[1:-1].split(","), eapi)
+				use = _use_dep(use_str[1:-1].split(","), eapi_attrs)
 			without_use = Atom(m.group('without_use'), allow_repo=allow_repo)
 		else:
 			use = None
@@ -1198,16 +1361,16 @@ class Atom(_atom_base):
 			if not isinstance(eapi, basestring):
 				raise TypeError('expected eapi argument of ' + \
 					'%s, got %s: %s' % (basestring, type(eapi), eapi,))
-			if self.slot and not eapi_has_slot_deps(eapi):
+			if self.slot and not eapi_attrs.slot_deps:
 				raise InvalidAtom(
 					_("Slot deps are not allowed in EAPI %s: '%s'") \
 					% (eapi, self), category='EAPI.incompatible')
 			if self.use:
-				if not eapi_has_use_deps(eapi):
+				if not eapi_attrs.use_deps:
 					raise InvalidAtom(
 						_("Use deps are not allowed in EAPI %s: '%s'") \
 						% (eapi, self), category='EAPI.incompatible')
-				elif not eapi_has_use_dep_defaults(eapi) and \
+				elif not eapi_attrs.use_dep_defaults and \
 					(self.use.missing_enabled or self.use.missing_disabled):
 					raise InvalidAtom(
 						_("Use dep defaults are not allowed in EAPI %s: '%s'") \
@@ -1230,10 +1393,19 @@ class Atom(_atom_base):
 							"conditional '%s' in atom '%s' is not in IUSE") \
 							% (flag, conditional_str % flag, self)
 						raise InvalidAtom(msg, category='IUSE.missing')
-			if self.blocker and self.blocker.overlap.forbid and not eapi_has_strong_blocks(eapi):
+			if self.blocker and self.blocker.overlap.forbid and not eapi_attrs.strong_blocks:
 				raise InvalidAtom(
 					_("Strong blocks are not allowed in EAPI %s: '%s'") \
 						% (eapi, self), category='EAPI.incompatible')
+
+	@property
+	def slot_abi_built(self):
+		"""
+		Returns True if slot_abi_op == "=" and slot_abi is not None.
+		NOTE: foo/bar:2= is unbuilt and returns False, whereas foo/bar:2/2=
+			is built and returns True.
+		"""
+		return self.slot_abi_op == "=" and self.slot_abi is not None
 
 	@property
 	def without_repo(self):
@@ -1244,9 +1416,14 @@ class Atom(_atom_base):
 
 	@property
 	def without_slot(self):
-		if self.slot is None:
+		if self.slot is None and self.slot_abi_op is None:
 			return self
-		return Atom(self.replace(_slot_separator + self.slot, '', 1),
+		atom = remove_slot(self)
+		if self.repo is not None:
+			atom += _repo_separator + self.repo
+		if self.use is not None:
+			atom += _unicode(self.use)
+		return Atom(atom,
 			allow_repo=True, allow_wildcard=True)
 
 	def with_repo(self, repo):
@@ -1255,7 +1432,7 @@ class Atom(_atom_base):
 			atom += _slot_separator + self.slot
 		atom += _repo_separator + repo
 		if self.use is not None:
-			atom += str(self.use)
+			atom += _unicode(self.use)
 		return Atom(atom, allow_repo=True, allow_wildcard=True)
 
 	def with_slot(self, slot):
@@ -1263,7 +1440,7 @@ class Atom(_atom_base):
 		if self.repo is not None:
 			atom += _repo_separator + self.repo
 		if self.use is not None:
-			atom += str(self.use)
+			atom += _unicode(self.use)
 		return Atom(atom, allow_repo=True, allow_wildcard=True)
 
 	def __setattr__(self, name, value):
@@ -1315,7 +1492,7 @@ class Atom(_atom_base):
 		if self.slot:
 			atom += ":%s" % self.slot
 		use_dep = self.use.evaluate_conditionals(use)
-		atom += str(use_dep)
+		atom += _unicode(use_dep)
 		return Atom(atom, unevaluated_atom=self, allow_repo=(self.repo is not None), _use=use_dep)
 
 	def violated_conditionals(self, other_use, is_valid_flag, parent_use=None):
@@ -1337,7 +1514,7 @@ class Atom(_atom_base):
 		if self.slot:
 			atom += ":%s" % self.slot
 		use_dep = self.use.violated_conditionals(other_use, is_valid_flag, parent_use)
-		atom += str(use_dep)
+		atom += _unicode(use_dep)
 		return Atom(atom, unevaluated_atom=self, allow_repo=(self.repo is not None), _use=use_dep)
 
 	def _eval_qa_conditionals(self, use_mask, use_force):
@@ -1347,7 +1524,7 @@ class Atom(_atom_base):
 		if self.slot:
 			atom += ":%s" % self.slot
 		use_dep = self.use._eval_qa_conditionals(use_mask, use_force)
-		atom += str(use_dep)
+		atom += _unicode(use_dep)
 		return Atom(atom, unevaluated_atom=self, allow_repo=(self.repo is not None), _use=use_dep)
 
 	def __copy__(self):
@@ -1648,76 +1825,6 @@ def dep_getusedeps( depend ):
 		# Find next use flag
 		open_bracket = depend.find( '[', open_bracket+1 )
 	return tuple(use_list)
-
-# \w is [a-zA-Z0-9_]
-
-# 2.1.3 A slot name may contain any of the characters [A-Za-z0-9+_.-].
-# It must not begin with a hyphen or a dot.
-_slot_separator = ":"
-_slot = r'([\w+][\w+.-]*)'
-_slot_re = re.compile('^' + _slot + '$', re.VERBOSE)
-
-_use = r'\[.*\]'
-_op = r'([=~]|[><]=?)'
-_repo_separator = "::"
-_repo_name = r'[\w][\w-]*'
-_repo = r'(?:' + _repo_separator + '(' + _repo_name + ')' + ')?'
-
-_atom_re = {
-	"dots_disallowed_in_PN": re.compile('^(?P<without_use>(?:' +
-		'(?P<op>' + _op + _cpv['dots_disallowed_in_PN'] + ')|' +
-		'(?P<star>=' + _cpv['dots_disallowed_in_PN'] + r'\*)|' +
-		'(?P<simple>' + _cp['dots_disallowed_in_PN'] + '))' + 
-		'(' + _slot_separator + _slot + ')?' + _repo + ')(' + _use + ')?$', re.VERBOSE),
-	"dots_allowed_in_PN": re.compile('^(?P<without_use>(?:' +
-		'(?P<op>' + _op + _cpv['dots_allowed_in_PN'] + ')|' +
-		'(?P<star>=' + _cpv['dots_allowed_in_PN'] + r'\*)|' +
-		'(?P<simple>' + _cp['dots_allowed_in_PN'] + '))' + 
-		'(' + _slot_separator + _slot + ')?' + _repo + ')(' + _use + ')?$', re.VERBOSE),
-}
-
-def _get_atom_re(eapi):
-	if eapi is None or eapi_allows_dots_in_PN(eapi):
-		return _atom_re["dots_allowed_in_PN"]
-	else:
-		return _atom_re["dots_disallowed_in_PN"]
-	
-_extended_cat = r'[\w+*][\w+.*-]*'
-_extended_pkg = {
-	"dots_disallowed_in_PN": r'[\w+*][\w+*-]*?',
-	"dots_allowed_in_PN":    r'[\w+*][\w+.*-]*?',
-}
-
-_atom_wildcard_re = {
-	"dots_disallowed_in_PN": re.compile('(?P<simple>(' + _extended_cat + ')/(' + _extended_pkg['dots_disallowed_in_PN'] + '))(:(?P<slot>' + _slot + '))?(' + _repo_separator + '(?P<repo>' + _repo_name + '))?$'),
-	"dots_allowed_in_PN":    re.compile('(?P<simple>(' + _extended_cat + ')/(' + _extended_pkg['dots_allowed_in_PN'] + '))(:(?P<slot>' + _slot + '))?(' + _repo_separator + '(?P<repo>' + _repo_name + '))?$'),
-}
-
-def _get_atom_wildcard_re(eapi):
-	if eapi is None or eapi_allows_dots_in_PN(eapi):
-		return _atom_wildcard_re["dots_allowed_in_PN"]
-	else:
-		return _atom_wildcard_re["dots_disallowed_in_PN"]
-
-_useflag_re = {
-	"dots_disallowed_in_use_flags": re.compile(r'^[A-Za-z0-9][A-Za-z0-9+_@-]*$'),
-	"dots_allowed_in_use_flags":    re.compile(r'^[A-Za-z0-9][A-Za-z0-9+_@.-]*$'),
-}
-
-def _get_useflag_re(eapi):
-	"""
-	When eapi is None then validation is not as strict, since we want the
-	same to work for multiple EAPIs that may have slightly different rules.
-	@param eapi: The EAPI
-	@type eapi: String or None
-	@rtype: regular expression object
-	@return: A regular expression object that matches valid USE flags for the
-		given eapi.
-	"""
-	if eapi is None or eapi_allows_dots_in_use_flags(eapi):
-		return _useflag_re["dots_allowed_in_use_flags"]
-	else:
-		return _useflag_re["dots_disallowed_in_use_flags"]
 
 def isvalidatom(atom, allow_blockers=False, allow_wildcard=False, allow_repo=False):
 	"""
@@ -2053,16 +2160,33 @@ def match_from_list(mydep, candidate_list):
 	else:
 		raise KeyError(_("Unknown operator: %s") % mydep)
 
-	if slot is not None and not mydep.extended_syntax:
+	if mydep.slot is not None and not mydep.extended_syntax:
 		candidate_list = mylist
 		mylist = []
 		for x in candidate_list:
-			xslot = getattr(x, "slot", False)
-			if xslot is False:
+			x_pkg = None
+			try:
+				x.cpv
+			except AttributeError:
 				xslot = dep_getslot(x)
-			if xslot is not None and xslot != slot:
-				continue
-			mylist.append(x)
+				if xslot is not None:
+					try:
+						x_pkg = _pkg_str(remove_slot(x), slot=xslot)
+					except InvalidData:
+						continue
+			else:
+				x_pkg = x
+
+			if x_pkg is None:
+				mylist.append(x)
+			else:
+				try:
+					x_pkg.slot
+				except AttributeError:
+					mylist.append(x)
+				else:
+					if _match_slot(mydep, x_pkg):
+						mylist.append(x)
 
 	if mydep.unevaluated_atom.use:
 		candidate_list = mylist

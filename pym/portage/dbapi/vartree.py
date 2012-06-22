@@ -12,7 +12,8 @@ portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.dbapi.dep_expand:dep_expand',
 	'portage.dbapi._MergeProcess:MergeProcess',
 	'portage.dep:dep_getkey,isjustname,match_from_list,' + \
-	 	'use_reduce,_slot_re',
+	 	'use_reduce,_get_slot_re',
+	'portage.eapi:_get_eapi_attrs',
 	'portage.elog:collect_ebuild_messages,collect_messages,' + \
 		'elog_process,_merge_logentries',
 	'portage.locks:lockdir,unlockdir,lockfile,unlockfile',
@@ -687,7 +688,8 @@ class vardbapi(dbapi):
 					(mydir_mtime, cache_data)
 				self._aux_cache["modified"].add(mycpv)
 
-		if _slot_re.match(mydata['SLOT']) is None:
+		eapi_attrs = _get_eapi_attrs(mydata['EAPI'])
+		if _get_slot_re(eapi_attrs).match(mydata['SLOT']) is None:
 			# Empty or invalid slot triggers InvalidAtom exceptions when
 			# generating slot atoms for packages, so translate it to '0' here.
 			mydata['SLOT'] = _unicode_decode('0')
@@ -2179,8 +2181,9 @@ class dblink(object):
 							is_owned = True
 							break
 
-					if file_type == "sym" and is_owned and \
-						(islink and statobj and stat.S_ISDIR(statobj.st_mode)):
+					if is_owned and islink and \
+						file_type in ("sym", "dir") and \
+						statobj and stat.S_ISDIR(statobj.st_mode):
 						# A new instance of this package claims the file, so
 						# don't unmerge it. If the file is symlink to a
 						# directory and the unmerging package installed it as
@@ -2245,12 +2248,12 @@ class dblink(object):
 					show_unmerge("---", unmerge_desc["!mtime"], file_type, obj)
 					continue
 
-				if pkgfiles[objkey][0] == "dir":
+				if file_type == "dir" and not islink:
 					if lstatobj is None or not stat.S_ISDIR(lstatobj.st_mode):
 						show_unmerge("---", unmerge_desc["!dir"], file_type, obj)
 						continue
 					mydirs.add((obj, (lstatobj.st_dev, lstatobj.st_ino)))
-				elif pkgfiles[objkey][0] == "sym":
+				elif file_type == "sym" or (file_type == "dir" and islink):
 					if not islink:
 						show_unmerge("---", unmerge_desc["!sym"], file_type, obj)
 						continue
@@ -3463,6 +3466,11 @@ class dblink(object):
 		if not os.path.exists(self.dbcatdir):
 			ensure_dirs(self.dbcatdir)
 
+		try:
+			slot = self.mycpv.slot
+		except AttributeError:
+			# discard the sub-slot if necesssary
+			slot = _pkg_str(self.mycpv, slot=slot).slot
 		cp = self.mysplit[0]
 		slot_atom = "%s:%s" % (cp, slot)
 
