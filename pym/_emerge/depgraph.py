@@ -74,6 +74,9 @@ from _emerge.resolver.output import Display
 if sys.hexversion >= 0x3000000:
 	basestring = str
 	long = int
+	_unicode = str
+else:
+	_unicode = unicode
 
 class _scheduler_graph_config(object):
 	def __init__(self, trees, pkg_cache, graph, mergelist):
@@ -878,8 +881,12 @@ class depgraph(object):
 			not self._accept_blocker_conflicts():
 			remaining = []
 			for pkg in conflict_pkgs:
-				if not self._slot_conflict_backtrack_abi(pkg,
+				if self._slot_conflict_backtrack_abi(pkg,
 					slot_nodes, conflict_atoms):
+					backtrack_infos = self._dynamic_config._backtrack_infos
+					config = backtrack_infos.setdefault("config", {})
+					config.setdefault("slot_conflict_abi", set()).add(pkg)
+				else:
 					remaining.append(pkg)
 			if remaining:
 				self._slot_confict_backtrack(root, slot_atom,
@@ -984,7 +991,7 @@ class depgraph(object):
 			msg = []
 			msg.append("")
 			msg.append("")
-			msg.append("backtracking to due missed slot abi update:")
+			msg.append("backtracking due to missed slot abi update:")
 			msg.append("   child package:  %s" % child)
 			if new_child_slot is not None:
 				msg.append("   new child slot package:  %s" % new_child_slot)
@@ -1000,9 +1007,9 @@ class depgraph(object):
 		abi_masks = {}
 		if new_child_slot is None:
 			if not child.installed:
-				abi_masks.setdefault(child, {})["slot_abi_mask_built"] = dep
+				abi_masks.setdefault(child, {})["slot_abi_mask_built"] = None
 		if not dep.parent.installed:
-			abi_masks.setdefault(dep.parent, {})["slot_abi_mask_built"] = dep
+			abi_masks.setdefault(dep.parent, {})["slot_abi_mask_built"] = None
 		if abi_masks:
 			config.setdefault("slot_abi_mask_built", {}).update(abi_masks)
 
@@ -1028,6 +1035,16 @@ class depgraph(object):
 			to higher versions, since the logic required to detect when a
 			downgrade would be desirable is not implemented.
 		"""
+
+		if dep.child.installed and \
+			self._frozen_config.excluded_pkgs.findAtomForPackage(dep.child,
+			modified_use=self._pkg_use_enabled(dep.child)):
+			return None
+
+		if dep.parent.installed and \
+			self._frozen_config.excluded_pkgs.findAtomForPackage(dep.parent,
+			modified_use=self._pkg_use_enabled(dep.parent)):
+			return None
 
 		debug = "--debug" in self._frozen_config.myopts
 
@@ -1846,16 +1863,11 @@ class depgraph(object):
 				self._dynamic_config._slot_pkg_map[dep.child.root].get(
 				dep.child.slot_atom) is None:
 				myarg = None
-				if dep.root == self._frozen_config.target_root:
-					try:
-						myarg = next(self._iter_atoms_for_pkg(dep.child))
-					except StopIteration:
-						pass
-					except InvalidDependString:
-						if not dep.child.installed:
-							# This shouldn't happen since the package
-							# should have been masked.
-							raise
+				try:
+					myarg = next(self._iter_atoms_for_pkg(dep.child), None)
+				except InvalidDependString:
+					if not dep.child.installed:
+						raise
 
 				if myarg is None:
 					# Existing child selection may not be valid unless
@@ -1961,14 +1973,11 @@ class depgraph(object):
 					self._dynamic_config._slot_pkg_map[dep.child.root].get(
 					dep.child.slot_atom) is None:
 					myarg = None
-					if dep.root == self._frozen_config.target_root:
-						try:
-							myarg = next(self._iter_atoms_for_pkg(dep.child))
-						except StopIteration:
-							pass
-						except InvalidDependString:
-							if not dep.child.installed:
-								raise
+					try:
+						myarg = next(self._iter_atoms_for_pkg(dep.child), None)
+					except InvalidDependString:
+						if not dep.child.installed:
+							raise
 
 					if myarg is None:
 						ignored = True
@@ -2653,20 +2662,6 @@ class depgraph(object):
 			"slot conflict" in self._dynamic_config._backtrack_infos):
 			return False, myfavorites
 
-		digraph_nodes = self._dynamic_config.digraph.nodes
-
-		if any(x in digraph_nodes for x in
-			self._dynamic_config._needed_unstable_keywords) or \
-			any(x in digraph_nodes for x in
-			self._dynamic_config._needed_p_mask_changes) or \
-			any(x in digraph_nodes for x in
-			self._dynamic_config._needed_use_config_changes) or \
-			any(x in digraph_nodes for x in
-			self._dynamic_config._needed_license_changes) :
-			#We failed if the user needs to change the configuration
-			self._dynamic_config._success_without_autounmask = True
-			return False, myfavorites
-
 		if self._rebuild.trigger_rebuilds():
 			backtrack_infos = self._dynamic_config._backtrack_infos
 			config = backtrack_infos.setdefault("config", {})
@@ -2679,6 +2674,26 @@ class depgraph(object):
 			("slot_abi_mask_built" in self._dynamic_config._backtrack_infos["config"] or
 			"slot_abi_replace_installed" in self._dynamic_config._backtrack_infos["config"]) and \
 			self.need_restart():
+			return False, myfavorites
+
+		# Any failures except those due to autounmask *alone* should return
+		# before this point, since the success_without_autounmask flag that's
+		# set below is reserved for cases where there are *zero* other
+		# problems. For reference, see backtrack_depgraph, where it skips the
+		# get_best_run() call when success_without_autounmask is True.
+
+		digraph_nodes = self._dynamic_config.digraph.nodes
+
+		if any(x in digraph_nodes for x in
+			self._dynamic_config._needed_unstable_keywords) or \
+			any(x in digraph_nodes for x in
+			self._dynamic_config._needed_p_mask_changes) or \
+			any(x in digraph_nodes for x in
+			self._dynamic_config._needed_use_config_changes) or \
+			any(x in digraph_nodes for x in
+			self._dynamic_config._needed_license_changes) :
+			#We failed if the user needs to change the configuration
+			self._dynamic_config._success_without_autounmask = True
 			return False, myfavorites
 
 		# We're true here unless we are missing binaries.
@@ -3779,20 +3794,22 @@ class depgraph(object):
 		True if the user has not explicitly requested for this package
 		to be replaced (typically via an atom on the command line).
 		"""
-		if "selective" not in self._dynamic_config.myparams and \
-			pkg.root == self._frozen_config.target_root:
-			if self._frozen_config.excluded_pkgs.findAtomForPackage(pkg,
-				modified_use=self._pkg_use_enabled(pkg)):
-				return True
-			try:
-				next(self._iter_atoms_for_pkg(pkg))
-			except StopIteration:
-				pass
-			except portage.exception.InvalidDependString:
-				pass
-			else:
-				return False
-		return True
+		if self._frozen_config.excluded_pkgs.findAtomForPackage(pkg,
+			modified_use=self._pkg_use_enabled(pkg)):
+			return True
+
+		arg = False
+		try:
+			for arg, atom in self._iter_atoms_for_pkg(pkg):
+				if arg.force_reinstall:
+					return False
+		except InvalidDependString:
+			pass
+
+		if "selective" in self._dynamic_config.myparams:
+			return True
+
+		return not arg
 
 	class _AutounmaskLevel(object):
 		__slots__ = ("allow_use_changes", "allow_unstable_keywords", "allow_license_changes", \
@@ -4246,16 +4263,15 @@ class depgraph(object):
 					# above visibility checks are complete.
 
 					myarg = None
-					if root == self._frozen_config.target_root:
-						try:
-							for myarg, myarg_atom in self._iter_atoms_for_pkg(pkg):
-								if myarg.force_reinstall:
-									reinstall = True
-									break
-						except portage.exception.InvalidDependString:
-							if not installed:
-								# masked by corruption
-								continue
+					try:
+						for myarg, myarg_atom in self._iter_atoms_for_pkg(pkg):
+							if myarg.force_reinstall:
+								reinstall = True
+								break
+					except InvalidDependString:
+						if not installed:
+							# masked by corruption
+							continue
 					if not installed and myarg:
 						found_available_arg = True
 
@@ -4620,7 +4636,7 @@ class depgraph(object):
 		# scheduled for replacement. Also, toggle the "deep"
 		# parameter so that all dependencies are traversed and
 		# accounted for.
-		self._complete_mode = True
+		self._dynamic_config._complete_mode = True
 		self._select_atoms = self._select_atoms_from_graph
 		if "remove" in self._dynamic_config.myparams:
 			self._select_package = self._select_pkg_from_installed
@@ -6719,9 +6735,13 @@ class depgraph(object):
 		all_added.extend(added_favorites)
 		all_added.sort()
 		for a in all_added:
+			if a.startswith(SETPREFIX):
+				filename = "world_sets"
+			else:
+				filename = "world"
 			writemsg_stdout(
-				">>> Recording %s in \"world\" favorites file...\n" % \
-				colorize("INFORM", str(a)), noiselevel=-1)
+				">>> Recording %s in \"%s\" favorites file...\n" %
+				(colorize("INFORM", _unicode(a)), filename), noiselevel=-1)
 		if all_added:
 			world_set.update(all_added)
 
@@ -7100,13 +7120,8 @@ class _dep_check_composite_db(dbapi):
 		return ret[:]
 
 	def _visible(self, pkg):
-		if pkg.installed and "selective" not in self._depgraph._dynamic_config.myparams:
-			try:
-				arg = next(self._depgraph._iter_atoms_for_pkg(pkg))
-			except (StopIteration, portage.exception.InvalidDependString):
-				arg = None
-			if arg:
-				return False
+		if pkg.installed and not self._depgraph._want_installed_pkg(pkg):
+			return False
 		if pkg.installed and \
 			(pkg.masks or not self._depgraph._pkg_visibility_check(pkg)):
 			# Account for packages with masks (like KEYWORDS masks)
