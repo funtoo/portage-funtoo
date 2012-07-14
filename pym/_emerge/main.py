@@ -709,6 +709,12 @@ def parse_opts(tmpcmdline, silent=False):
 			"choices" : true_y_or_n
 		},
 
+		"--complete-graph-if-new-use": {
+			"help"    : "trigger --complete-graph behavior if USE or IUSE will change for an installed package",
+			"type"    : "choice",
+			"choices" : y_or_n
+		},
+
 		"--complete-graph-if-new-ver": {
 			"help"    : "trigger --complete-graph behavior if an installed package version will change (upgrade or downgrade)",
 			"type"    : "choice",
@@ -1500,6 +1506,12 @@ def expand_set_arguments(myfiles, myaction, root_config):
 					writemsg_level(("emerge: the given set '%s' " + \
 						"contains a non-existent set named '%s'.\n") % \
 						(s, e), level=logging.ERROR, noiselevel=-1)
+					if s in ('world', 'selected') and \
+						SETPREFIX + e.value in sets['selected']:
+						writemsg_level(("Use `emerge --deselect %s%s` to "
+							"remove this set from world_sets.\n") %
+							(SETPREFIX, e,), level=logging.ERROR,
+							noiselevel=-1)
 					return (None, 1)
 				if myaction in unmerge_actions and \
 						not sets[s].supportsOperation("unmerge"):

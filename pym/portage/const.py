@@ -90,7 +90,8 @@ SUPPORTED_FEATURES       = frozenset([
                            "ccache", "chflags", "clean-logs",
                            "collision-protect", "compress-build-logs", "compressdebug",
                            "config-protect-if-modified",
-                           "digest", "distcc", "distcc-pump", "distlocks", "ebuild-locks", "fakeroot",
+                           "digest", "distcc", "distcc-pump", "distlocks",
+                           "downgrade-backup", "ebuild-locks", "fakeroot",
                            "fail-clean", "force-mirror", "force-prefix", "getbinpkg",
                            "installsources", "keeptemp", "keepwork", "fixlafiles", "fixpackages", "localpatch", "lmirror",
                            "metadata-transfer", "mirror", "multilib-strict", "news",
@@ -103,6 +104,7 @@ SUPPORTED_FEATURES       = frozenset([
                            "sign", "skiprocheck", "split-elog", "split-log", "splitdebug",
                            "strict", "stricter", "suidctl", "test", "test-fail-continue",
                            "unknown-features-filter", "unknown-features-warn",
+                           "unmerge-backup",
                            "unmerge-logs", "unmerge-orphans", "userfetch", "userpriv",
                            "usersandbox", "usersync", "webrsync-gpg", "xattr", "mini-manifest"])
 
@@ -112,13 +114,15 @@ HASHING_BLOCKSIZE        = 32768
 MANIFEST1_HASH_FUNCTIONS = ("MD5", "SHA256", "RMD160")
 MANIFEST1_REQUIRED_HASH  = "MD5"
 
-# Future events:
+# Past events:
 #
-# After WHIRLPOOL is supported in stable portage:
-# - Add SHA256 and WHIRLPOOL to MANIFEST2_HASH_DEFAULTS.
-# - Remove SHA1 and RMD160 from MANIFEST2_HASH_*.
+# 20120704 - After WHIRLPOOL is supported in stable portage:
 # - Set manifest-hashes in gentoo-x86/metadata/layout.conf as follows:
 #     manifest-hashes = SHA256 SHA512 WHIRLPOOL
+# - Add SHA512 and WHIRLPOOL to MANIFEST2_HASH_DEFAULTS.
+# - Remove SHA1 and RMD160 from MANIFEST2_HASH_*.
+#
+# Future events:
 #
 # After WHIRLPOOL is supported in stable portage for at least 1 year:
 # - Change MANIFEST2_REQUIRED_HASH to WHIRLPOOL.
@@ -136,8 +140,8 @@ MANIFEST1_REQUIRED_HASH  = "MD5"
 # After layout.conf settings correspond to defaults in stable portage:
 # - Remove redundant settings from gentoo-x86/metadata/layout.conf.
 
-MANIFEST2_HASH_FUNCTIONS = ("RMD160", "SHA1", "SHA256", "SHA512", "WHIRLPOOL")
-MANIFEST2_HASH_DEFAULTS = frozenset(["SHA1", "SHA256", "RMD160"])
+MANIFEST2_HASH_FUNCTIONS = ("SHA256", "SHA512", "WHIRLPOOL")
+MANIFEST2_HASH_DEFAULTS = frozenset(["SHA256", "SHA512", "WHIRLPOOL"])
 MANIFEST2_REQUIRED_HASH  = "SHA256"
 
 MANIFEST2_IDENTIFIERS    = ("AUX", "MISC", "DIST", "EBUILD")
@@ -171,7 +175,7 @@ _ENABLE_INHERIT_CHECK   = True
 # The definitions above will differ between branches, so it's useful to have
 # common lines of diff context here in order to avoid merge conflicts.
 
-if not _ENABLE_PRESERVE_LIBS:
+if _ENABLE_PRESERVE_LIBS:
 	SUPPORTED_FEATURES = set(SUPPORTED_FEATURES)
-	SUPPORTED_FEATURES.remove("preserve-libs")
+	SUPPORTED_FEATURES.add("preserve-libs")
 	SUPPORTED_FEATURES = frozenset(SUPPORTED_FEATURES)

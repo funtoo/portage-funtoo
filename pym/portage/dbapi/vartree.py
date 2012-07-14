@@ -21,6 +21,7 @@ portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.package.ebuild.doebuild:doebuild_environment,' + \
 		'_merge_unicode_error', '_spawn_phase',
 	'portage.package.ebuild.prepare_build_dirs:prepare_build_dirs',
+	'portage.package.ebuild._ipc.QueryCommand:QueryCommand',
 	'portage.update:fixdbentries',
 	'portage.util:apply_secpass_permissions,ConfigProtect,ensure_dirs,' + \
 		'writemsg,writemsg_level,write_atomic,atomic_ofstream,writedict,' + \
@@ -62,6 +63,7 @@ from _emerge.EbuildPhase import EbuildPhase
 from _emerge.emergelog import emergelog
 from _emerge.PollScheduler import PollScheduler
 from _emerge.MiscFunctionsProcess import MiscFunctionsProcess
+from _emerge.SpawnProcess import SpawnProcess
 
 import errno
 import fnmatch
@@ -645,7 +647,8 @@ class vardbapi(dbapi):
 			if e.errno != errno.ENOENT:
 				raise
 			raise KeyError(mycpv)
-		mydir_mtime = mydir_stat[stat.ST_MTIME]
+		# Use float mtime when available.
+		mydir_mtime = mydir_stat.st_mtime
 		pkg_data = self._aux_cache["packages"].get(mycpv)
 		pull_me = cache_these.union(wants)
 		mydata = {"_mtime_" : mydir_mtime}
@@ -658,13 +661,18 @@ class vardbapi(dbapi):
 				pkg_data = None
 			else:
 				cache_mtime, metadata = pkg_data
-				if not isinstance(cache_mtime, (long, int)) or \
+				if not isinstance(cache_mtime, (float, long, int)) or \
 					not isinstance(metadata, dict):
 					pkg_data = None
 
 		if pkg_data:
 			cache_mtime, metadata = pkg_data
-			cache_valid = cache_mtime == mydir_mtime
+			if isinstance(cache_mtime, float):
+				cache_valid = cache_mtime == mydir_stat.st_mtime
+			else:
+				# Cache may contain integer mtime.
+				cache_valid = cache_mtime == mydir_stat[stat.ST_MTIME]
+
 		if cache_valid:
 			# Migrate old metadata to unicode.
 			for k, v in metadata.items():
@@ -1777,6 +1785,11 @@ class dblink(object):
 		showMessage = self._display_merge
 		if self.vartree.dbapi._categories is not None:
 			self.vartree.dbapi._categories = None
+
+		# When others_in_slot is not None, the backup has already been
+		# handled by the caller.
+		caller_handles_backup = others_in_slot is not None
+
 		# When others_in_slot is supplied, the security check has already been
 		# done for this slot, so it shouldn't be repeated until the next
 		# replacement or unmerge operation.
@@ -1825,9 +1838,6 @@ class dblink(object):
 		except UnsupportedAPIException as e:
 			eapi_unsupported = e
 
-		self._prune_plib_registry(unmerge=True, needed=needed,
-			preserve_paths=preserve_paths)
-
 		builddir_lock = None
 		scheduler = self._scheduler
 		retval = os.EX_OK
@@ -1841,6 +1851,19 @@ class dblink(object):
 				builddir_lock.lock()
 				prepare_build_dirs(settings=self.settings, cleanup=True)
 				log_path = self.settings.get("PORTAGE_LOG_FILE")
+
+			# Do this before the following _prune_plib_registry call, since
+			# that removes preserved libraries from our CONTENTS, and we
+			# may want to backup those libraries first.
+			if not caller_handles_backup:
+				retval = self._pre_unmerge_backup(background)
+				if retval != os.EX_OK:
+					showMessage(_("!!! FAILED prerm: quickpkg: %s\n") % retval,
+						level=logging.ERROR, noiselevel=-1)
+					return retval
+
+			self._prune_plib_registry(unmerge=True, needed=needed,
+				preserve_paths=preserve_paths)
 
 			# Log the error after PORTAGE_LOG_FILE is initialized
 			# by prepare_build_dirs above.
@@ -3834,6 +3857,20 @@ class dblink(object):
 		self.delete()
 		ensure_dirs(self.dbtmpdir)
 
+		downgrade = False
+		if self._installed_instance is not None and \
+			vercmp(self.mycpv.version,
+			self._installed_instance.mycpv.version) < 0:
+			downgrade = True
+
+		if self._installed_instance is not None:
+			rval = self._pre_merge_backup(self._installed_instance, downgrade)
+			if rval != os.EX_OK:
+				showMessage(_("!!! FAILED preinst: ") +
+					"quickpkg: %s\n" % rval,
+					level=logging.ERROR, noiselevel=-1)
+				return rval
+
 		# run preinst script
 		showMessage(_(">>> Merging %(cpv)s to %(destroot)s\n") % \
 			{"cpv":self.mycpv, "destroot":destroot})
@@ -3867,19 +3904,14 @@ class dblink(object):
 		#if we have a file containing previously-merged config file md5sums, grab it.
 		self.vartree.dbapi._fs_lock()
 		try:
-			cfgfiledict = grabdict(self.vartree.dbapi._conf_mem_file)
-			if "NOCONFMEM" in self.settings:
-				cfgfiledict["IGNORE"]=1
-			else:
-				cfgfiledict["IGNORE"]=0
-
 			# Always behave like --noconfmem is enabled for downgrades
 			# so that people who don't know about this option are less
 			# likely to get confused when doing upgrade/downgrade cycles.
-			for other in others_in_slot:
-				if vercmp(self.mycpv.version, other.mycpv.version) < 0:
-					cfgfiledict["IGNORE"] = 1
-					break
+			cfgfiledict = grabdict(self.vartree.dbapi._conf_mem_file)
+			if "NOCONFMEM" in self.settings or downgrade:
+				cfgfiledict["IGNORE"]=1
+			else:
+				cfgfiledict["IGNORE"]=0
 
 			rval = self._merge_contents(srcroot, destroot, cfgfiledict)
 			if rval != os.EX_OK:
@@ -4682,6 +4714,66 @@ class dblink(object):
 	def isregular(self):
 		"Is this a regular package (does it have a CATEGORY file?  A dblink can be virtual *and* regular)"
 		return os.path.exists(os.path.join(self.dbdir, "CATEGORY"))
+
+	def _pre_merge_backup(self, backup_dblink, downgrade):
+
+		if ("unmerge-backup" in self.settings.features or
+			(downgrade and "downgrade-backup" in self.settings.features)):
+			return self._quickpkg_dblink(backup_dblink, False, None)
+
+		return os.EX_OK
+
+	def _pre_unmerge_backup(self, background):
+
+		if "unmerge-backup" in self.settings.features :
+			logfile = None
+			if self.settings.get("PORTAGE_BACKGROUND") != "subprocess":
+				logfile = self.settings.get("PORTAGE_LOG_FILE")
+			return self._quickpkg_dblink(self, background, logfile)
+
+		return os.EX_OK
+
+	def _quickpkg_dblink(self, backup_dblink, background, logfile):
+
+		trees = QueryCommand.get_db()[self.settings["EROOT"]]
+		bintree = trees["bintree"]
+		binpkg_path = bintree.getname(backup_dblink.mycpv)
+		if os.path.exists(binpkg_path) and \
+			catsplit(backup_dblink.mycpv)[1] not in bintree.invalids:
+			return os.EX_OK
+
+		self.lockdb()
+		try:
+
+			if not backup_dblink.exists():
+				# It got unmerged by a concurrent process.
+				return os.EX_OK
+
+			# Call quickpkg for support of QUICKPKG_DEFAULT_OPTS and stuff.
+			quickpkg_binary = os.path.join(self.settings["PORTAGE_BIN_PATH"],
+				"quickpkg")
+
+			# Let quickpkg inherit the global vartree config's env.
+			env = dict(self.vartree.settings.items())
+			env["__PORTAGE_INHERIT_VARDB_LOCK"] = "1"
+
+			pythonpath = [x for x in env.get('PYTHONPATH', '').split(":") if x]
+			if not pythonpath or \
+				not os.path.samefile(pythonpath[0], portage._pym_path):
+				pythonpath.insert(0, portage._pym_path)
+			env['PYTHONPATH'] = ":".join(pythonpath)
+
+			quickpkg_proc = SpawnProcess(
+				args=[portage._python_interpreter, quickpkg_binary,
+					"=%s" % (backup_dblink.mycpv,)],
+				background=background, env=env,
+				scheduler=self._scheduler, logfile=logfile)
+			quickpkg_proc.start()
+
+			return quickpkg_proc.wait()
+
+		finally:
+			self.unlockdb()
 
 def merge(mycat, mypkg, pkgloc, infloc,
 	myroot=None, settings=None, myebuild=None,
