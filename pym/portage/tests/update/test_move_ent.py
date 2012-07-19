@@ -10,24 +10,15 @@ from portage.tests.resolver.ResolverPlayground import ResolverPlayground
 from portage.util import ensure_dirs
 from portage._global_updates import _do_global_updates
 
-class MoveSlotEntTestCase(TestCase):
+class MoveEntTestCase(TestCase):
 
-	def testMoveSlotEnt(self):
+	def testMoveEnt(self):
 
 		ebuilds = {
 
 			"dev-libs/A-2::dont_apply_updates" : {
-				"EAPI": "4-slot-abi",
-				"SLOT": "0/2.30",
-			},
-
-			"dev-libs/B-2::dont_apply_updates" : {
-				"SLOT": "0",
-			},
-
-			"dev-libs/C-2.1::dont_apply_updates" : {
-				"EAPI": "4-slot-abi",
-				"SLOT": "0/2.1",
+				"EAPI": "4",
+				"SLOT": "2",
 			},
 
 		}
@@ -35,17 +26,12 @@ class MoveSlotEntTestCase(TestCase):
 		installed = {
 
 			"dev-libs/A-1::test_repo" : {
-				"EAPI": "4-slot-abi",
-				"SLOT": "0/2.30",
+				"EAPI": "4",
 			},
 
-			"dev-libs/B-1::test_repo" : {
-				"SLOT": "0",
-			},
-
-			"dev-libs/C-1::test_repo" : {
-				"EAPI": "4-slot-abi",
-				"SLOT": "0/1",
+			"dev-libs/A-2::dont_apply_updates" : {
+				"EAPI": "4",
+				"SLOT": "2",
 			},
 
 		}
@@ -53,39 +39,18 @@ class MoveSlotEntTestCase(TestCase):
 		binpkgs = {
 
 			"dev-libs/A-1::test_repo" : {
-				"EAPI": "4-slot-abi",
-				"SLOT": "0/2.30",
+				"EAPI": "4",
 			},
 
 			"dev-libs/A-2::dont_apply_updates" : {
-				"EAPI": "4-slot-abi",
-				"SLOT": "0/2.30",
-			},
-
-			"dev-libs/B-1::test_repo" : {
-				"SLOT": "0",
-			},
-
-			"dev-libs/B-2::dont_apply_updates" : {
-				"SLOT": "0",
-			},
-
-			"dev-libs/C-1::test_repo" : {
-				"EAPI": "4-slot-abi",
-				"SLOT": "0/1",
-			},
-
-			"dev-libs/C-2.1::dont_apply_updates" : {
-				"EAPI": "4-slot-abi",
-				"SLOT": "0/2.1",
+				"EAPI": "4",
+				"SLOT": "2",
 			},
 
 		}
 
 		updates = textwrap.dedent("""
-			slotmove dev-libs/A 0 2
-			slotmove dev-libs/B 0 1
-			slotmove dev-libs/C 0 1
+			move dev-libs/A dev-libs/A-moved
 		""")
 
 		playground = ResolverPlayground(binpkgs=binpkgs,
@@ -124,31 +89,21 @@ class MoveSlotEntTestCase(TestCase):
 			# of 1 second.
 			vardb._clear_cache()
 
-			# 0/2.30 -> 2/2.30
-			self.assertEqual("2/2.30",
-				vardb.aux_get("dev-libs/A-1", ["SLOT"])[0])
-			self.assertEqual("2/2.30",
-				bindb.aux_get("dev-libs/A-1", ["SLOT"])[0])
-
-			# 0 -> 1
-			self.assertEqual("1",
-				vardb.aux_get("dev-libs/B-1", ["SLOT"])[0])
-			self.assertEqual("1",
-				bindb.aux_get("dev-libs/B-1", ["SLOT"])[0])
-
-			# 0/1 -> 1 (equivalent to 1/1)
-			self.assertEqual("1",
-				vardb.aux_get("dev-libs/C-1", ["SLOT"])[0])
-			self.assertEqual("1",
-				bindb.aux_get("dev-libs/C-1", ["SLOT"])[0])
+			# A -> A-moved
+			self.assertRaises(KeyError,
+				vardb.aux_get, "dev-libs/A-1", ["EAPI"])
+			vardb.aux_get("dev-libs/A-moved-1", ["EAPI"])
+			self.assertRaises(KeyError,
+				bindb.aux_get, "dev-libs/A-1", ["EAPI"])
+			bindb.aux_get("dev-libs/A-moved-1", ["EAPI"])
 
 			# dont_apply_updates
-			self.assertEqual("0/2.30",
-				bindb.aux_get("dev-libs/A-2", ["SLOT"])[0])
-			self.assertEqual("0",
-				bindb.aux_get("dev-libs/B-2", ["SLOT"])[0])
-			self.assertEqual("0/2.1",
-				bindb.aux_get("dev-libs/C-2.1", ["SLOT"])[0])
+			self.assertRaises(KeyError,
+				vardb.aux_get, "dev-libs/A-moved-2", ["EAPI"])
+			vardb.aux_get("dev-libs/A-2", ["EAPI"])
+			self.assertRaises(KeyError,
+				bindb.aux_get, "dev-libs/A-moved-2", ["EAPI"])
+			bindb.aux_get("dev-libs/A-2", ["EAPI"])
 
 		finally:
 			playground.cleanup()

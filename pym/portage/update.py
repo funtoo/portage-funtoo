@@ -18,7 +18,7 @@ portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.util:ConfigProtect,new_protect_filename,' + \
 		'normalize_path,write_atomic,writemsg',
 	'portage.util.listdir:_ignorecvs_dirs',
-	'portage.versions:ververify'
+	'portage.versions:catsplit,ververify'
 )
 
 from portage.const import USER_CONFIG_PATH
@@ -29,14 +29,21 @@ from portage.localization import _
 
 if sys.hexversion >= 0x3000000:
 	long = int
+	_unicode = str
+else:
+	_unicode = unicode
 
 ignored_dbentries = ("CONTENTS", "environment.bz2")
 
 def update_dbentry(update_cmd, mycontent, eapi=None):
+
 	if update_cmd[0] == "move":
-		old_value = str(update_cmd[1])
-		if old_value in mycontent:
-			new_value = str(update_cmd[2])
+		old_value = _unicode(update_cmd[1])
+		new_value = _unicode(update_cmd[2])
+
+		# Use isvalidatom() to check if this move is valid for the
+		# EAPI (characters allowed in package names may vary).
+		if old_value in mycontent and isvalidatom(new_value, eapi=eapi):
 			old_value = re.escape(old_value);
 			mycontent = re.sub(old_value+"(:|$|\\s)", new_value+"\\1", mycontent)
 			def myreplace(matchobj):
@@ -58,7 +65,7 @@ def update_dbentry(update_cmd, mycontent, eapi=None):
 			mycontent = re.sub(old_value+"($|\\s)", new_value+"\\1", mycontent)
 	return mycontent
 
-def update_dbentries(update_iter, mydata):
+def update_dbentries(update_iter, mydata, eapi=None):
 	"""Performs update commands and returns a
 	dict containing only the updated items."""
 	updated_items = {}
@@ -72,7 +79,7 @@ def update_dbentries(update_iter, mydata):
 			is_encoded = mycontent is not orig_content
 			orig_content = mycontent
 			for update_cmd in update_iter:
-				mycontent = update_dbentry(update_cmd, mycontent)
+				mycontent = update_dbentry(update_cmd, mycontent, eapi=eapi)
 			if mycontent != orig_content:
 				if is_encoded:
 					mycontent = _unicode_encode(mycontent,
@@ -81,7 +88,7 @@ def update_dbentries(update_iter, mydata):
 				updated_items[k] = mycontent
 	return updated_items
 
-def fixdbentries(update_iter, dbdir):
+def fixdbentries(update_iter, dbdir, eapi=None):
 	"""Performs update commands which result in search and replace operations
 	for each of the files in dbdir (excluding CONTENTS and environment.bz2).
 	Returns True when actual modifications are necessary and False otherwise."""
@@ -93,7 +100,7 @@ def fixdbentries(update_iter, dbdir):
 			mode='r', encoding=_encodings['repo.content'],
 			errors='replace') as f:
 			mydata[myfile] = f.read()
-	updated_items = update_dbentries(update_iter, mydata)
+	updated_items = update_dbentries(update_iter, mydata, eapi=eapi)
 	for myfile, mycontent in updated_items.items():
 		file_path = os.path.join(dbdir, myfile)
 		write_atomic(file_path, mycontent, encoding=_encodings['repo.content'])
@@ -205,9 +212,7 @@ def parse_updates(mycontent):
 					invalid_slot = True
 					break
 				if "/" in slot:
-					# Don't support EAPI 4-slot-abi style SLOT in slotmove
-					# yet, since the relevant code isn't aware of EAPI yet
-					# (see bug #426476).
+					# EAPI 4-slot-abi style SLOT is currently not supported.
 					invalid_slot = True
 					break
 
