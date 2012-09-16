@@ -354,7 +354,6 @@ __has_phase_defined_up_to() {
 	return 1
 }
 
-<<<<<<< HEAD
 localpatch() {
 	local patches_overlay_dir patches patch locksufix
 
