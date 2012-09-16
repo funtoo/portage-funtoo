@@ -95,7 +95,7 @@ SUPPORTED_FEATURES       = frozenset([
                            "digest", "distcc", "distcc-pump", "distlocks",
                            "downgrade-backup", "ebuild-locks", "fakeroot",
                            "fail-clean", "force-mirror", "force-prefix", "getbinpkg",
-                           "installsources", "keeptemp", "keepwork", "fixlafiles", "fixpackages", "localpatch", "lmirror",
+                           "installsources", "keeptemp", "keepwork", "fixlafiles", "fixpackages", "lmirror",
                            "metadata-transfer", "mirror", "multilib-strict", "news",
                            "noauto", "noclean", "nodoc", "noinfo", "noman",
                            "nostrip", "notitles", "parallel-fetch", "parallel-install",
