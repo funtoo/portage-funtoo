@@ -350,14 +350,8 @@ def dep_zapdeps(unreduced, reduced, myroot, use_binaries=0, trees=None):
 			avail_pkg = mydbapi.match(atom.without_use)
 			if avail_pkg:
 				avail_pkg = avail_pkg[-1] # highest (ascending order)
-				try:
-					slot = avail_pkg.slot
-				except AttributeError:
-					eapi, slot, repo = mydbapi.aux_get(avail_pkg,
-						["EAPI", "SLOT", "repository"])
-					avail_pkg = _pkg_str(avail_pkg, eapi=eapi,
-						slot=slot, repo=repo)
-				avail_slot = Atom("%s:%s" % (atom.cp, slot))
+				avail_pkg = mydbapi._pkg_str(avail_pkg, atom.repo)
+				avail_slot = Atom("%s:%s" % (atom.cp, avail_pkg.slot))
 			if not avail_pkg:
 				all_available = False
 				all_use_satisfied = False
@@ -372,13 +366,8 @@ def dep_zapdeps(unreduced, reduced, myroot, use_binaries=0, trees=None):
 					avail_pkg_use = avail_pkg_use[-1]
 					if avail_pkg_use != avail_pkg:
 						avail_pkg = avail_pkg_use
-						try:
-							slot = avail_pkg.slot
-						except AttributeError:
-							eapi, slot, repo = mydbapi.aux_get(avail_pkg,
-								["EAPI", "SLOT", "repository"])
-							avail_pkg = _pkg_str(avail_pkg,
-								eapi=eapi, slot=slot, repo=repo)
+					avail_pkg = mydbapi._pkg_str(avail_pkg, atom.repo)
+					avail_slot = Atom("%s:%s" % (atom.cp, avail_pkg.slot))
 
 			slot_map[avail_slot] = avail_pkg
 			highest_cpv = cp_map.get(avail_pkg.cp)
@@ -575,18 +564,15 @@ def dep_check(depstring, mydbapi, mysettings, use="yes", mode=None, myuse=None,
 
 	mymasks = set()
 	useforce = set()
-	useforce.add(mysettings["ARCH"])
 	if use == "all":
-		# This masking/forcing is only for repoman.  In other cases, relevant
-		# masking/forcing should have already been applied via
-		# config.regenerate().  Also, binary or installed packages may have
-		# been built with flags that are now masked, and it would be
-		# inconsistent to mask them now.  Additionally, myuse may consist of
-		# flags from a parent package that is being merged to a $ROOT that is
-		# different from the one that mysettings represents.
+		# This is only for repoman, in order to constrain the use_reduce
+		# matchall behavior to account for profile use.mask/force. The
+		# ARCH/archlist code here may be redundant, since the profile
+		# really should be handling ARCH masking/forcing itself.
 		mymasks.update(mysettings.usemask)
 		mymasks.update(mysettings.archlist())
 		mymasks.discard(mysettings["ARCH"])
+		useforce.add(mysettings["ARCH"])
 		useforce.update(mysettings.useforce)
 		useforce.difference_update(mymasks)
 

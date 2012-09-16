@@ -36,7 +36,7 @@ EBUILD_SH_ENV_FILE       = USER_CONFIG_PATH + "/bashrc"
 EBUILD_SH_ENV_DIR        = USER_CONFIG_PATH + "/env"
 CUSTOM_MIRRORS_FILE      = USER_CONFIG_PATH + "/mirrors"
 COLOR_MAP_FILE           = USER_CONFIG_PATH + "/color.map"
-PROFILE_PATH             = "etc/make.profile"
+PROFILE_PATH             = USER_CONFIG_PATH + "/make.profile"
 MAKE_DEFAULTS_FILE       = PROFILE_PATH + "/make.defaults"  # FIXME: not used
 DEPRECATED_PROFILE_FILE  = PROFILE_PATH + "/deprecated"
 
@@ -79,8 +79,10 @@ OS_HEADERS_PACKAGE_ATOM  = "virtual/os-headers"
 INCREMENTALS             = ("USE", "USE_EXPAND", "USE_EXPAND_HIDDEN",
                            "FEATURES", "ACCEPT_KEYWORDS",
                            "CONFIG_PROTECT_MASK", "CONFIG_PROTECT",
+                           "IUSE_IMPLICIT",
                            "PRELINK_PATH", "PRELINK_PATH_MASK",
-                           "PROFILE_ONLY_VARIABLES")
+                           "PROFILE_ONLY_VARIABLES",
+                           "USE_EXPAND_IMPLICIT", "USE_EXPAND_UNPREFIXED")
 EBUILD_PHASES            = ("pretend", "setup", "unpack", "prepare", "configure",
                            "compile", "test", "install",
                            "package", "preinst", "postinst","prerm", "postrm",
@@ -89,7 +91,7 @@ SUPPORTED_FEATURES       = frozenset([
                            "assume-digests", "binpkg-logs", "buildpkg", "buildsyspkg", "candy",
                            "ccache", "chflags", "clean-logs",
                            "collision-protect", "compress-build-logs", "compressdebug",
-                           "config-protect-if-modified",
+                           "compress-index", "config-protect-if-modified",
                            "digest", "distcc", "distcc-pump", "distlocks",
                            "downgrade-backup", "ebuild-locks", "fakeroot",
                            "fail-clean", "force-mirror", "force-prefix", "getbinpkg",

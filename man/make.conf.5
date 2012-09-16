@@ -1,4 +1,4 @@
-.TH "MAKE.CONF" "5" "Jul 2012" "Portage VERSION" "Portage"
+.TH "MAKE.CONF" "5" "Sep 2012" "Portage VERSION" "Portage"
 .SH "NAME"
 make.conf \- custom settings for Portage
 .SH "SYNOPSIS"
@@ -13,7 +13,7 @@ Portage then checks the make.conf files. Both /etc/make.conf and
 If no setting is found in the make.conf files, Portage checks
 make.globals. If no
 setting is found there, the profile's default setting is grabbed
-from /etc/make.profile/make.defaults. Please note that all user
+from /etc/portage/make.profile/make.defaults. Please note that all user
 settings should be made in the environment or in the make.conf
 files, which are intended to be customized by the user.
 .br
@@ -268,6 +268,13 @@ space.  Make sure you have built both binutils and gdb with USE=zlib
 support for this to work.  See \fBsplitdebug\fR for general split debug
 information (upon which this feature depends).
 .TP
+.B compress\-index
+If set then a compressed copy of 'Packages' index file will be written.
+This feature is intended for Gentoo binhosts using certain webservers
+(such as, but not limited to, Nginx with gzip_static module) to avoid
+redundant on\-the\-fly compression.  The resulting file will be called
+'Packages.gz' and its modification time will match that of 'Packages'.
+.TP
 .B config\-protect\-if\-modified
 This causes the \fBCONFIG_PROTECT\fR behavior to be skipped for files
 that have not been modified since they were installed. This feature is
@@ -413,11 +420,6 @@ Use finer\-grained locks when installing packages, allowing for greater
 parallelization. For additional parallelization, disable
 \fIebuild\-locks\fR.
 .TP
-.B parse\-eapi\-ebuild\-head
-Parse \fBEAPI\fR from the head of the ebuild as specified in PMS section
-7.3.1, and treat non\-conformant ebuilds as invalid. This feature is
-enabled by default, and will soon become enabled unconditionally.
-.TP
 .B prelink\-checksums
 If \fBprelink\fR(8) is installed then use it to undo any prelinks on files
 before computing checksums for merge and unmerge. This feature is
@@ -512,7 +514,10 @@ bits from any file that is not listed in \fI/etc/portage/suidctl.conf\fR.
 Run package\-specific tests during each merge to help make sure 
 the package compiled properly.  See \fItest\fR in \fBebuild\fR(1) 
 and \fIsrc_test()\fR in \fBebuild\fR(5). This feature implies the "test"
-\fBUSE\fR flag.
+\fBUSE\fR flag if it is a member of \fBIUSE\fR, either explicitly or
+implicitly (see \fBebuild\fR(5) for more information about \fBIUSE\fR).
+The "test" \fBUSE\fR flag is also automatically disabled when the
+"test" feature is disabled.
 .TP
 .B test\-fail\-continue
 If "test" is enabled \fBFEATURES\fR and the test phase of an ebuild fails,
@@ -679,6 +684,23 @@ for bzip2 compression operations. \fBPORTAGE_BZIP2_COMMAND\fR will also be
 called for extraction operation, with -d appended, unless the
 \fBPORTAGE_BUNZIP2_COMMAND\fR variable is set.
 .TP
+\fBPORTAGE_CHECKSUM_FILTER\fR = \fI[space delimited list of hash names]\fR
+This variable may be used to filter the hash functions that are used to
+verify integrity of files. Hash function names are case\-insensitive, and
+the \fI*\fR and \fI\-*\fR wildcard tokens are supported.
+.br
+Defaults to the value of *.
+.br
+.I Examples:
+.nf
+# Use all available hash functions
+PORTAGE_CHECKSUM_FILTER="*"
+# Use any function except whirlpool
+PORTAGE_CHECKSUM_FILTER="* \-whirlpool"
+# Only use sha256
+PORTAGE_CHECKSUM_FILTER="\-* sha256"
+.fi
+.TP
 \fBPORTAGE_COMPRESS\fR = \fI"bzip2"\fR
 This variable contains the command used to compress documentation during the
 install phase.
@@ -781,6 +803,9 @@ Defaults to 30.
 Defines the location of the temporary build directories.
 .br
 Defaults to /var/tmp.
+
+This should not be set to point anywhere under the directory tree
+specified by \fBPORTDIR\fR (/usr/portage by default).
 .TP
 \fBPORTAGE_USERNAME\fR = \fI[user]\fR
 Defines the username to use when executing in userpriv/etc... modes (i.e.
@@ -793,10 +818,19 @@ This variable controls permissions for \fIWORKDIR\fR (see \fBebuild\fR(5)).
 .TP
 \fBPORTDIR\fR = \fI[path]\fR
 Defines the location of the Portage tree. This is the repository for all
-profile information as well as all ebuilds. If you change this, you must update
-your /etc/make.profile symlink accordingly.
+profile information as well as all ebuilds.
 .br
 Defaults to /usr/portage. 
+.br
+\fB***Warning***\fR
+.br
+Data stored inside \fBPORTDIR\fR is in peril of being overwritten or deleted by
+the emerge \-\-sync command. The default value of
+\fBPORTAGE_RSYNC_OPTS\fR will protect the default locations of
+\fBDISTDIR\fR and \fBPKGDIR\fR, but users are warned that any other locations
+inside \fBPORTDIR\fR are not necessarily safe for data storage.  You should not 
+put other data (such as overlays) in your \fBPORTDIR\fB.  Portage will walk 
+directory structures and may arbitrarily add invalid categories as packages.
 .TP
 \fBPORTDIR_OVERLAY\fR = \fI"[path] [different\-path] [etc...]"\fR
 Defines the directories in which user made ebuilds may be stored and not 

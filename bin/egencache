@@ -28,13 +28,10 @@ import time
 import textwrap
 import re
 
-try:
-	import portage
-except ImportError:
-	from os import path as osp
-	sys.path.insert(0, osp.join(osp.dirname(osp.dirname(osp.realpath(__file__))), "pym"))
-	import portage
-
+from os import path as osp
+pym_path = osp.join(osp.dirname(osp.dirname(osp.realpath(__file__))), "pym")
+sys.path.insert(0, pym_path)
+import portage
 from portage import os, _encodings, _unicode_encode, _unicode_decode
 from _emerge.MetadataRegen import MetadataRegen
 from portage.cache.cache_errors import CacheError, StatCollision
@@ -102,7 +99,7 @@ def parse_args(args):
 	update.add_option("--cache-dir",
 		help="location of the metadata cache",
 		dest="cache_dir")
-	update.add_option("--jobs",
+	update.add_option("-j", "--jobs",
 		action="store",
 		help="max ebuild processes to spawn")
 	update.add_option("--load-average",
@@ -215,9 +212,11 @@ class GenCache(object):
 		else:
 			self._cp_set = None
 			self._cp_missing = set()
+		write_auxdb = "metadata-transfer" in portdb.settings.features
 		self._regen = MetadataRegen(portdb, cp_iter=cp_iter,
 			consumer=self._metadata_callback,
-			max_jobs=max_jobs, max_load=max_load)
+			max_jobs=max_jobs, max_load=max_load,
+			write_auxdb=write_auxdb)
 		self.returncode = os.EX_OK
 		conf = portdb.repositories.get_repo_for_location(tree)
 		self._trg_caches = tuple(conf.iter_pregenerated_caches(
@@ -544,7 +543,8 @@ class GenUseLocalDesc(object):
 		for cp in self._portdb.cp_all():
 			metadata_path = os.path.join(repo_path, cp, 'metadata.xml')
 			try:
-				metadata = ElementTree.parse(metadata_path,
+				metadata = ElementTree.parse(_unicode_encode(metadata_path,
+					encoding=_encodings['fs'], errors='strict'),
 					parser=ElementTree.XMLParser(
 					target=_MetadataTreeBuilder()))
 			except IOError:
@@ -870,12 +870,35 @@ def egencache_main(args):
 		parser.error('No action specified')
 		return 1
 
+	repo_path = None
+	if options.repo is not None:
+		repo_path = settings.repositories.treemap.get(options.repo)
+		if repo_path is None:
+			parser.error("Unable to locate repository named '%s'" % \
+				(options.repo,))
+			return 1
+	else:
+		repo_path = settings.repositories.mainRepoLocation()
+		if not repo_path:
+			parser.error("PORTDIR is undefined")
+			return 1
+
 	if options.update and 'metadata-transfer' not in settings.features:
-		settings.features.add('metadata-transfer')
+		# Forcibly enable metadata-transfer if portdbapi has a pregenerated
+		# cache that does not support eclass validation.
+		repo_config = settings.repositories.get_repo_for_location(repo_path)
+		cache = repo_config.get_pregenerated_cache(
+			portage.dbapi.dbapi._known_keys, readonly=True)
+		if cache is not None and not cache.complete_eclass_entries:
+			settings.features.add('metadata-transfer')
+		cache = None
 
 	settings.lock()
 
 	portdb = portage.portdbapi(mysettings=settings)
+
+	# Limit ebuilds to the specified repo.
+	portdb.porttrees = [repo_path]
 
 	if options.update:
 		if options.cache_dir is not None:
@@ -891,18 +914,6 @@ def egencache_main(args):
 					"write access denied: %s\n" % (settings["PORTAGE_DEPCACHEDIR"],),
 					level=logging.ERROR, noiselevel=-1)
 				return 1
-
-	if options.repo is not None:
-		repo_path = portdb.getRepositoryPath(options.repo)
-		if repo_path is None:
-			parser.error("Unable to locate repository named '%s'" % \
-				(options.repo,))
-			return 1
-
-		# Limit ebuilds to the specified repo.
-		portdb.porttrees = [repo_path]
-	else:
-		portdb.porttrees = [portdb.porttree_root]
 
 	ret = [os.EX_OK]
 

@@ -16,6 +16,7 @@ portage.proxy.lazyimport.lazyimport(globals(),
 
 from portage import os
 from portage import auxdbkeys
+from portage.eapi import _get_eapi_attrs
 from portage.exception import InvalidData
 from portage.localization import _
 
@@ -25,7 +26,7 @@ class dbapi(object):
 	_use_mutable = False
 	_known_keys = frozenset(x for x in auxdbkeys
 		if not x.startswith("UNUSED_0"))
-	_pkg_str_aux_keys = ("EAPI", "SLOT", "repository")
+	_pkg_str_aux_keys = ("EAPI", "KEYWORDS", "SLOT", "repository")
 
 	def __init__(self):
 		pass
@@ -153,8 +154,7 @@ class dbapi(object):
 		metadata = dict(zip(self._pkg_str_aux_keys,
 			self.aux_get(cpv, self._pkg_str_aux_keys, myrepo=repo)))
 
-		return _pkg_str(cpv, slot=metadata["SLOT"],
-			repo=metadata["repository"], eapi=metadata["EAPI"])
+		return _pkg_str(cpv, metadata=metadata, settings=self.settings)
 
 	def _iter_match_repo(self, atom, cpv_iter):
 		for cpv in cpv_iter:
@@ -182,7 +182,7 @@ class dbapi(object):
 		2) Check enabled/disabled flag states.
 		"""
 
-		aux_keys = ["IUSE", "SLOT", "USE", "repository"]
+		aux_keys = ["EAPI", "IUSE", "KEYWORDS", "SLOT", "USE", "repository"]
 		for cpv in cpv_iter:
 			try:
 				metadata = dict(zip(aux_keys,
@@ -196,7 +196,11 @@ class dbapi(object):
 			yield cpv
 
 	def _match_use(self, atom, cpv, metadata):
-		iuse_implicit_match = self.settings._iuse_implicit_match
+		eapi_attrs = _get_eapi_attrs(metadata["EAPI"])
+		if eapi_attrs.iuse_effective:
+			iuse_implicit_match = self.settings._iuse_effective_match
+		else:
+			iuse_implicit_match = self.settings._iuse_implicit_match
 		iuse = frozenset(x.lstrip('+-') for x in metadata["IUSE"].split())
 
 		for x in atom.unevaluated_atom.use.required:
@@ -234,11 +238,12 @@ class dbapi(object):
 
 		elif not self.settings.local_config:
 			# Check masked and forced flags for repoman.
-			if hasattr(cpv, 'slot'):
-				pkg = cpv
+			try:
+				cpv.slot
+			except AttributeError:
+				pkg = _pkg_str(cpv, metadata=metadata, settings=self.settings)
 			else:
-				pkg = _pkg_str(cpv, slot=metadata["SLOT"],
-					repo=metadata.get("repository"))
+				pkg = cpv
 			usemask = self.settings._getUseMask(pkg)
 			if any(x in usemask for x in atom.use.enabled):
 				return False
@@ -343,9 +348,9 @@ class dbapi(object):
 				continue
 			moves += 1
 			if "/" not in newslot and \
-				mycpv.slot_abi and \
-				mycpv.slot_abi not in (mycpv.slot, newslot):
-				newslot = "%s/%s" % (newslot, mycpv.slot_abi)
+				mycpv.sub_slot and \
+				mycpv.sub_slot not in (mycpv.slot, newslot):
+				newslot = "%s/%s" % (newslot, mycpv.sub_slot)
 			mydata = {"SLOT": newslot+"\n"}
 			self.aux_update(mycpv, mydata)
 		return moves

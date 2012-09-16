@@ -53,7 +53,7 @@ FETCHCOMMAND_SFTP="bash -c \"x=\\\${2#sftp://} ; host=\\\${x%%/*} ; port=\\\${ho
 # Default user options
 FEATURES="assume-digests binpkg-logs
           config-protect-if-modified distlocks ebuild-locks
-          fixlafiles news parallel-fetch parse-eapi-ebuild-head protect-owned
+          fixlafiles news parallel-fetch protect-owned
           sandbox sfperms strict unknown-features-warn unmerge-logs
           unmerge-orphans userfetch"
 
@@ -112,7 +112,7 @@ PORTAGE_WORKDIR_MODE="0700"
 
 # Some defaults for elog
 PORTAGE_ELOG_CLASSES="log warn error"
-PORTAGE_ELOG_SYSTEM="save_summary echo"
+PORTAGE_ELOG_SYSTEM="save_summary:log,warn,error,qa echo"
 
 PORTAGE_ELOG_MAILURI="root"
 PORTAGE_ELOG_MAILSUBJECT="[portage] ebuild log for \${PACKAGE} on \${HOST}"

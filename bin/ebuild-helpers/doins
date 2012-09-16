@@ -1,10 +1,12 @@
 #!/bin/bash
-# Copyright 1999-2011 Gentoo Foundation
+# Copyright 1999-2012 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 source "${PORTAGE_BIN_PATH:-/usr/lib/portage/bin}"/isolated-functions.sh
 
-if [[ ${0##*/} == dodoc ]] ; then
+helper=${__PORTAGE_HELPER:-${0##*/}}
+
+if [[ ${helper} == dodoc ]] ; then
 	if [ $# -eq 0 ] ; then
 		# default_src_install may call dodoc with no arguments
 		# when DOC is defined but empty, so simply return
@@ -16,7 +18,7 @@ if [[ ${0##*/} == dodoc ]] ; then
 fi
 
 if [ $# -lt 1 ] ; then
-	helpers_die "${0##*/}: at least one argument needed"
+	__helpers_die "${helper}: at least one argument needed"
 	exit 1
 fi
 
@@ -31,16 +33,16 @@ fi
 	case "$EAPI" in 0|1|2) export ED="${D}" ;; esac
 
 if [[ ${INSDESTTREE#${ED}} != "${INSDESTTREE}" ]]; then
-	vecho "-------------------------------------------------------" 1>&2
-	vecho "You should not use \${D} or \${ED} with helpers." 1>&2
-	vecho "  --> ${INSDESTTREE}" 1>&2
-	vecho "-------------------------------------------------------" 1>&2
-	helpers_die "${0##*/} used with \${D} or \${ED}"
+	__vecho "-------------------------------------------------------" 1>&2
+	__vecho "You should not use \${D} or \${ED} with helpers." 1>&2
+	__vecho "  --> ${INSDESTTREE}" 1>&2
+	__vecho "-------------------------------------------------------" 1>&2
+	__helpers_die "${helper} used with \${D} or \${ED}"
 	exit 1
 fi
 
 case "$EAPI" in
-	0|1|2|3|3_pre2)
+	0|1|2|3)
 		PRESERVE_SYMLINKS=n
 		;;
 	*)
@@ -79,7 +81,7 @@ _doins() {
 	install ${INSOPTIONS} "${mysrc}" "${ED}${INSDESTTREE}/${mydir}"
 	rval=$?
 	[[ -n ${cleanup} ]] && rm -f "${cleanup}"
-	[ $rval -ne 0 ] && echo "!!! ${0##*/}: $mysrc does not exist" 1>&2
+	[ $rval -ne 0 ] && echo "!!! ${helper}: $mysrc does not exist" 1>&2
 	return $rval
 }
 
@@ -99,8 +101,8 @@ for x in "$@" ; do
 	if [[ $PRESERVE_SYMLINKS = n && -d $x ]] || \
 		[[ $PRESERVE_SYMLINKS = y && -d $x && ! -L $x ]] ; then
 		if [ "${DOINSRECUR}" == "n" ] ; then
-			if [[ ${0##*/} == dodoc ]] ; then
-				echo "!!! ${0##*/}: $x is a directory" 1>&2
+			if [[ ${helper} == dodoc ]] ; then
+				echo "!!! ${helper}: $x is a directory" 1>&2
 				((failed|=1))
 			fi
 			continue
@@ -155,4 +157,4 @@ for x in "$@" ; do
 	fi
 done
 rm -rf "$TMP"
-[[ $failed -ne 0 || $success -eq 0 ]] && { helpers_die "${0##*/} failed"; exit 1; } || exit 0
+[[ $failed -ne 0 || $success -eq 0 ]] && { __helpers_die "${helper} failed"; exit 1; } || exit 0

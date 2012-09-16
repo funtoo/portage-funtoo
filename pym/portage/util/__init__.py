@@ -31,11 +31,11 @@ import portage
 portage.proxy.lazyimport.lazyimport(globals(),
 	'pickle',
 	'portage.dep:Atom',
-	'portage.util.listdir:_ignorecvs_dirs'
+	'portage.util.listdir:_ignorecvs_dirs',
+	'subprocess',
 )
 
 from portage import os
-from portage import subprocess_getstatusoutput
 from portage import _encodings
 from portage import _os_merge
 from portage import _unicode_encode
@@ -379,6 +379,8 @@ def grabdict(myfilename, juststrings=0, empty=0, recursive=0, incremental=1):
 			newdict[k] = " ".join(v)
 	return newdict
 
+_eapi_cache = {}
+
 def read_corresponding_eapi_file(filename):
 	"""
 	Read the 'eapi' file from the directory 'filename' is in.
@@ -386,6 +388,10 @@ def read_corresponding_eapi_file(filename):
 	"""
 	default = "0"
 	eapi_file = os.path.join(os.path.dirname(filename), "eapi")
+	try:
+		return _eapi_cache[eapi_file]
+	except KeyError:
+		pass
 	try:
 		f = io.open(_unicode_encode(eapi_file,
 			encoding=_encodings['fs'], errors='strict'),
@@ -401,6 +407,7 @@ def read_corresponding_eapi_file(filename):
 	except IOError:
 		eapi = default
 
+	_eapi_cache[eapi_file] = eapi
 	return eapi
 
 def grabdict_package(myfilename, juststrings=0, recursive=0, allow_wildcard=False, allow_repo=False,
@@ -1582,7 +1589,7 @@ def find_updated_config_files(target_root, config_protect):
 	If no configuration files needs to be updated, None is returned
 	"""
 
-	os = _os_merge
+	encoding = _encodings['fs']
 
 	if config_protect:
 		# directories with some protect files in them
@@ -1614,10 +1621,17 @@ def find_updated_config_files(target_root, config_protect):
 				mycommand = "find '%s' -maxdepth 1 -name '._cfg????_%s'" % \
 						os.path.split(x.rstrip(os.path.sep))
 			mycommand += " ! -name '.*~' ! -iname '.*.bak' -print0"
-			a = subprocess_getstatusoutput(mycommand)
-
-			if a[0] == 0:
-				files = a[1].split('\0')
+			cmd = shlex_split(mycommand)
+			if sys.hexversion < 0x3000000 or sys.hexversion >= 0x3020000:
+				# Python 3.1 does not support bytes in Popen args.
+				cmd = [_unicode_encode(arg, encoding=encoding, errors='strict')
+					for arg in cmd]
+			proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+				stderr=subprocess.STDOUT)
+			output = _unicode_decode(proc.communicate()[0], encoding=encoding)
+			status = proc.wait()
+			if os.WIFEXITED(status) and os.WEXITSTATUS(status) == os.EX_OK:
+				files = output.split('\0')
 				# split always produces an empty string as the last element
 				if files and not files[-1]:
 					del files[-1]

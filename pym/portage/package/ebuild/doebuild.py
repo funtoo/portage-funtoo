@@ -26,8 +26,9 @@ portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.package.ebuild.digestgen:digestgen',
 	'portage.package.ebuild.fetch:fetch',
 	'portage.package.ebuild._ipc.QueryCommand:QueryCommand',
-	'portage.dep._slot_abi:evaluate_slot_abi_equal_deps',
+	'portage.dep._slot_operator:evaluate_slot_operator_equal_deps',
 	'portage.package.ebuild._spawn_nofetch:spawn_nofetch',
+	'portage.util._desktop_entry:validate_desktop_entry',
 	'portage.util.ExtractKernelVersion:ExtractKernelVersion'
 )
 
@@ -73,6 +74,24 @@ _unsandboxed_phases = frozenset([
 	"preinst", "pretend", "postrm",
 	"prerm", "setup"
 ])
+
+_phase_func_map = {
+	"config": "pkg_config",
+	"setup": "pkg_setup",
+	"nofetch": "pkg_nofetch",
+	"unpack": "src_unpack",
+	"prepare": "src_prepare",
+	"configure": "src_configure",
+	"compile": "src_compile",
+	"test": "src_test",
+	"install": "src_install",
+	"preinst": "pkg_preinst",
+	"postinst": "pkg_postinst",
+	"prerm": "pkg_prerm",
+	"postrm": "pkg_postrm",
+	"info": "pkg_info",
+	"pretend": "pkg_pretend",
+}
 
 def _doebuild_spawn(phase, settings, actionmap=None, **kwargs):
 	"""
@@ -136,8 +155,8 @@ def _doebuild_path(settings, eapi=None):
 
 	path = []
 
-	if eapi not in (None, "0", "1", "2", "3"):
-		path.append(os.path.join(portage_bin_path, "ebuild-helpers", "4"))
+	if settings.get("USERLAND", "GNU") != "GNU":
+		path.append(os.path.join(portage_bin_path, "ebuild-helpers", "bsd"))
 
 	path.append(os.path.join(portage_bin_path, "ebuild-helpers"))
 	path.extend(prerootpath)
@@ -689,9 +708,9 @@ def doebuild(myebuild, mydo, _unused=None, settings=None, debug=0, listonly=0,
 				mysettings["dbkey"] = ""
 				pr, pw = os.pipe()
 				fd_pipes = {
-					0:sys.stdin.fileno(),
-					1:sys.stdout.fileno(),
-					2:sys.stderr.fileno(),
+					0:sys.__stdin__.fileno(),
+					1:sys.__stdout__.fileno(),
+					2:sys.__stderr__.fileno(),
 					9:pw}
 				mypids = _spawn_phase(mydo, mysettings, returnpid=True,
 					fd_pipes=fd_pipes)
@@ -1242,7 +1261,7 @@ def _spawn_actionmap(settings):
 	misc_sh_binary = os.path.join(portage_bin_path,
 		os.path.basename(MISC_SH_BINARY))
 	ebuild_sh = _shell_quote(ebuild_sh_binary) + " %s"
-	misc_sh = _shell_quote(misc_sh_binary) + " dyn_%s"
+	misc_sh = _shell_quote(misc_sh_binary) + " __dyn_%s"
 
 	# args are for the to spawn function
 	actionmap = {
@@ -1301,7 +1320,7 @@ def _validate_deps(mysettings, myroot, mydo, mydbapi):
 		pkg.metadata["REQUIRED_USE"] and \
 		eapi_has_required_use(pkg.metadata["EAPI"]):
 		result = check_required_use(pkg.metadata["REQUIRED_USE"],
-			pkg.use.enabled, pkg.iuse.is_valid_flag)
+			pkg.use.enabled, pkg.iuse.is_valid_flag, eapi=pkg.metadata["EAPI"])
 		if not result:
 			reduced_noise = result.tounicode()
 			writemsg("\n  %s\n" % _("The following REQUIRED_USE flag" + \
@@ -1366,18 +1385,18 @@ def spawn(mystring, mysettings, debug=0, free=0, droppriv=0, sesandbox=0, fakero
 	fd_pipes = keywords.get("fd_pipes")
 	if fd_pipes is None:
 		fd_pipes = {
-			0:sys.stdin.fileno(),
-			1:sys.stdout.fileno(),
-			2:sys.stderr.fileno(),
+			0:sys.__stdin__.fileno(),
+			1:sys.__stdout__.fileno(),
+			2:sys.__stderr__.fileno(),
 		}
 	# In some cases the above print statements don't flush stdout, so
 	# it needs to be flushed before allowing a child process to use it
 	# so that output always shows in the correct order.
-	stdout_filenos = (sys.stdout.fileno(), sys.stderr.fileno())
+	stdout_filenos = (sys.__stdout__.fileno(), sys.__stderr__.fileno())
 	for fd in fd_pipes.values():
 		if fd in stdout_filenos:
-			sys.stdout.flush()
-			sys.stderr.flush()
+			sys.__stdout__.flush()
+			sys.__stderr__.flush()
 			break
 
 	features = mysettings.features
@@ -1637,8 +1656,12 @@ def _post_src_install_write_metadata(settings):
 
 	build_info_dir = os.path.join(settings['PORTAGE_BUILDDIR'], 'build-info')
 
-	for k in ('IUSE',):
-		v = settings.get(k)
+	metadata_keys = ['IUSE']
+	if eapi_attrs.iuse_effective:
+		metadata_keys.append('IUSE_EFFECTIVE')
+
+	for k in metadata_keys:
+		v = settings.configdict['pkg'].get(k)
 		if v is not None:
 			write_atomic(os.path.join(build_info_dir, k), v + '\n')
 
@@ -1668,7 +1691,7 @@ def _post_src_install_write_metadata(settings):
 			continue
 
 		if k.endswith('DEPEND'):
-			if eapi_attrs.slot_abi:
+			if eapi_attrs.slot_operator:
 				continue
 			token_class = Atom
 		else:
@@ -1688,8 +1711,8 @@ def _post_src_install_write_metadata(settings):
 			errors='strict') as f:
 			f.write(_unicode_decode(v + '\n'))
 
-	if eapi_attrs.slot_abi:
-		deps = evaluate_slot_abi_equal_deps(settings, use, QueryCommand.get_db())
+	if eapi_attrs.slot_operator:
+		deps = evaluate_slot_operator_equal_deps(settings, use, QueryCommand.get_db())
 		for k, v in deps.items():
 			filename = os.path.join(build_info_dir, k)
 			if not v:
@@ -1746,7 +1769,13 @@ def _post_src_install_uid_fix(mysettings, out):
 
 	destdir = mysettings["D"]
 	ed_len = len(mysettings["ED"])
+	desktopfile_errors = []
 	unicode_errors = []
+	desktop_file_validate = \
+		portage.process.find_binary("desktop-file-validate") is not None
+	xdg_dirs = mysettings.get('XDG_DATA_DIRS', '/usr/share').split(':')
+	xdg_dirs = tuple(os.path.join(i, "applications") + os.sep
+		for i in xdg_dirs if i)
 
 	while True:
 
@@ -1793,6 +1822,14 @@ def _post_src_install_uid_fix(mysettings, out):
 					fpath = new_fpath
 				else:
 					fpath = os.path.join(parent, fname)
+
+				if desktop_file_validate and fname.endswith(".desktop") and \
+					os.path.isfile(fpath) and \
+					fpath[ed_len - 1:].startswith(xdg_dirs):
+
+					desktop_validate = validate_desktop_entry(fpath)
+					if desktop_validate:
+						desktopfile_errors.extend(desktop_validate)
 
 				if fixlafiles and \
 					fname.endswith(".la") and os.path.isfile(fpath):
@@ -1859,6 +1896,11 @@ def _post_src_install_uid_fix(mysettings, out):
 
 		if not unicode_error:
 			break
+
+	if desktopfile_errors:
+		for l in _merge_desktopfile_error(desktopfile_errors):
+			l = l.replace(mysettings["ED"], '/')
+			eqawarn(l, phase='install', key=mysettings.mycpv, out=out)
 
 	if unicode_errors:
 		for l in _merge_unicode_error(unicode_errors):
@@ -2022,6 +2064,20 @@ def _post_src_install_soname_symlinks(mysettings, out):
 	for line in qa_msg:
 		eqawarn(line, key=mysettings.mycpv, out=out)
 
+def _merge_desktopfile_error(errors):
+	lines = []
+
+	msg = _("QA Notice: This package installs one or more .desktop files "
+		"that do not pass validation.")
+	lines.extend(wrap(msg, 72))
+
+	lines.append("")
+	errors.sort()
+	lines.extend("\t" + x for x in errors)
+	lines.append("")
+
+	return lines
+
 def _merge_unicode_error(errors):
 	lines = []
 
@@ -2078,11 +2134,6 @@ def _handle_self_update(settings, vardb):
 	if settings["ROOT"] == "/" and \
 		portage.dep.match_from_list(
 		portage.const.PORTAGE_PACKAGE_ATOM, [cpv]):
-		inherited = frozenset(settings.get('INHERITED', '').split())
-		if not vardb.cpv_exists(cpv) or \
-			'9999' in cpv or \
-			'git' in inherited or \
-			'git-2' in inherited:
-			_prepare_self_update(settings)
-			return True
+		_prepare_self_update(settings)
+		return True
 	return False

@@ -300,15 +300,10 @@ class Scheduler(PollScheduler):
 			if not portage.dep.match_from_list(
 				portage.const.PORTAGE_PACKAGE_ATOM, [x]):
 				continue
-			if self._running_portage is None or \
-				self._running_portage.cpv != x.cpv or \
-				'9999' in x.cpv or \
-				'git' in x.inherited or \
-				'git-2' in x.inherited:
-				rval = _check_temp_dir(self.settings)
-				if rval != os.EX_OK:
-					return rval
-				_prepare_self_update(self.settings)
+			rval = _check_temp_dir(self.settings)
+			if rval != os.EX_OK:
+				return rval
+			_prepare_self_update(self.settings)
 			break
 
 		return os.EX_OK
@@ -328,15 +323,15 @@ class Scheduler(PollScheduler):
 		self._set_graph_config(graph_config)
 		self._blocker_db = {}
 		dynamic_deps = self.myopts.get("--dynamic-deps", "y") != "n"
-		ignore_built_slot_abi_deps = self.myopts.get(
-			"--ignore-built-slot-abi-deps", "n") == "y"
+		ignore_built_slot_operator_deps = self.myopts.get(
+			"--ignore-built-slot-operator-deps", "n") == "y"
 		for root in self.trees:
 			if self._uninstall_only:
 				continue
 			if graph_config is None:
 				fake_vartree = FakeVartree(self.trees[root]["root_config"],
 					pkg_cache=self._pkg_cache, dynamic_deps=dynamic_deps,
-					ignore_built_slot_abi_deps=ignore_built_slot_abi_deps)
+					ignore_built_slot_operator_deps=ignore_built_slot_operator_deps)
 				fake_vartree.sync()
 			else:
 				fake_vartree = graph_config.trees[root]['vartree']
@@ -658,10 +653,11 @@ class Scheduler(PollScheduler):
 				if value and value.strip():
 					continue
 				msg = _("%(var)s is not set... "
-					"Are you missing the '%(configroot)setc/make.profile' symlink? "
+					"Are you missing the '%(configroot)s%(profile_path)s' symlink? "
 					"Is the symlink correct? "
 					"Is your portage tree complete?") % \
-					{"var": var, "configroot": settings["PORTAGE_CONFIGROOT"]}
+					{"var": var, "configroot": settings["PORTAGE_CONFIGROOT"],
+					"profile_path": portage.const.PROFILE_PATH}
 
 				out = portage.output.EOutput()
 				for line in textwrap.wrap(msg, 70):
@@ -1351,8 +1347,10 @@ class Scheduler(PollScheduler):
 		failed_pkgs = self._failed_pkgs
 		portage.locks._quiet = self._background
 		portage.elog.add_listener(self._elog_listener)
-		display_timeout_id = self.sched_iface.timeout_add(
-			self._max_display_latency, self._status_display.display)
+		display_timeout_id = None
+		if self._status_display._isatty and not self._status_display.quiet:
+			display_timeout_id = self.sched_iface.timeout_add(
+				self._max_display_latency, self._status_display.display)
 		rval = os.EX_OK
 
 		try:
@@ -1361,7 +1359,8 @@ class Scheduler(PollScheduler):
 			self._main_loop_cleanup()
 			portage.locks._quiet = False
 			portage.elog.remove_listener(self._elog_listener)
-			self.sched_iface.source_remove(display_timeout_id)
+			if display_timeout_id is not None:
+				self.sched_iface.source_remove(display_timeout_id)
 			if failed_pkgs:
 				rval = failed_pkgs[-1].returncode
 

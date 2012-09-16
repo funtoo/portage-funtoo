@@ -1,4 +1,4 @@
-.TH "EBUILD" "5" "Dec 2011" "Portage VERSION" "Portage"
+.TH "EBUILD" "5" "Sep 2012" "Portage VERSION" "Portage"
 .SH "NAME"
 ebuild \- the internal format, variables, and functions in an ebuild script
 .SH "DESCRIPTION"
@@ -101,6 +101,16 @@ Contains the path to the package build root.  Do not modify this variable.
 \fBFILESDIR\fR = \fI"${PORTDIR}/${CATEGORY}/${PN}/files"\fR
 Contains the path to the 'files' sub folder in the package specific
 location in the portage tree.  Do not modify this variable.
+.TP
+.B EBUILD_PHASE
+Contains the abreviated name of the phase function that is
+currently executing, such as "setup", "unpack", "compile", or
+"preinst".
+.TP
+.B EBUILD_PHASE_FUNC
+Beginning with \fBEAPI 5\fR, contains the full name of the phase
+function that is currently executing, such as "pkg_setup",
+"src_unpack", "src_compile", or "pkg_preinst".
 .TP
 .B EPREFIX
 Beginning with \fBEAPI 3\fR, contains the offset
@@ -231,6 +241,18 @@ This sets the SLOT for packages that may need to have multiple versions
 co\-exist.  By default you should set \fBSLOT\fR="0".  If you are unsure, then
 do not fiddle with this until you seek some guidance from some guru.  This
 value should \fINEVER\fR be left undefined.
+
+Beginning with \fBEAPI 5\fR, the SLOT variable may contain
+an optional sub\-slot part that follows the regular slot and
+is delimited by a / character. The sub\-slot must be a valid
+slot name. The sub\-slot is used to represent cases in which
+an upgrade to a new version of a package with a different
+sub\-slot may require dependent packages to be rebuilt. When
+the sub\-slot part is omitted from the SLOT definition, the
+package is considered to have an implicit sub\-slot which is
+equal to the regular slot. Refer to the \fBAtom Slot
+Operators\fR section for more information about sub\-slot
+usage.
 .TP
 \fBLICENSE\fR
 This should be a space delimited list of licenses that the package falls
@@ -347,6 +369,87 @@ x11\-libs/qt:3
 \fI>=\fRx11\-libs/qt-3.3.8:3
 \fI=\fRx11\-libs/qt-3.3*:3
 .fi
+
+Beginning with \fBEAPI 5\fR, a slot dependency may contain an
+optional sub\-slot part that follows the regular slot and is
+delimited by a \fB/\fR character.
+
+.I Examples:
+
+.nf
+dev\-libs/icu:0/0
+dev\-libs/icu:0/49
+dev\-lang/perl:0/5.12
+dev\-libs/glib:2/2.30
+.fi
+
+.TP
+.B Atom Slot Operators
+Beginning with \fBEAPI 5\fR, slot operator dependency consists
+of a colon followed by one of the following operators:
+.RS
+.TP
+.I *
+Indicates that any slot value is acceptable. In addition,
+for runtime dependencies, indicates that the package will not
+break if the matched package is uninstalled and replaced by
+a different matching package in a different slot.
+
+.I Examples:
+
+.nf
+dev\-libs/icu:*
+dev\-lang/perl:*
+dev-libs/glib:*
+.fi
+.TP
+.I =
+Indicates that any slot value is acceptable. In addition,
+for runtime dependencies, indicates that the package will
+break unless a matching package with slot and sub\-slot equal
+to the slot and sub\-slot of the best installed version at the
+time the package was installed is available.
+
+.I Examples:
+
+.nf
+dev\-libs/icu:=
+dev\-lang/perl:=
+dev-libs/glib:=
+.fi
+.TP
+.I slot=
+Indicates that only a specific slot value is acceptable, and
+otherwise behaves identically to the plain equals slot operator.
+
+.I Examples:
+
+.nf
+dev\-libs/icu:0=
+dev\-lang/perl:0=
+dev-libs/glib:2=
+.fi
+.PP
+To implement the equals slot operator, the package manager
+will need to store the slot/sub\-slot pair of the best installed
+version of the matching package. This syntax is only for package
+manager use and must not be used by ebuilds. The package manager
+may do this by inserting the appropriate slot/sub\-slot pair
+between the colon and equals sign when saving the package's
+dependencies. The sub\-slot part must not be omitted here
+(when the SLOT variable omits the sub\-slot part, the package
+is considered to have an implicit sub\-slot which is equal to
+the regular slot).
+
+.I Examples:
+
+.nf
+dev\-libs/icu:0/0=
+dev\-libs/icu:0/49=
+dev\-lang/perl:0/5.12=
+dev-libs/glib:2/2.30=
+.fi
+.RE
 .TP
 .B Atom USE
 Beginning with \fBEAPI 2\fR, any atom can be constrained to match specific
@@ -394,7 +497,7 @@ immediately following a flag with either \fB(+)\fR or \fB(\-)\fR. Use
 .RS
 .nf
 media\-video/ffmpeg[threads(+)]
-media\-video/ffmpeg[threads(\-)]
+media\-video/ffmpeg[-threads(\-)]
 .fi
 .RE
 .RE
@@ -496,6 +599,7 @@ If flag1 disabled then flag2 enabled	!flag1? ( flag2 )
 If flag1 disabled then flag2 disabled	!flag1? ( !flag2 )
 Must enable any one or more (inclusive or)	|| ( flag1 flag2 flag3 )
 Must enable exactly one but not more (exclusive or)	^^ ( flag1 flag2 flag3 )
+May enable at most one (EAPI 5 or later)	?? ( flag1 flag2 flag3 )
 .TE
 .TP
 \fBRESTRICT\fR = \fI[strip,mirror,fetch,userpriv]\fR
@@ -664,9 +768,10 @@ is used to execute pkg_pretend is not saved and therefore is not
 available in phases that execute afterwards.
 .TP
 .B pkg_nofetch
-If you turn on \fIfetch\fR in \fBRESTRICT\fR, then this function will be
-run when the files in \fBSRC_URI\fR cannot be found.  Useful for
-displaying information to the user on *how* to obtain said files.  All
+This function will be executed when the files in \fBSRC_URI\fR
+cannot be fetched for any reason. If you turn on \fIfetch\fR in
+\fBRESTRICT\fR, this is useful for displaying information to the
+user on *how* to obtain said files. All
 you have to do is output a message and let the function return.  Do not
 end the function with a call to \fBdie\fR.
 .TP
@@ -703,8 +808,11 @@ steps should be done here.
 Initial working directory of $S.
 .TP
 .B src_test
-Run all package specific test cases.  The default is to run 'make check'
-followed 'make test'.
+Run all package specific test cases. The default is to run
+\'emake check\' followed \'emake test\'. Prior to \fBEAPI 5\fR,
+the default src_test implementation will automatically pass the
+\-j1 option as the last argument to emake, and beginning with
+\fBEAPI 5\fR it will allow the tests to run in parallel.
 .br
 Initial working directory of $S.
 .TP
@@ -817,6 +925,11 @@ fi
 .fi
 .RE
 .TP
+\fBusex\fR \fI<USE flag>\fR \fI[true output]\fR \fI[false output]\fR \fI[true suffix]\fR \fI[false suffix]\fR
+If USE flag is set, echo [true output][true suffix] (defaults to
+"yes"), otherwise echo [false output][false suffix] (defaults to
+"no"). The usex helper is available beginning with \fBEAPI 5\fR.
+.TP
 \fBuse_with\fR \fI<USE item>\fR \fI[configure name]\fR \fI[configure opt]\fR
 Useful for creating custom options to pass to a configure script. If \fIUSE
 item\fR is in the \fBUSE\fR variable and a \fIconfigure opt\fR is specified,
@@ -866,16 +979,20 @@ places where output is to be disregarded. Never use the output for calculation.
 The \fIitem list\fR is delimited by the \fIIFS\fR variable.  This variable
 has a default value of ' ', or a space.  It is a \fBbash\fR(1) setting.
 .TP
-\fBhas_version\fR \fI<category/package\-version>\fR
+\fBhas_version\fR \fI[\-\-host\-root]\fR \fI<category/package\-version>\fR
 Check to see if \fIcategory/package\-version\fR is installed on the system.
 The parameter accepts all values that are acceptable in the \fBDEPEND\fR
 variable.  The function returns 0 if \fIcategory/package\-version\fR is
-installed, 1 otherwise.
+installed, 1 otherwise. Beginning with \fBEAPI 5\fR, the
+\-\-host\-root option may be used in order to cause the query
+to apply to the host root instead of ${ROOT}.
 .TP
-\fBbest_version\fR \fI<package name>\fR
+\fBbest_version\fR \fI[\-\-host\-root]\fR \fI<package name>\fR
 This function will look up \fIpackage name\fR in the database of currently
 installed programs and echo the "best version" of the package that is
-currently installed. 
+currently installed. Beginning with \fBEAPI 5\fR, the
+\-\-host\-root option may be used in order to cause the query
+to apply to the host root instead of ${ROOT}.
 .RS
 .TP
 .I Example:
@@ -957,6 +1074,10 @@ variable which is disregarded for prior \fBEAPI\fR values.
 Beginning with \fBEAPI 4\fR, \fBeconf\fR adds
 \fI\-\-disable\-dependency\-tracking\fR to the arguments if the
 string \fIdisable\-dependency\-tracking\fR occurs in the output
+of \fIconfigure \-\-help\fR.
+Beginning with \fBEAPI 5\fR, \fBeconf\fR adds
+\fIdisable\-silent\-rules\fR to the arguments if the
+string \fIdisable\-silent\-rules\fR occurs in the output
 of \fIconfigure \-\-help\fR.
 .TP
 \fBemake\fR \fI[make options]\fR
@@ -1187,6 +1308,12 @@ should call \fBln(1)\fR directly.
 .PD 1
 Performs the ln command to create a symlink.
 .TP
+\fBdoheader\fR \fI[\-r] <file> [list of more files]\fR
+Installs the given header files into /usr/include/, by default
+with file mode \fI0644\fR (this can be overridden with the
+\fBinsopts\fR function). Setting \-r sets recursive. The
+\fBdoheader\fR helper is available beginning with \fBEAPI 5\fR.
+.TP
 \fBdohtml\fR \fI [\-a filetypes] [\-r] [\-x list\-of\-dirs\-to\-ignore] [list\-of\-files\-and\-dirs]\fR
 Installs the files in the list of files (space\-separated list) into
 /usr/share/doc/${PF}/html provided the file ends in .htm, .html, .css, .js, .gif, .jpeg, .jpg, or .png.
@@ -1279,6 +1406,8 @@ new \fI\-r\fR option.
 .PD 1
 All these functions act like the do* functions, but they only work with one
 file and the file is installed as \fI[new filename]\fR.
+Beginning with \fBEAPI 5\fR, standard input is read when the
+first parameter is \- (a hyphen).
 .SH "REPORTING BUGS"
 Please report bugs via http://bugs.gentoo.org/
 .SH "AUTHORS"

@@ -1,11 +1,22 @@
 #!/bin/bash
-# Copyright 1999-2011 Gentoo Foundation
+# Copyright 1999-2012 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
+
+case "${EAPI}" in
+	0|1|2|3)
+		;;
+	*)
+		exec \
+		env \
+		__PORTAGE_HELPER="dodoc" \
+		doins "$@"
+		;;
+esac
 
 source "${PORTAGE_BIN_PATH:-/usr/lib/portage/bin}"/isolated-functions.sh
 
 if [ $# -lt 1 ] ; then
-	helpers_die "${0##*/}: at least one argument needed"
+	__helpers_die "${0##*/}: at least one argument needed"
 	exit 1 	
 fi
 
@@ -30,5 +41,5 @@ for x in "$@" ; do
 	fi
 done
 
-[[ $ret -ne 0 ]] && helpers_die "${0##*/} failed"
+[[ $ret -ne 0 ]] && __helpers_die "${0##*/} failed"
 exit ${ret}

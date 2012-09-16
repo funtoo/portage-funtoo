@@ -25,7 +25,7 @@ class EbuildMetadataPhase(SubProcess):
 	"""
 
 	__slots__ = ("cpv", "eapi_supported", "ebuild_hash", "fd_pipes",
-		"metadata", "portdb", "repo_path", "settings") + \
+		"metadata", "portdb", "repo_path", "settings", "write_auxdb") + \
 		("_eapi", "_eapi_lineno", "_raw_metadata",)
 
 	_file_names = ("ebuild",)
@@ -74,15 +74,16 @@ class EbuildMetadataPhase(SubProcess):
 
 		null_input = open('/dev/null', 'rb')
 		fd_pipes.setdefault(0, null_input.fileno())
-		fd_pipes.setdefault(1, sys.stdout.fileno())
-		fd_pipes.setdefault(2, sys.stderr.fileno())
+		fd_pipes.setdefault(1, sys.__stdout__.fileno())
+		fd_pipes.setdefault(2, sys.__stderr__.fileno())
 
 		# flush any pending output
+		stdout_filenos = (sys.__stdout__.fileno(), sys.__stderr__.fileno())
 		for fd in fd_pipes.values():
-			if fd == sys.stdout.fileno():
-				sys.stdout.flush()
-			if fd == sys.stderr.fileno():
-				sys.stderr.flush()
+			if fd in stdout_filenos:
+				sys.__stdout__.flush()
+				sys.__stderr__.flush()
+				break
 
 		self._files = self._files_dict()
 		files = self._files
@@ -141,8 +142,7 @@ class EbuildMetadataPhase(SubProcess):
 	def _set_returncode(self, wait_retval):
 		SubProcess._set_returncode(self, wait_retval)
 		# self._raw_metadata is None when _start returns
-		# early due to an unsupported EAPI detected with
-		# FEATURES=parse-eapi-ebuild-head
+		# early due to an unsupported EAPI
 		if self.returncode == os.EX_OK and \
 			self._raw_metadata is not None:
 			metadata_lines = _unicode_decode(b''.join(self._raw_metadata),
@@ -163,8 +163,7 @@ class EbuildMetadataPhase(SubProcess):
 				if (not metadata["EAPI"] or self.eapi_supported) and \
 					metadata["EAPI"] != parsed_eapi:
 					self._eapi_invalid(metadata)
-					if 'parse-eapi-ebuild-head' in self.settings.features:
-						metadata_valid = False
+					metadata_valid = False
 
 			if metadata_valid:
 				# Since we're supposed to be able to efficiently obtain the
@@ -181,8 +180,11 @@ class EbuildMetadataPhase(SubProcess):
 						metadata["_eclasses_"] = {}
 					metadata.pop("INHERITED", None)
 
-					self.portdb._write_cache(self.cpv,
-						self.repo_path, metadata, self.ebuild_hash)
+					# If called by egencache, this cache write is
+					# undesirable when metadata-transfer is disabled.
+					if self.write_auxdb is not False:
+						self.portdb._write_cache(self.cpv,
+							self.repo_path, metadata, self.ebuild_hash)
 				else:
 					metadata = {"EAPI": metadata["EAPI"]}
 				self.metadata = metadata

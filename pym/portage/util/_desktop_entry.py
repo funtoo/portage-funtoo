@@ -2,6 +2,7 @@
 # Distributed under the terms of the GNU General Public License v2
 
 import io
+import re
 import subprocess
 import sys
 
@@ -11,6 +12,7 @@ except ImportError:
 	from ConfigParser import Error as ConfigParserError, RawConfigParser
 
 from portage import _encodings, _unicode_encode, _unicode_decode
+from portage.util import writemsg
 
 def parse_desktop_entry(path):
 	"""
@@ -31,14 +33,20 @@ def parse_desktop_entry(path):
 		encoding=_encodings['fs'], errors='strict'),
 		mode='r', encoding=_encodings['repo.content'],
 		errors='replace') as f:
-		read_file(f)
+		content = f.read()
+
+	# In Python 3.2, read_file does not support bytes in file names
+	# (see bug #429544), so use StringIO to hide the file name.
+	read_file(io.StringIO(content))
 
 	return parser
 
-_ignored_service_errors = (
-	'error: required key "Name" in group "Desktop Entry" is not present',
-	'error: key "Actions" is present in group "Desktop Entry", but the type is "Service" while this key is only valid for type "Application"',
-	'error: key "MimeType" is present in group "Desktop Entry", but the type is "Service" while this key is only valid for type "Application"',
+_trivial_warnings = re.compile(r' looks redundant with value ')
+
+_ignored_errors = (
+		# Ignore error for emacs.desktop:
+		# https://bugs.freedesktop.org/show_bug.cgi?id=35844#c6
+		'error: (will be fatal in the future): value "TextEditor" in key "Categories" in group "Desktop Entry" requires another category to be present among the following categories: Utility',
 )
 
 def validate_desktop_entry(path):
@@ -52,24 +60,20 @@ def validate_desktop_entry(path):
 	proc.wait()
 
 	if output_lines:
-		try:
-			desktop_entry = parse_desktop_entry(path)
-		except ConfigParserError:
-			pass
-		else:
-			if desktop_entry.has_section("Desktop Entry"):
-				try:
-					entry_type = desktop_entry.get("Desktop Entry", "Type")
-				except ConfigParserError:
-					pass
-				else:
-					if entry_type == "Service":
-						# Filter false errors for Type=Service (bug #414125).
-						filtered_output = []
-						for line in output_lines:
-							if line[len(path)+2:] in _ignored_service_errors:
-								continue
-							filtered_output.append(line)
-						output_lines = filtered_output
+		filtered_output = []
+		for line in output_lines:
+			if line[len(path)+2:] in _ignored_errors:
+				continue
+			filtered_output.append(line)
+		output_lines = filtered_output
+
+	if output_lines:
+		output_lines = [line for line in output_lines
+			if _trivial_warnings.search(line) is None]
 
 	return output_lines
+
+if __name__ == "__main__":
+	for arg in sys.argv[1:]:
+		for line in validate_desktop_entry(arg):
+			writemsg(line + "\n", noiselevel=-1)

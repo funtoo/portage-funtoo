@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 1999-2011 Gentoo Foundation
+# Copyright 1999-2012 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 export DESTTREE=/usr
@@ -25,7 +25,7 @@ into() {
 			install -d "${ED}${DESTTREE}"
 			local ret=$?
 			if [[ $ret -ne 0 ]] ; then
-				helpers_die "${FUNCNAME[0]} failed"
+				__helpers_die "${FUNCNAME[0]} failed"
 				return $ret
 			fi
 		fi
@@ -43,7 +43,7 @@ insinto() {
 			install -d "${ED}${INSDESTTREE}"
 			local ret=$?
 			if [[ $ret -ne 0 ]] ; then
-				helpers_die "${FUNCNAME[0]} failed"
+				__helpers_die "${FUNCNAME[0]} failed"
 				return $ret
 			fi
 		fi
@@ -61,7 +61,7 @@ exeinto() {
 			install -d "${ED}${_E_EXEDESTTREE_}"
 			local ret=$?
 			if [[ $ret -ne 0 ]] ; then
-				helpers_die "${FUNCNAME[0]} failed"
+				__helpers_die "${FUNCNAME[0]} failed"
 				return $ret
 			fi
 		fi
@@ -79,7 +79,7 @@ docinto() {
 			install -d "${ED}usr/share/doc/${PF}/${_E_DOCDESTTREE_}"
 			local ret=$?
 			if [[ $ret -ne 0 ]] ; then
-				helpers_die "${FUNCNAME[0]} failed"
+				__helpers_die "${FUNCNAME[0]} failed"
 				return $ret
 			fi
 		fi
@@ -118,7 +118,7 @@ docompress() {
 	if [[ $1 = "-x" ]]; then
 		shift
 		for f; do
-			f=$(strip_duplicate_slashes "${f}"); f=${f%/}
+			f=$(__strip_duplicate_slashes "${f}"); f=${f%/}
 			[[ ${f:0:1} = / ]] || f="/${f}"
 			for g in "${PORTAGE_DOCOMPRESS_SKIP[@]}"; do
 				[[ ${f} = "${g}" ]] && continue 2
@@ -127,7 +127,7 @@ docompress() {
 		done
 	else
 		for f; do
-			f=$(strip_duplicate_slashes "${f}"); f=${f%/}
+			f=$(__strip_duplicate_slashes "${f}"); f=${f%/}
 			[[ ${f:0:1} = / ]] || f="/${f}"
 			for g in "${PORTAGE_DOCOMPRESS[@]}"; do
 				[[ ${f} = "${g}" ]] && continue 2
@@ -174,6 +174,20 @@ usev() {
 	return 1
 }
 
+case "${EAPI}" in
+	0|1|2|3|4|4-python|4-slot-abi) ;;
+	*)
+		usex() {
+			if use "$1"; then
+				echo "${2-yes}$4"
+			else
+				echo "${3-no}$5"
+			fi
+			return 0
+		}
+		;;
+esac
+
 use() {
 	local u=$1
 	local found=0
@@ -201,11 +215,15 @@ use() {
 				"in IUSE for ${CATEGORY}/${PF}"
 	fi
 
+	local IFS=$' \t\n' prev_shopts=$- ret
+	set -f
 	if has ${u} ${USE} ; then
-		return ${found}
+		ret=${found}
 	else
-		return $((!found))
+		ret=$((!found))
 	fi
+	[[ ${prev_shopts} == *f* ]] || set +f
+	return ${ret}
 }
 
 use_with() {
@@ -261,7 +279,7 @@ unpack() {
 	[ -z "$*" ] && die "Nothing passed to the 'unpack' command"
 
 	for x in "$@"; do
-		vecho ">>> Unpacking ${x} to ${PWD}"
+		__vecho ">>> Unpacking ${x} to ${PWD}"
 		y=${x%.*}
 		y=${y##*.}
 
@@ -276,10 +294,10 @@ unpack() {
 		fi
 		[[ ! -s ${srcdir}${x} ]] && die "${x} does not exist"
 
-		_unpack_tar() {
+		__unpack_tar() {
 			if [ "${y}" == "tar" ]; then
 				$1 -c -- "$srcdir$x" | tar xof -
-				assert_sigpipe_ok "$myfail"
+				__assert_sigpipe_ok "$myfail"
 			else
 				local cwd_dest=${x##*/}
 				cwd_dest=${cwd_dest%.*}
@@ -297,7 +315,7 @@ unpack() {
 				;;
 			tbz|tbz2)
 				${PORTAGE_BUNZIP2_COMMAND:-${PORTAGE_BZIP2_COMMAND} -d} -c -- "$srcdir$x" | tar xof -
-				assert_sigpipe_ok "$myfail"
+				__assert_sigpipe_ok "$myfail"
 				;;
 			ZIP|zip|jar)
 				# unzip will interactively prompt under some error conditions,
@@ -306,10 +324,10 @@ unpack() {
 				unzip -qo "${srcdir}${x}" || die "$myfail"
 				;;
 			gz|Z|z)
-				_unpack_tar "gzip -d"
+				__unpack_tar "gzip -d"
 				;;
 			bz2|bz)
-				_unpack_tar "${PORTAGE_BUNZIP2_COMMAND:-${PORTAGE_BZIP2_COMMAND} -d}"
+				__unpack_tar "${PORTAGE_BUNZIP2_COMMAND:-${PORTAGE_BZIP2_COMMAND} -d}"
 				;;
 			7Z|7z)
 				local my_output
@@ -356,17 +374,17 @@ unpack() {
 				fi
 				;;
 			lzma)
-				_unpack_tar "lzma -d"
+				__unpack_tar "lzma -d"
 				;;
 			xz)
 				if has $eapi 0 1 2 ; then
-					vecho "unpack ${x}: file format not recognized. Ignoring."
+					__vecho "unpack ${x}: file format not recognized. Ignoring."
 				else
-					_unpack_tar "xz -d"
+					__unpack_tar "xz -d"
 				fi
 				;;
 			*)
-				vecho "unpack ${x}: file format not recognized. Ignoring."
+				__vecho "unpack ${x}: file format not recognized. Ignoring."
 				;;
 		esac
 	done
@@ -382,16 +400,16 @@ econf() {
 	[[ " ${FEATURES} " == *" force-prefix "* ]] || \
 		case "$EAPI" in 0|1|2) local EPREFIX= ;; esac
 
-	_hasg() {
+	__hasg() {
 		local x s=$1
 		shift
 		for x ; do [[ ${x} == ${s} ]] && echo "${x}" && return 0 ; done
 		return 1
 	}
 
-	_hasgq() { _hasg "$@" >/dev/null ; }
+	__hasgq() { __hasg "$@" >/dev/null ; }
 
-	local phase_func=$(_ebuild_arg_to_phase "$EAPI" "$EBUILD_PHASE")
+	local phase_func=$(__ebuild_arg_to_phase "$EAPI" "$EBUILD_PHASE")
 	if [[ -n $phase_func ]] ; then
 		if has "$EAPI" 0 1 ; then
 			[[ $phase_func != src_compile ]] && \
@@ -415,17 +433,35 @@ econf() {
 			find "${WORKDIR}" -type f '(' \
 			-name config.guess -o -name config.sub ')' -print0 | \
 			while read -r -d $'\0' x ; do
-				vecho " * econf: updating ${x/${WORKDIR}\/} with ${EPREFIX}/usr/share/gnuconfig/${x##*/}"
+				__vecho " * econf: updating ${x/${WORKDIR}\/} with ${EPREFIX}/usr/share/gnuconfig/${x##*/}"
 				cp -f "${EPREFIX}"/usr/share/gnuconfig/"${x##*/}" "${x}"
 			done
 		fi
 
 		# EAPI=4 adds --disable-dependency-tracking to econf
-		if ! has "$EAPI" 0 1 2 3 3_pre2 && \
-			"${ECONF_SOURCE}/configure" --help 2>/dev/null | \
-			grep -q disable-dependency-tracking ; then
-			set -- --disable-dependency-tracking "$@"
-		fi
+		case "${EAPI}" in
+			0|1|2|3)
+				;;
+			*)
+				local conf_help=$("${ECONF_SOURCE}/configure" --help 2>/dev/null)
+				case "${conf_help}" in
+					*--disable-dependency-tracking*)
+						set -- --disable-dependency-tracking "$@"
+						;;
+				esac
+				case "${EAPI}" in
+					4|4-python|4-slot-abi)
+						;;
+					*)
+						case "${conf_help}" in
+							*--disable-silent-rules*)
+								set -- --disable-silent-rules "$@"
+								;;
+						esac
+						;;
+				esac
+				;;
+		esac
 
 		# if the profile defines a location to install libs to aside from default, pass it on.
 		# if the ebuild passes in --libdir, they're responsible for the conf_libdir fun.
@@ -433,14 +469,14 @@ econf() {
 		if [[ -n ${ABI} && -n ${!LIBDIR_VAR} ]] ; then
 			CONF_LIBDIR=${!LIBDIR_VAR}
 		fi
-		if [[ -n ${CONF_LIBDIR} ]] && ! _hasgq --libdir=\* "$@" ; then
-			export CONF_PREFIX=$(_hasg --exec-prefix=\* "$@")
-			[[ -z ${CONF_PREFIX} ]] && CONF_PREFIX=$(_hasg --prefix=\* "$@")
+		if [[ -n ${CONF_LIBDIR} ]] && ! __hasgq --libdir=\* "$@" ; then
+			export CONF_PREFIX=$(__hasg --exec-prefix=\* "$@")
+			[[ -z ${CONF_PREFIX} ]] && CONF_PREFIX=$(__hasg --prefix=\* "$@")
 			: ${CONF_PREFIX:=${EPREFIX}/usr}
 			CONF_PREFIX=${CONF_PREFIX#*=}
 			[[ ${CONF_PREFIX} != /* ]] && CONF_PREFIX="/${CONF_PREFIX}"
 			[[ ${CONF_LIBDIR} != /* ]] && CONF_LIBDIR="/${CONF_LIBDIR}"
-			set -- --libdir="$(strip_duplicate_slashes ${CONF_PREFIX}${CONF_LIBDIR})" "$@"
+			set -- --libdir="$(__strip_duplicate_slashes ${CONF_PREFIX}${CONF_LIBDIR})" "$@"
 		fi
 
 		set -- \
@@ -455,7 +491,7 @@ econf() {
 			--localstatedir="${EPREFIX}"/var/lib \
 			"$@" \
 			${EXTRA_ECONF}
-		vecho "${ECONF_SOURCE}/configure" "$@"
+		__vecho "${ECONF_SOURCE}/configure" "$@"
 
 		if ! "${ECONF_SOURCE}/configure" "$@" ; then
 
@@ -485,7 +521,7 @@ einstall() {
 	unset LIBDIR_VAR
 	if [ -n "${CONF_LIBDIR}" ] && [ "${CONF_PREFIX:+set}" = set ]; then
 		EI_DESTLIBDIR="${D}/${CONF_PREFIX}/${CONF_LIBDIR}"
-		EI_DESTLIBDIR="$(strip_duplicate_slashes ${EI_DESTLIBDIR})"
+		EI_DESTLIBDIR="$(__strip_duplicate_slashes ${EI_DESTLIBDIR})"
 		LOCAL_EXTRA_EINSTALL="libdir=${EI_DESTLIBDIR} ${LOCAL_EXTRA_EINSTALL}"
 		unset EI_DESTLIBDIR
 	fi
@@ -516,7 +552,7 @@ einstall() {
 	fi
 }
 
-_eapi0_pkg_nofetch() {
+__eapi0_pkg_nofetch() {
 	[ -z "${SRC_URI}" ] && return
 
 	elog "The following are listed in SRC_URI for ${PN}:"
@@ -526,55 +562,61 @@ _eapi0_pkg_nofetch() {
 	done
 }
 
-_eapi0_src_unpack() {
+__eapi0_src_unpack() {
 	[[ -n ${A} ]] && unpack ${A}
 }
 
-_eapi0_src_compile() {
+__eapi0_src_compile() {
 	if [ -x ./configure ] ; then
 		econf
 	fi
-	_eapi2_src_compile
+	__eapi2_src_compile
 }
 
-_eapi0_src_test() {
+__eapi0_src_test() {
 	# Since we don't want emake's automatic die
 	# support (EAPI 4 and later), and we also don't
 	# want the warning messages that it produces if
 	# we call it in 'nonfatal' mode, we use emake_cmd
 	# to emulate the desired parts of emake behavior.
 	local emake_cmd="${MAKE:-make} ${MAKEOPTS} ${EXTRA_EMAKE}"
-	if $emake_cmd -j1 check -n &> /dev/null; then
-		vecho ">>> Test phase [check]: ${CATEGORY}/${PF}"
-		$emake_cmd -j1 check || \
+	local internal_opts=
+	case "$EAPI" in
+		0|1|2|3|4|4-python|4-slot-abi)
+			internal_opts+=" -j1"
+			;;
+	esac
+	if $emake_cmd ${internal_opts} check -n &> /dev/null; then
+		__vecho ">>> Test phase [check]: ${CATEGORY}/${PF}"
+		$emake_cmd ${internal_opts} check || \
 			die "Make check failed. See above for details."
-	elif $emake_cmd -j1 test -n &> /dev/null; then
-		vecho ">>> Test phase [test]: ${CATEGORY}/${PF}"
-		$emake_cmd -j1 test || \
+	elif $emake_cmd ${internal_opts} test -n &> /dev/null; then
+		__vecho ">>> Test phase [test]: ${CATEGORY}/${PF}"
+		$emake_cmd ${internal_opts} test || \
 			die "Make test failed. See above for details."
 	else
-		vecho ">>> Test phase [none]: ${CATEGORY}/${PF}"
+		__vecho ">>> Test phase [none]: ${CATEGORY}/${PF}"
 	fi
 }
 
-_eapi1_src_compile() {
-	_eapi2_src_configure
-	_eapi2_src_compile
+__eapi1_src_compile() {
+	__eapi2_src_configure
+	__eapi2_src_compile
 }
 
-_eapi2_src_configure() {
+__eapi2_src_configure() {
 	if [[ -x ${ECONF_SOURCE:-.}/configure ]] ; then
 		econf
 	fi
 }
 
-_eapi2_src_compile() {
+__eapi2_src_compile() {
 	if [ -f Makefile ] || [ -f GNUmakefile ] || [ -f makefile ]; then
 		emake || die "emake failed"
 	fi
 }
 
-_eapi4_src_install() {
+__eapi4_src_install() {
 	if [[ -f Makefile || -f GNUmakefile || -f makefile ]] ; then
 		emake DESTDIR="${D}" install
 	fi
@@ -593,28 +635,45 @@ _eapi4_src_install() {
 }
 
 # @FUNCTION: has_version
-# @USAGE: <DEPEND ATOM>
+# @USAGE: [--host-root] <DEPEND ATOM>
 # @DESCRIPTION:
 # Return true if given package is installed. Otherwise return false.
 # Callers may override the ROOT variable in order to match packages from an
 # alternative ROOT.
 has_version() {
 
-	local eroot
+	local atom eroot host_root=false root=${ROOT}
+	if [[ $1 == --host-root ]] ; then
+		host_root=true
+		shift
+	fi
+	atom=$1
+	shift
+	[ $# -gt 0 ] && die "${FUNCNAME[0]}: unused argument(s): $*"
+
+	if ${host_root} ; then
+		case "${EAPI}" in
+			0|1|2|3|4|4-python|4-slot-abi)
+				die "${FUNCNAME[0]}: option --host-root is not supported with EAPI ${EAPI}"
+				;;
+		esac
+		root=/
+	fi
+
 	case "$EAPI" in
 		0|1|2)
 			[[ " ${FEATURES} " == *" force-prefix "* ]] && \
-				eroot=${ROOT%/}${EPREFIX}/ || eroot=${ROOT}
+				eroot=${root%/}${EPREFIX}/ || eroot=${root}
 			;;
 		*)
-			eroot=${ROOT%/}${EPREFIX}/
+			eroot=${root%/}${EPREFIX}/
 			;;
 	esac
 	if [[ -n $PORTAGE_IPC_DAEMON ]] ; then
-		"$PORTAGE_BIN_PATH"/ebuild-ipc has_version "${eroot}" "$1"
+		"$PORTAGE_BIN_PATH"/ebuild-ipc has_version "${eroot}" "${atom}"
 	else
 		PYTHONPATH=${PORTAGE_PYM_PATH}${PYTHONPATH:+:}${PYTHONPATH} \
-		"${PORTAGE_PYTHON:-/usr/bin/python}" "${PORTAGE_BIN_PATH}/portageq" has_version "${eroot}" "$1"
+		"${PORTAGE_PYTHON:-/usr/bin/python}" "${PORTAGE_BIN_PATH}/portageq" has_version "${eroot}" "${atom}"
 	fi
 	local retval=$?
 	case "${retval}" in
@@ -628,28 +687,45 @@ has_version() {
 }
 
 # @FUNCTION: best_version
-# @USAGE: <DEPEND ATOM>
+# @USAGE: [--host-root] <DEPEND ATOM>
 # @DESCRIPTION:
 # Returns the best/most-current match.
 # Callers may override the ROOT variable in order to match packages from an
 # alternative ROOT.
 best_version() {
 
-	local eroot
+	local atom eroot host_root=false root=${ROOT}
+	if [[ $1 == --host-root ]] ; then
+		host_root=true
+		shift
+	fi
+	atom=$1
+	shift
+	[ $# -gt 0 ] && die "${FUNCNAME[0]}: unused argument(s): $*"
+
+	if ${host_root} ; then
+		case "${EAPI}" in
+			0|1|2|3|4|4-python|4-slot-abi)
+				die "${FUNCNAME[0]}: option --host-root is not supported with EAPI ${EAPI}"
+				;;
+		esac
+		root=/
+	fi
+
 	case "$EAPI" in
 		0|1|2)
 			[[ " ${FEATURES} " == *" force-prefix "* ]] && \
-				eroot=${ROOT%/}${EPREFIX}/ || eroot=${ROOT}
+				eroot=${root%/}${EPREFIX}/ || eroot=${root}
 			;;
 		*)
-			eroot=${ROOT%/}${EPREFIX}/
+			eroot=${root%/}${EPREFIX}/
 			;;
 	esac
 	if [[ -n $PORTAGE_IPC_DAEMON ]] ; then
-		"$PORTAGE_BIN_PATH"/ebuild-ipc best_version "${eroot}" "$1"
+		"$PORTAGE_BIN_PATH"/ebuild-ipc best_version "${eroot}" "${atom}"
 	else
 		PYTHONPATH=${PORTAGE_PYM_PATH}${PYTHONPATH:+:}${PYTHONPATH} \
-		"${PORTAGE_PYTHON:-/usr/bin/python}" "${PORTAGE_BIN_PATH}/portageq" best_version "${eroot}" "$1"
+		"${PORTAGE_PYTHON:-/usr/bin/python}" "${PORTAGE_BIN_PATH}/portageq" best_version "${eroot}" "${atom}"
 	fi
 	local retval=$?
 	case "${retval}" in

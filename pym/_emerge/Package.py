@@ -17,6 +17,9 @@ from _emerge.Task import Task
 if sys.hexversion >= 0x3000000:
 	basestring = str
 	long = int
+	_unicode = str
+else:
+	_unicode = unicode
 
 class Package(Task):
 
@@ -26,7 +29,7 @@ class Package(Task):
 		"root_config", "type_name",
 		"category", "counter", "cp", "cpv_split",
 		"inherited", "iuse", "mtime",
-		"pf", "root", "slot", "slot_abi", "slot_atom", "version") + \
+		"pf", "root", "slot", "sub_slot", "slot_atom", "version") + \
 		("_invalid", "_raw_metadata", "_masks", "_use",
 		"_validated_atoms", "_visible")
 
@@ -51,17 +54,23 @@ class Package(Task):
 		if not self.built:
 			self.metadata['CHOST'] = self.root_config.settings.get('CHOST', '')
 		eapi_attrs = _get_eapi_attrs(self.metadata["EAPI"])
-		self.cpv = _pkg_str(self.cpv, slot=self.metadata["SLOT"],
-			repo=self.metadata.get('repository', ''),
-			eapi=self.metadata["EAPI"])
+		self.cpv = _pkg_str(self.cpv, metadata=self.metadata,
+			settings=self.root_config.settings)
 		if hasattr(self.cpv, 'slot_invalid'):
 			self._invalid_metadata('SLOT.invalid',
 				"SLOT: invalid value: '%s'" % self.metadata["SLOT"])
 		self.cp = self.cpv.cp
 		self.slot = self.cpv.slot
-		self.slot_abi = self.cpv.slot_abi
+		self.sub_slot = self.cpv.sub_slot
 		# sync metadata with validated repo (may be UNKNOWN_REPO)
 		self.metadata['repository'] = self.cpv.repo
+
+		if eapi_attrs.iuse_effective:
+			implicit_match = self.root_config.settings._iuse_effective_match
+		else:
+			implicit_match = self.root_config.settings._iuse_implicit_match
+		self.iuse = self._iuse(self.metadata["IUSE"].split(), implicit_match)
+
 		if (self.iuse.enabled or self.iuse.disabled) and \
 			not eapi_attrs.iuse_defaults:
 			if not self.installed:
@@ -86,6 +95,11 @@ class Package(Task):
 			root_config=self.root_config,
 			type_name=self.type_name)
 		self._hash_value = hash(self._hash_key)
+
+	# For consistency with _pkg_str
+	@property
+	def _metadata(self):
+		return self.metadata
 
 	# These are calculated on-demand, so that they are calculated
 	# after FakeVartree applies its metadata tweaks.
@@ -119,6 +133,10 @@ class Package(Task):
 		if self._validated_atoms is None:
 			self._validate_deps()
 		return self._validated_atoms
+
+	@property
+	def stable(self):
+		return self.cpv.stable
 
 	@classmethod
 	def _gen_hash_key(cls, cpv=None, installed=None, onlydeps=None,
@@ -154,7 +172,7 @@ class Package(Task):
 			# So overwrite the repo_key with type_name.
 			repo_key = type_name
 
-		return (type_name, root, cpv, operation, repo_key)
+		return (type_name, root, _unicode(cpv), operation, repo_key)
 
 	def _validate_deps(self):
 		"""
@@ -210,14 +228,14 @@ class Package(Task):
 
 		k = 'REQUIRED_USE'
 		v = self.metadata.get(k)
-		if v:
+		if v and not self.built:
 			if not _get_eapi_attrs(eapi).required_use:
 				self._invalid_metadata('EAPI.incompatible',
 					"REQUIRED_USE set, but EAPI='%s' doesn't allow it" % eapi)
 			else:
 				try:
 					check_required_use(v, (),
-						self.iuse.is_valid_flag)
+						self.iuse.is_valid_flag, eapi=eapi)
 				except InvalidDependString as e:
 					# Force unicode format string for python-2.x safety,
 					# ensuring that PortageException.__unicode__() is used
@@ -604,7 +622,7 @@ class _PackageMetadataWrapper(_PackageMetadataWrapperBase):
 
 	__slots__ = ("_pkg",)
 	_wrapped_keys = frozenset(
-		["COUNTER", "INHERITED", "IUSE", "USE", "_mtime_"])
+		["COUNTER", "INHERITED", "USE", "_mtime_"])
 	_use_conditional_keys = frozenset(
 		['LICENSE', 'PROPERTIES', 'PROVIDE', 'RESTRICT',])
 
@@ -672,10 +690,6 @@ class _PackageMetadataWrapper(_PackageMetadataWrapperBase):
 		if isinstance(v, basestring):
 			v = frozenset(v.split())
 		self._pkg.inherited = v
-
-	def _set_iuse(self, k, v):
-		self._pkg.iuse = self._pkg._iuse(
-			v.split(), self._pkg.root_config.settings._iuse_implicit_match)
 
 	def _set_counter(self, k, v):
 		if isinstance(v, basestring):
