@@ -95,7 +95,7 @@ SUPPORTED_FEATURES       = frozenset([
                            "digest", "distcc", "distcc-pump", "distlocks",
                            "downgrade-backup", "ebuild-locks", "fakeroot",
                            "fail-clean", "force-mirror", "force-prefix", "getbinpkg",
-                           "installsources", "keeptemp", "keepwork", "fixlafiles", "fixpackages", "lmirror", "localpatch",
+                           "installsources", "keeptemp", "keepwork", "fixlafiles", "fixpackages", "lmirror", 
                            "metadata-transfer", "mirror", "multilib-strict", "news",
                            "noauto", "noclean", "nodoc", "noinfo", "noman",
                            "nostrip", "notitles", "parallel-fetch", "parallel-install",
@@ -108,7 +108,7 @@ SUPPORTED_FEATURES       = frozenset([
                            "unknown-features-filter", "unknown-features-warn",
                            "unmerge-backup",
                            "unmerge-logs", "unmerge-orphans", "userfetch", "userpriv",
-                           "usersandbox", "usersync", "webrsync-gpg", "xattr", "mini-manifest"])
+                           "usersandbox", "usersync", "xattr", "mini-manifest"])
 
 EAPI                     = 4
 
