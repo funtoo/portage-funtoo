@@ -63,7 +63,7 @@ __save_ebuild_env() {
 		__abort_handler __abort_prepare __abort_configure __abort_compile \
 		__abort_test __abort_install __dyn_prepare __dyn_configure \
 		__dyn_compile __dyn_test __dyn_install \
-		__dyn_preinst __dyn_pretend __dyn_help \
+		__dyn_pretend __dyn_help \
 		debug-print debug-print-function \
 		debug-print-section __helpers_die inherit EXPORT_FUNCTIONS \
 		nonfatal register_success_hook \
@@ -76,10 +76,14 @@ __save_ebuild_env() {
 		__unpack_tar __unset_colors \
 		${QA_INTERCEPTORS}
 
-	case "${EAPI}" in
-		0|1|2|3|4|4-python|4-slot-abi) ;;
-		*) unset -f usex ;;
-	esac
+	___eapi_has_usex && unset -f usex
+	___eapi_has_master_repositories && unset -f master_repositories
+	___eapi_has_repository_path && unset -f repository_path
+	___eapi_has_available_eclasses && unset -f available_eclasses
+	___eapi_has_eclass_path && unset -f eclass_path
+	___eapi_has_license_path && unset -f license_path
+
+	unset -f $(compgen -A function ___eapi_)
 
 	# portage config variables and variables set directly by portage
 	unset ACCEPT_LICENSE BAD BRACKET BUILD_PREFIX COLS \

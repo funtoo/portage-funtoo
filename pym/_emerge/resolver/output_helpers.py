@@ -17,7 +17,6 @@ from portage._sets.base import InternalPackageSet
 from portage.output import (blue, bold, colorize, create_color_func,
 	green, red, teal, turquoise, yellow)
 bad = create_color_func("BAD")
-from portage.package.ebuild.config import _feature_flags
 from portage.util import shlex_split, writemsg
 from portage.util.SlotObject import SlotObject
 from portage.versions import catpkgsplit
@@ -249,7 +248,7 @@ def _format_size(mysize):
 
 def _create_use_string(conf, name, cur_iuse, iuse_forced, cur_use,
 	old_iuse, old_use,
-	is_new, reinst_flags):
+	is_new, feature_flags, reinst_flags):
 
 	if not conf.print_use_string:
 		return ""
@@ -267,6 +266,7 @@ def _create_use_string(conf, name, cur_iuse, iuse_forced, cur_use,
 	any_iuse = cur_iuse.union(old_iuse)
 	any_iuse = list(any_iuse)
 	any_iuse.sort()
+
 	for flag in any_iuse:
 		flag_str = None
 		isEnabled = False
@@ -300,7 +300,7 @@ def _create_use_string(conf, name, cur_iuse, iuse_forced, cur_use,
 			elif flag in old_use:
 				flag_str = green("-" + flag) + "*"
 		if flag_str:
-			if flag in _feature_flags:
+			if flag in feature_flags:
 				flag_str = "{" + flag_str + "}"
 			elif flag in iuse_forced:
 				flag_str = "(" + flag_str + ")"
@@ -617,7 +617,7 @@ class PkgInfo(object):
 	__slots__ = ("attr_display", "built", "cp",
 		"ebuild_path", "fetch_symbol", "merge",
 		"oldbest", "oldbest_list", "operation", "ordered",
-		"repo_name", "repo_path_real", "system", "use", "ver", "world")
+		"repo_name", "repo_path_real", "slot", "sub_slot", "system", "use", "ver", "world")
 
 
 	def __init__(self):
@@ -632,6 +632,8 @@ class PkgInfo(object):
 		self.ordered = False
 		self.repo_path_real = ''
 		self.repo_name = ''
+		self.slot = ''
+		self.sub_slot = ''
 		self.system = False
 		self.use = ''
 		self.ver = ''

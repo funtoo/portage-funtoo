@@ -71,8 +71,6 @@ from portage import cvstree, normalize_path
 from portage import util
 from portage.exception import (FileNotFound, MissingParameter,
 	ParseError, PermissionDenied)
-from portage.manifest import _prohibited_filename_chars_re as \
-	disallowed_filename_chars_re
 from portage.process import find_binary, spawn
 from portage.output import bold, create_color_func, \
 	green, nocolor, red
@@ -309,6 +307,12 @@ qahelp={
 	"ebuild.notadded":"Ebuilds that exist but have not been added to cvs",
 	"ebuild.patches":"PATCHES variable should be a bash array to ensure white space safety",
 	"changelog.notadded":"ChangeLogs that exist but have not been added to cvs",
+	"dependency.bad": "User-visible ebuilds with unsatisfied dependencies (matched against *visible* ebuilds)",
+	"dependency.badmasked": "Masked ebuilds with unsatisfied dependencies (matched against *all* ebuilds)",
+	"dependency.badindev": "User-visible ebuilds with unsatisfied dependencies (matched against *visible* ebuilds) in developing arch",
+	"dependency.badmaskedindev": "Masked ebuilds with unsatisfied dependencies (matched against *all* ebuilds) in developing arch",
+	"dependency.badtilde": "Uses the ~ dep operator with a non-zero revision part, which is useless (the revision is ignored)",
+	"dependency.syntax": "Syntax error in dependency string (usually an extra/missing space/parenthesis)",
 	"dependency.unknown" : "Ebuild has a dependency that refers to an unknown package (which may be valid if it is a blocker for a renamed/removed package, or is an alternative choice provided by an overlay)",
 	"file.executable":"Ebuilds, digests, metadata.xml, Manifest, and ChangeLog do not need the executable bit",
 	"file.size":"Files in the files directory must be under 20 KiB",
@@ -335,25 +339,7 @@ qahelp={
 	"SLOT.invalid":"Ebuilds that have a missing or invalid SLOT variable value",
 	"HOMEPAGE.missing":"Ebuilds that have a missing or empty HOMEPAGE variable",
 	"HOMEPAGE.virtual":"Virtuals that have a non-empty HOMEPAGE variable",
-	"DEPEND.bad":"User-visible ebuilds with bad DEPEND settings (matched against *visible* ebuilds)",
-	"RDEPEND.bad":"User-visible ebuilds with bad RDEPEND settings (matched against *visible* ebuilds)",
-	"PDEPEND.bad":"User-visible ebuilds with bad PDEPEND settings (matched against *visible* ebuilds)",
-	"DEPEND.badmasked":"Masked ebuilds with bad DEPEND settings (matched against *all* ebuilds)",
-	"RDEPEND.badmasked":"Masked ebuilds with RDEPEND settings (matched against *all* ebuilds)",
-	"PDEPEND.badmasked":"Masked ebuilds with PDEPEND settings (matched against *all* ebuilds)",
-	"DEPEND.badindev":"User-visible ebuilds with bad DEPEND settings (matched against *visible* ebuilds) in developing arch",
-	"RDEPEND.badindev":"User-visible ebuilds with bad RDEPEND settings (matched against *visible* ebuilds) in developing arch",
-	"PDEPEND.badindev":"User-visible ebuilds with bad PDEPEND settings (matched against *visible* ebuilds) in developing arch",
-	"DEPEND.badmaskedindev":"Masked ebuilds with bad DEPEND settings (matched against *all* ebuilds) in developing arch",
-	"RDEPEND.badmaskedindev":"Masked ebuilds with RDEPEND settings (matched against *all* ebuilds) in developing arch",
-	"PDEPEND.badmaskedindev":"Masked ebuilds with PDEPEND settings (matched against *all* ebuilds) in developing arch",
 	"PDEPEND.suspect":"PDEPEND contains a package that usually only belongs in DEPEND.",
-	"DEPEND.syntax":"Syntax error in DEPEND (usually an extra/missing space/parenthesis)",
-	"RDEPEND.syntax":"Syntax error in RDEPEND (usually an extra/missing space/parenthesis)",
-	"PDEPEND.syntax":"Syntax error in PDEPEND (usually an extra/missing space/parenthesis)",
-	"DEPEND.badtilde":"DEPEND uses the ~ dep operator with a non-zero revision part, which is useless (the revision is ignored)",
-	"RDEPEND.badtilde":"RDEPEND uses the ~ dep operator with a non-zero revision part, which is useless (the revision is ignored)",
-	"PDEPEND.badtilde":"PDEPEND uses the ~ dep operator with a non-zero revision part, which is useless (the revision is ignored)",
 	"LICENSE.syntax":"Syntax error in LICENSE (usually an extra/missing space/parenthesis)",
 	"PROVIDE.syntax":"Syntax error in PROVIDE (usually an extra/missing space/parenthesis)",
 	"PROPERTIES.syntax":"Syntax error in PROPERTIES (usually an extra/missing space/parenthesis)",
@@ -386,7 +372,7 @@ qahelp={
 	"metadata.missing":"Missing metadata.xml files",
 	"metadata.bad":"Bad metadata.xml files",
 	"metadata.warning":"Warnings in metadata.xml files",
-	"portage.internal":"The ebuild uses an internal Portage function",
+	"portage.internal":"The ebuild uses an internal Portage function or variable",
 	"virtual.oldstyle":"The ebuild PROVIDEs an old-style virtual (see GLEP 37)",
 	"virtual.suspect":"Ebuild contains a package that usually should be pulled via virtual/, not directly.",
 	"usage.obsolete":"The ebuild makes use of an obsolete construct",
@@ -404,10 +390,10 @@ qawarnings = set((
 "digest.unused",
 "ebuild.notadded",
 "ebuild.nesteddie",
-"DEPEND.badmasked","RDEPEND.badmasked","PDEPEND.badmasked",
-"DEPEND.badindev","RDEPEND.badindev","PDEPEND.badindev",
-"DEPEND.badmaskedindev","RDEPEND.badmaskedindev","PDEPEND.badmaskedindev",
-"DEPEND.badtilde", "RDEPEND.badtilde", "PDEPEND.badtilde",
+"dependency.badmasked",
+"dependency.badindev",
+"dependency.badmaskedindev",
+"dependency.badtilde",
 "DESCRIPTION.toolong",
 "EAPI.deprecated",
 "HOMEPAGE.virtual",
@@ -1431,19 +1417,19 @@ for x in effective_scanlist:
 	ebuildlist = [pkg.pf for pkg in ebuildlist]
 
 	for y in checkdirlist:
-		m = disallowed_filename_chars_re.search(y.strip(os.sep))
-		if m is not None:
+		index = repo_config.find_invalid_path_char(y)
+		if index != -1:
 			y_relative = os.path.join(checkdir_relative, y)
 			if vcs is not None and not vcs_new_changed(y_relative):
 				# If the file isn't in the VCS new or changed set, then
 				# assume that it's an irrelevant temporary file (Manifest
 				# entries are not generated for file names containing
 				# prohibited characters). See bug #406877.
-				m = None
-		if m is not None:
+				index = -1
+		if index != -1:
 			stats["file.name"] += 1
 			fails["file.name"].append("%s/%s: char '%s'" % \
-				(checkdir, y, m.group(0)))
+				(checkdir, y, y[index]))
 
 		if not (y in ("ChangeLog", "metadata.xml") or y.endswith(".ebuild")):
 			continue
@@ -1609,20 +1595,19 @@ for x in effective_scanlist:
 				stats["file.size"] += 1
 				fails["file.size"].append("("+ str(mystat.st_size//1024) + " KiB) "+x+"/files/"+y)
 
-			m = disallowed_filename_chars_re.search(
-				os.path.basename(y.rstrip(os.sep)))
-			if m is not None:
+			index = repo_config.find_invalid_path_char(y)
+			if index != -1:
 				y_relative = os.path.join(checkdir_relative, "files", y)
 				if vcs is not None and not vcs_new_changed(y_relative):
 					# If the file isn't in the VCS new or changed set, then
 					# assume that it's an irrelevant temporary file (Manifest
 					# entries are not generated for file names containing
 					# prohibited characters). See bug #406877.
-					m = None
-			if m is not None:
+					index = -1
+			if index != -1:
 				stats["file.name"] += 1
 				fails["file.name"].append("%s/files/%s: char '%s'" % \
-					(checkdir, y, m.group(0)))
+					(checkdir, y, y[index]))
 	del mydigests
 
 	if check_changelog and "ChangeLog" not in checkdirlist:
@@ -1730,7 +1715,7 @@ for x in effective_scanlist:
 			for k, msgs in pkg.invalid.items():
 				for msg in msgs:
 					stats[k] = stats[k] + 1
-					fails[k].append("%s %s" % (relative_path, msg))
+					fails[k].append("%s: %s" % (relative_path, msg))
 			continue
 
 		myaux = pkg.metadata
@@ -1887,12 +1872,13 @@ for x in effective_scanlist:
 		inherited_wxwidgets_eclass = "wxwidgets" in inherited
 		operator_tokens = set(["||", "(", ")"])
 		type_list, badsyntax = [], []
-		for mytype in ("DEPEND", "RDEPEND", "PDEPEND",
-			"LICENSE", "PROPERTIES", "PROVIDE"):
+		for mytype in Package._dep_keys + ("LICENSE", "PROPERTIES", "PROVIDE"):
 			mydepstr = myaux[mytype]
 
+			buildtime = mytype in Package._buildtime_keys
+			runtime = mytype in Package._runtime_keys
 			token_class = None
-			if mytype in ("DEPEND", "RDEPEND", "PDEPEND"):
+			if mytype.endswith("DEPEND"):
 				token_class=portage.dep.Atom
 
 			try:
@@ -1902,8 +1888,8 @@ for x in effective_scanlist:
 				atoms = None
 				badsyntax.append(str(e))
 
-			if atoms and mytype in ("DEPEND", "RDEPEND", "PDEPEND"):
-				if mytype in ("RDEPEND", "PDEPEND") and \
+			if atoms and mytype.endswith("DEPEND"):
+				if runtime and \
 					"test?" in mydepstr.split():
 					stats[mytype + '.suspect'] += 1
 					fails[mytype + '.suspect'].append(relative_path + \
@@ -1932,21 +1918,21 @@ for x in effective_scanlist:
 								": %s: consider using '%s' instead of '%s'" %
 								(mytype, suspect_virtual[atom.cp], atom))
 
-					if mytype == "DEPEND" and \
+					if buildtime and \
 						not is_blocker and \
 						not inherited_java_eclass and \
 						atom.cp == "virtual/jdk":
 						stats['java.eclassesnotused'] += 1
 						fails['java.eclassesnotused'].append(relative_path)
-					elif mytype == "DEPEND" and \
+					elif buildtime and \
 						not is_blocker and \
 						not inherited_wxwidgets_eclass and \
 						atom.cp == "x11-libs/wxGTK":
 						stats['wxwidgets.eclassnotused'] += 1
 						fails['wxwidgets.eclassnotused'].append(
-							relative_path + ": DEPENDs on x11-libs/wxGTK"
-							" without inheriting wxwidgets.eclass")
-					elif mytype in ("PDEPEND", "RDEPEND"):
+							(relative_path + ": %ss on x11-libs/wxGTK"
+							" without inheriting wxwidgets.eclass") % mytype)
+					elif runtime:
 						if not is_blocker and \
 							atom.cp in suspect_rdepend:
 							stats[mytype + '.suspect'] += 1
@@ -1955,8 +1941,9 @@ for x in effective_scanlist:
 
 					if atom.operator == "~" and \
 						portage.versions.catpkgsplit(atom.cpv)[3] != "r0":
-						stats[mytype + '.badtilde'] += 1
-						fails[mytype + '.badtilde'].append(
+						qacat = 'dependency.badtilde'
+						stats[qacat] += 1
+						fails[qacat].append(
 							(relative_path + ": %s uses the ~ operator"
 							 " with a non-zero revision:" + \
 							 " '%s'") % (mytype, atom))
@@ -1964,8 +1951,12 @@ for x in effective_scanlist:
 			type_list.extend([mytype] * (len(badsyntax) - len(type_list)))
 
 		for m,b in zip(type_list, badsyntax):
-			stats[m+".syntax"] += 1
-			fails[m+".syntax"].append(catpkg+".ebuild "+m+": "+b)
+			if m.endswith("DEPEND"):
+				qacat = "dependency.syntax"
+			else:
+				qacat = m + ".syntax"
+			stats[qacat] += 1
+			fails[qacat].append("%s: %s: %s" % (relative_path, m, b))
 
 		badlicsyntax = len([z for z in type_list if z == "LICENSE"])
 		badprovsyntax = len([z for z in type_list if z == "PROVIDE"])
@@ -2162,9 +2153,9 @@ for x in effective_scanlist:
 					if prof.status == "dev":
 						suffix=suffix+"indev"
 
-					for mytype,mypos in [["DEPEND",len(missingvars)],["RDEPEND",len(missingvars)+1],["PDEPEND",len(missingvars)+2]]:
+					for mytype in Package._dep_keys:
 						
-						mykey=mytype+".bad"+suffix
+						mykey = "dependency.bad" + suffix
 						myvalue = myaux[mytype]
 						if not myvalue:
 							continue
@@ -2205,13 +2196,13 @@ for x in effective_scanlist:
 								if not atoms:
 									continue
 								stats[mykey]=stats[mykey]+1
-								fails[mykey].append("%s: %s(%s) %s" % \
-									(relative_path, keyword,
+								fails[mykey].append("%s: %s: %s(%s) %s" % \
+									(relative_path, mytype, keyword,
 									prof, repr(atoms)))
 						else:
 							stats[mykey]=stats[mykey]+1
-							fails[mykey].append("%s: %s(%s) %s" % \
-								(relative_path, keyword,
+							fails[mykey].append("%s: %s: %s(%s) %s" % \
+								(relative_path, mytype, keyword,
 								prof, repr(atoms)))
 
 		if not baddepsyntax and unknown_pkgs:
@@ -2533,16 +2524,33 @@ else:
 		sys.stderr.write("Failed to insert portage version in message!\n")
 		sys.stderr.flush()
 		portage_version = "Unknown"
-	unameout = platform.system() + " "
-	if platform.system() in ["Darwin", "SunOS"]:
-		unameout += platform.processor()
+
+	if vcs == "git":
+		# Use new footer only for git (see bug #438364).
+		commit_footer = "\n\nPackage-Manager: portage-%s" % portage_version
+		if options.force:
+			commit_footer += "\nRepoMan-Options: --force"
+		if sign_manifests:
+			commit_footer += "\nManifest-Sign-Key: %s" % \
+				repoman_settings.get("PORTAGE_GPG_KEY", "")
 	else:
-		unameout += platform.machine()
-	commitmessage += "\n\n(Portage version: %s/%s/%s" % \
-		(portage_version, vcs, unameout)
-	if options.force:
-		commitmessage += ", RepoMan options: --force"
-	commitmessage += ")"
+		unameout = platform.system() + " "
+		if platform.system() in ["Darwin", "SunOS"]:
+			unameout += platform.processor()
+		else:
+			unameout += platform.machine()
+		commit_footer = "\n\n(Portage version: %s/%s/%s" % \
+			(portage_version, vcs, unameout)
+		if options.force:
+			commit_footer += ", RepoMan options: --force"
+		if sign_manifests:
+			commit_footer += ", signed Manifest commit with key %s" % \
+				repoman_settings.get("PORTAGE_GPG_KEY", "")
+		else:
+			commit_footer += ", unsigned Manifest commit"
+		commit_footer += ")"
+
+	commitmessage += commit_footer
 
 	if options.echangelog in ('y', 'force'):
 		logging.info("checking for unmodified ChangeLog files")
@@ -2774,6 +2782,16 @@ else:
 			else:
 				raise portage.exception.PortageException("!!! gpg exited with '" + str(rValue) + "' status")
 
+	def need_signature(filename):
+		try:
+			with open(_unicode_encode(filename,
+				encoding=_encodings['fs'], errors='strict'), 'rb') as f:
+				return b"BEGIN PGP SIGNED MESSAGE" not in f.readline()
+		except IOError as e:
+			if e.errno in (errno.ENOENT, errno.ESTALE):
+				return False
+			raise
+
 	# When files are removed and re-added, the cvs server will put /Attic/
 	# inside the $Header path. This code detects the problem and corrects it
 	# so that the Manifest will generate correctly. See bug #169500.
@@ -2816,7 +2834,7 @@ else:
 				chain(myupdates, myremoved, mymanifests))):
 				repoman_settings["O"] = os.path.join(repodir, x)
 				manifest_path = os.path.join(repoman_settings["O"], "Manifest")
-				if not os.path.exists(manifest_path):
+				if not need_signature(manifest_path):
 					continue
 				gpgsign(manifest_path)
 		except portage.exception.PortageException as e:
@@ -2858,14 +2876,7 @@ else:
 
 		fd, commitmessagefile = tempfile.mkstemp(".repoman.msg")
 		mymsg = os.fdopen(fd, "wb")
-		# strip the closing parenthesis
-		mymsg.write(_unicode_encode(commitmessage[:-1]))
-		if signed:
-			mymsg.write(_unicode_encode(
-				", signed Manifest commit with key %s)" % \
-				repoman_settings["PORTAGE_GPG_KEY"]))
-		else:
-			mymsg.write(b", unsigned Manifest commit)")
+		mymsg.write(_unicode_encode(commitmessage))
 		mymsg.close()
 
 		commit_cmd = []

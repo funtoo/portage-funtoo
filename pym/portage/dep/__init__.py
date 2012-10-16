@@ -55,6 +55,7 @@ _op = r'([=~]|[><]=?)'
 
 _repo_separator = "::"
 _repo_name = r'[\w][\w-]*'
+_repo_name_re = re.compile('^' + _repo_name + '$', re.UNICODE)
 _repo = r'(?:' + _repo_separator + '(' + _repo_name + ')' + ')?'
 
 _extended_cat = r'[\w+*][\w+.*-]*'
@@ -72,7 +73,7 @@ def _get_slot_re(eapi_attrs):
 	else:
 		slot_re = _slot
 
-	slot_re = re.compile('^' + slot_re + '$', re.VERBOSE)
+	slot_re = re.compile('^' + slot_re + '$', re.VERBOSE | re.UNICODE)
 
 	_slot_re_cache[cache_key] = slot_re
 	return slot_re
@@ -90,7 +91,7 @@ def _get_slot_dep_re(eapi_attrs):
 	else:
 		slot_re = _slot
 
-	slot_re = re.compile('^' + slot_re + '$', re.VERBOSE)
+	slot_re = re.compile('^' + slot_re + '$', re.VERBOSE | re.UNICODE)
 
 	_slot_dep_re_cache[cache_key] = slot_re
 	return slot_re
@@ -123,7 +124,7 @@ def _get_atom_re(eapi_attrs):
 		'(?P<star>=' + cpv_re + r'\*)|' +
 		'(?P<simple>' + cp_re + '))' + 
 		'(' + _slot_separator + _slot_loose + ')?' +
-		_repo + ')(' + _use + ')?$', re.VERBOSE)
+		_repo + ')(' + _use + ')?$', re.VERBOSE | re.UNICODE)
 
 	_atom_re_cache[cache_key] = atom_re
 	return atom_re
@@ -143,9 +144,9 @@ def _get_atom_wildcard_re(eapi_attrs):
 
 	atom_re = re.compile(r'((?P<simple>(' +
 		_extended_cat + r')/(' + pkg_re + r'))' + \
-		'|(?P<star>=((' + _extended_cat + r')/(' + pkg_re + r'))-(?P<version>\*\d+\*)))' + \
+		'|(?P<star>=((' + _extended_cat + r')/(' + pkg_re + r'))-(?P<version>\*\w+\*)))' + \
 		'(:(?P<slot>' + _slot_loose + r'))?(' +
-		_repo_separator + r'(?P<repo>' + _repo_name + r'))?$')
+		_repo_separator + r'(?P<repo>' + _repo_name + r'))?$', re.UNICODE)
 
 	_atom_wildcard_re_cache[cache_key] = atom_re
 	return atom_re
@@ -1333,6 +1334,8 @@ class Atom(_unicode):
 						sub_slot = sub_slot[:-1]
 					self.__dict__['sub_slot'] = sub_slot
 					self.__dict__['slot_operator'] = slot_operator
+				if self.slot is not None and self.slot_operator == "*":
+					raise InvalidAtom(self)
 			else:
 				self.__dict__['slot'] = slot
 				self.__dict__['sub_slot'] = None
@@ -1583,7 +1586,7 @@ def extended_cp_match(extended_cp, other_cp):
 	extended_cp_re = _extended_cp_re_cache.get(extended_cp)
 	if extended_cp_re is None:
 		extended_cp_re = re.compile("^" + re.escape(extended_cp).replace(
-			r'\*', '[^/]*') + "$")
+			r'\*', '[^/]*') + "$", re.UNICODE)
 		_extended_cp_re_cache[extended_cp] = extended_cp_re
 	return extended_cp_re.match(other_cp) is not None
 
@@ -2132,7 +2135,7 @@ def match_from_list(mydep, candidate_list):
 
 			candidate_list = mylist
 			mylist = []
-			# Currently, only \*\d+\* is supported.
+			# Currently, only \*\w+\* is supported.
 			ver = mydep.version[1:-1]
 
 			for x in candidate_list:
@@ -2172,11 +2175,10 @@ def match_from_list(mydep, candidate_list):
 		# XXX: Nasty special casing for leading zeros
 		# Required as =* is a literal prefix match, so can't 
 		# use vercmp
-		mysplit = catpkgsplit(mycpv)
-		myver = mysplit[2].lstrip("0")
+		myver = mycpv_cps[2].lstrip("0")
 		if not myver or not myver[0].isdigit():
 			myver = "0"+myver
-		mycpv_cmp = mysplit[0]+"/"+mysplit[1]+"-"+myver
+		mycpv_cmp = mycpv_cps[0] + "/" + mycpv_cps[1] + "-" + myver
 		for x in candidate_list:
 			xs = getattr(x, "cpv_split", None)
 			if xs is None:

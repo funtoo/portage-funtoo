@@ -62,6 +62,7 @@ try:
 			'match_from_list,match_to_list',
 		'portage.dep.dep_check:dep_check,dep_eval,dep_wordreduce,dep_zapdeps',
 		'portage.eclass_cache',
+		'portage.elog',
 		'portage.exception',
 		'portage.getbinpkg',
 		'portage.locks',
@@ -328,6 +329,8 @@ _python_interpreter = os.path.realpath(sys.executable)
 _bin_path = PORTAGE_BIN_PATH
 _pym_path = PORTAGE_PYM_PATH
 
+_sync_disabled_warnings = False
+
 def _shell_quote(s):
 	"""
 	Quote a string in double-quotes and use backslashes to
@@ -414,8 +417,8 @@ def abssymlink(symlink, target=None):
 
 _doebuild_manifest_exempt_depend = 0
 
-_testing_eapis = frozenset(["4-python", "4-slot-abi", "5_pre2"])
-_deprecated_eapis = frozenset(["4_pre1", "3_pre2", "3_pre1", "5_pre1"])
+_testing_eapis = frozenset(["4-python", "4-slot-abi", "5-progress", "5-hdepend"])
+_deprecated_eapis = frozenset(["4_pre1", "3_pre2", "3_pre1", "5_pre1", "5_pre2"])
 
 def _eapi_is_deprecated(eapi):
 	return eapi in _deprecated_eapis
@@ -472,7 +475,7 @@ auxdbkeys = (
 	'RESTRICT',  'HOMEPAGE',  'LICENSE',   'DESCRIPTION',
 	'KEYWORDS',  'INHERITED', 'IUSE', 'REQUIRED_USE',
 	'PDEPEND',   'PROVIDE', 'EAPI',
-	'PROPERTIES', 'DEFINED_PHASES', 'UNUSED_05', 'UNUSED_04',
+	'PROPERTIES', 'DEFINED_PHASES', 'HDEPEND', 'UNUSED_04',
 	'UNUSED_03', 'UNUSED_02', 'UNUSED_01',
 )
 auxdbkeylen=len(auxdbkeys)

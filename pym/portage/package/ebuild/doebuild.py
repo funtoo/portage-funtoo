@@ -29,6 +29,8 @@ portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.dep._slot_operator:evaluate_slot_operator_equal_deps',
 	'portage.package.ebuild._spawn_nofetch:spawn_nofetch',
 	'portage.util._desktop_entry:validate_desktop_entry',
+	'portage.util._async.SchedulerInterface:SchedulerInterface',
+	'portage.util._eventloop.EventLoop:EventLoop',
 	'portage.util.ExtractKernelVersion:ExtractKernelVersion'
 )
 
@@ -65,7 +67,6 @@ from _emerge.EbuildBuildDir import EbuildBuildDir
 from _emerge.EbuildPhase import EbuildPhase
 from _emerge.EbuildSpawnProcess import EbuildSpawnProcess
 from _emerge.Package import Package
-from _emerge.PollScheduler import PollScheduler
 from _emerge.RootConfig import RootConfig
 
 _unsandboxed_phases = frozenset([
@@ -92,6 +93,9 @@ _phase_func_map = {
 	"info": "pkg_info",
 	"pretend": "pkg_pretend",
 }
+
+_vdb_use_conditional_keys = Package._dep_keys + \
+	('LICENSE', 'PROPERTIES', 'PROVIDE', 'RESTRICT',)
 
 def _doebuild_spawn(phase, settings, actionmap=None, **kwargs):
 	"""
@@ -130,7 +134,7 @@ def _spawn_phase(phase, settings, actionmap=None, **kwargs):
 		return _doebuild_spawn(phase, settings, actionmap=actionmap, **kwargs)
 
 	ebuild_phase = EbuildPhase(actionmap=actionmap, background=False,
-		phase=phase, scheduler=PollScheduler().sched_iface,
+		phase=phase, scheduler=SchedulerInterface(EventLoop(main=False)),
 		settings=settings)
 	ebuild_phase.start()
 	ebuild_phase.wait()
@@ -154,6 +158,10 @@ def _doebuild_path(settings, eapi=None):
 	prefixes.append("/")
 
 	path = []
+
+	if eprefix and uid != 0 and "fakeroot" not in settings.features:
+		path.append(os.path.join(portage_bin_path,
+			"ebuild-helpers", "unprivileged"))
 
 	if settings.get("USERLAND", "GNU") != "GNU":
 		path.append(os.path.join(portage_bin_path, "ebuild-helpers", "bsd"))
@@ -684,7 +692,7 @@ def doebuild(myebuild, mydo, _unused=None, settings=None, debug=0, listonly=0,
 			if not returnpid and \
 				'PORTAGE_BUILDIR_LOCKED' not in mysettings:
 				builddir_lock = EbuildBuildDir(
-					scheduler=PollScheduler().sched_iface,
+					scheduler=EventLoop(main=False),
 					settings=mysettings)
 				builddir_lock.lock()
 			try:
@@ -826,7 +834,7 @@ def doebuild(myebuild, mydo, _unused=None, settings=None, debug=0, listonly=0,
 					if builddir_lock is None and \
 						'PORTAGE_BUILDIR_LOCKED' not in mysettings:
 						builddir_lock = EbuildBuildDir(
-							scheduler=PollScheduler().sched_iface,
+							scheduler=EventLoop(main=False),
 							settings=mysettings)
 						builddir_lock.lock()
 					try:
@@ -849,7 +857,7 @@ def doebuild(myebuild, mydo, _unused=None, settings=None, debug=0, listonly=0,
 			if not returnpid and \
 				'PORTAGE_BUILDIR_LOCKED' not in mysettings:
 				builddir_lock = EbuildBuildDir(
-					scheduler=PollScheduler().sched_iface,
+					scheduler=EventLoop(main=False),
 					settings=mysettings)
 				builddir_lock.lock()
 			mystatus = prepare_build_dirs(myroot, mysettings, cleanup)
@@ -904,8 +912,16 @@ def doebuild(myebuild, mydo, _unused=None, settings=None, debug=0, listonly=0,
 		# the sandbox -- and stop now.
 		if mydo in ("config", "help", "info", "postinst",
 			"preinst", "pretend", "postrm", "prerm"):
-			return _spawn_phase(mydo, mysettings,
-				fd_pipes=fd_pipes, logfile=logfile, returnpid=returnpid)
+			if mydo in ("preinst", "postinst"):
+				env_file = os.path.join(os.path.dirname(mysettings["EBUILD"]),
+					"environment.bz2")
+				if os.path.isfile(env_file):
+					mysettings["PORTAGE_UPDATE_ENV"] = env_file
+			try:
+				return _spawn_phase(mydo, mysettings,
+					fd_pipes=fd_pipes, logfile=logfile, returnpid=returnpid)
+			finally:
+				mysettings.pop("PORTAGE_UPDATE_ENV", None)
 
 		mycpv = "/".join((mysettings["CATEGORY"], mysettings["PF"]))
 
@@ -1182,7 +1198,7 @@ def _prepare_env_file(settings):
 	"""
 
 	env_extractor = BinpkgEnvExtractor(background=False,
-		scheduler=PollScheduler().sched_iface, settings=settings)
+		scheduler=EventLoop(main=False), settings=settings)
 
 	if env_extractor.dest_env_exists():
 		# There are lots of possible states when doebuild()
@@ -1442,7 +1458,8 @@ def spawn(mystring, mysettings, debug=0, free=0, droppriv=0, sesandbox=0, fakero
 
 	proc = EbuildSpawnProcess(
 		background=False, args=mystring,
-		scheduler=PollScheduler().sched_iface, spawn_func=spawn_func,
+		scheduler=SchedulerInterface(EventLoop(main=False)),
+		spawn_func=spawn_func,
 		settings=mysettings, **keywords)
 
 	proc.start()
@@ -1727,9 +1744,6 @@ def _post_src_install_write_metadata(settings):
 				errors='strict') as f:
 				f.write(_unicode_decode(v + '\n'))
 
-_vdb_use_conditional_keys = ('DEPEND', 'LICENSE', 'PDEPEND',
-	'PROPERTIES', 'PROVIDE', 'RDEPEND', 'RESTRICT',)
-
 def _preinst_bsdflags(mysettings):
 	if bsd_chflags:
 		# Save all the file flags for restoration later.
@@ -1777,6 +1791,28 @@ def _post_src_install_uid_fix(mysettings, out):
 	xdg_dirs = tuple(os.path.join(i, "applications") + os.sep
 		for i in xdg_dirs if i)
 
+	qa_desktop_file = ""
+	try:
+		with io.open(_unicode_encode(os.path.join(
+			mysettings["PORTAGE_BUILDDIR"],
+			"build-info", "QA_DESKTOP_FILE"),
+			encoding=_encodings['fs'], errors='strict'),
+			mode='r', encoding=_encodings['repo.content'],
+			errors='replace') as f:
+			qa_desktop_file = f.read()
+	except IOError as e:
+		if e.errno not in (errno.ENOENT, errno.ESTALE):
+			raise
+
+	qa_desktop_file = qa_desktop_file.split()
+	if qa_desktop_file:
+		if len(qa_desktop_file) > 1:
+			qa_desktop_file = "|".join("(%s)" % x for x in qa_desktop_file)
+			qa_desktop_file = "^(%s)$" % qa_desktop_file
+		else:
+			qa_desktop_file = "^%s$" % qa_desktop_file[0]
+		qa_desktop_file = re.compile(qa_desktop_file)
+
 	while True:
 
 		unicode_error = False
@@ -1823,9 +1859,11 @@ def _post_src_install_uid_fix(mysettings, out):
 				else:
 					fpath = os.path.join(parent, fname)
 
+				fpath_relative = fpath[ed_len - 1:]
 				if desktop_file_validate and fname.endswith(".desktop") and \
 					os.path.isfile(fpath) and \
-					fpath[ed_len - 1:].startswith(xdg_dirs):
+					fpath_relative.startswith(xdg_dirs) and \
+					not (qa_desktop_file and qa_desktop_file.match(fpath_relative.strip(os.sep)) is not None):
 
 					desktop_validate = validate_desktop_entry(fpath)
 					if desktop_validate:

@@ -8,7 +8,7 @@
 # when portage is upgrading itself.
 
 PORTAGE_READONLY_METADATA="DEFINED_PHASES DEPEND DESCRIPTION
-	EAPI HOMEPAGE INHERITED IUSE REQUIRED_USE KEYWORDS LICENSE
+	EAPI HDEPEND HOMEPAGE INHERITED IUSE REQUIRED_USE KEYWORDS LICENSE
 	PDEPEND PROVIDE RDEPEND REPOSITORY RESTRICT SLOT SRC_URI"
 
 PORTAGE_READONLY_VARS="D EBUILD EBUILD_PHASE EBUILD_PHASE_FUNC \
@@ -100,15 +100,9 @@ __filter_readonly_variables() {
 
 	# Don't filter/interfere with prefix variables unless they are
 	# supported by the current EAPI.
-	case "${EAPI:-0}" in
-		0|1|2)
-			[[ " ${FEATURES} " == *" force-prefix "* ]] && \
-				filtered_vars+=" ED EPREFIX EROOT"
-			;;
-		*)
-			filtered_vars+=" ED EPREFIX EROOT"
-			;;
-	esac
+	if ___eapi_has_prefix_variables; then
+		filtered_vars+=" ED EPREFIX EROOT"
+	fi
 
 	if has --filter-sandbox $* ; then
 		filtered_vars="${filtered_vars} SANDBOX_.*"
@@ -364,7 +358,7 @@ __dyn_prepare() {
 
 	if [[ -d $S ]] ; then
 		cd "${S}"
-	elif has $EAPI 0 1 2 3 ; then
+	elif ___eapi_has_S_WORKDIR_fallback; then
 		cd "${WORKDIR}"
 	elif [[ -z ${A} ]] && ! __has_phase_defined_up_to prepare; then
 		cd "${WORKDIR}"
@@ -395,7 +389,7 @@ __dyn_configure() {
 
 	if [[ -d $S ]] ; then
 		cd "${S}"
-	elif has $EAPI 0 1 2 3 ; then
+	elif ___eapi_has_S_WORKDIR_fallback; then
 		cd "${WORKDIR}"
 	elif [[ -z ${A} ]] && ! __has_phase_defined_up_to configure; then
 		cd "${WORKDIR}"
@@ -428,7 +422,7 @@ __dyn_compile() {
 
 	if [[ -d $S ]] ; then
 		cd "${S}"
-	elif has $EAPI 0 1 2 3 ; then
+	elif ___eapi_has_S_WORKDIR_fallback; then
 		cd "${WORKDIR}"
 	elif [[ -z ${A} ]] && ! __has_phase_defined_up_to compile; then
 		cd "${WORKDIR}"
@@ -510,16 +504,18 @@ __dyn_install() {
 	trap "__abort_install" SIGINT SIGQUIT
 	__ebuild_phase pre_src_install
 
-	_x=${ED}
-	[[ " ${FEATURES} " == *" force-prefix "* ]] || \
-		case "$EAPI" in 0|1|2) _x=${D} ;; esac
+	if ___eapi_has_prefix_variables; then
+		_x=${ED}
+	else
+		_x=${D}
+	fi
 	rm -rf "${D}"
 	mkdir -p "${_x}"
 	unset _x
 
 	if [[ -d $S ]] ; then
 		cd "${S}"
-	elif has $EAPI 0 1 2 3 ; then
+	elif ___eapi_has_S_WORKDIR_fallback; then
 		cd "${WORKDIR}"
 	elif [[ -z ${A} ]] && ! __has_phase_defined_up_to install; then
 		cd "${WORKDIR}"
@@ -560,7 +556,7 @@ __dyn_install() {
 	if [[ $CATEGORY != virtual ]] ; then
 		for f in ASFLAGS CBUILD CC CFLAGS CHOST CTARGET CXX \
 			CXXFLAGS EXTRA_ECONF EXTRA_EINSTALL EXTRA_MAKE \
-			LDFLAGS LIBCFLAGS LIBCXXFLAGS ; do
+			LDFLAGS LIBCFLAGS LIBCXXFLAGS QA_DESKTOP_FILE ; do
 			x=$(echo -n ${!f})
 			[[ -n $x ]] && echo "$x" > $f
 		done
@@ -571,15 +567,9 @@ __dyn_install() {
 	# Save EPREFIX, since it makes it easy to use chpathtool to
 	# adjust the content of a binary package so that it will
 	# work in a different EPREFIX from the one is was built for.
-	case "${EAPI:-0}" in
-		0|1|2)
-			[[ " ${FEATURES} " == *" force-prefix "* ]] && \
-				[ -n "${EPREFIX}" ] && echo "${EPREFIX}" > EPREFIX
-			;;
-		*)
-			[ -n "${EPREFIX}" ] && echo "${EPREFIX}" > EPREFIX
-			;;
-	esac
+	if ___eapi_has_prefix_variables && [[ -n ${EPREFIX} ]]; then
+		echo "${EPREFIX}" > EPREFIX
+	fi
 
 	set +f
 
@@ -599,14 +589,6 @@ __dyn_install() {
 		>> DEBUGBUILD
 	fi
 	trap - SIGINT SIGQUIT
-}
-
-__dyn_preinst() {
-	if [ -z "${D}" ]; then
-		eerror "${FUNCNAME}: D is unset"
-		return 1
-	fi
-	__ebuild_phase_with_hooks pkg_preinst
 }
 
 __dyn_help() {
@@ -677,14 +659,13 @@ __dyn_help() {
 # Translate a known ebuild(1) argument into the precise
 # name of it's corresponding ebuild phase.
 __ebuild_arg_to_phase() {
-	[ $# -ne 2 ] && die "expected exactly 2 args, got $#: $*"
-	local eapi=$1
-	local arg=$2
+	[ $# -ne 1 ] && die "expected exactly 1 arg, got $#: $*"
+	local arg=$1
 	local phase_func=""
 
 	case "$arg" in
 		pretend)
-			! has $eapi 0 1 2 3 && \
+			___eapi_has_pkg_pretend && \
 				phase_func=pkg_pretend
 			;;
 		setup)
@@ -697,11 +678,11 @@ __ebuild_arg_to_phase() {
 			phase_func=src_unpack
 			;;
 		prepare)
-			! has $eapi 0 1 && \
+			___eapi_has_src_prepare && \
 				phase_func=src_prepare
 			;;
 		configure)
-			! has $eapi 0 1 && \
+			___eapi_has_src_configure && \
 				phase_func=src_configure
 			;;
 		compile)
@@ -861,7 +842,7 @@ __ebuild_main() {
 	# respect FEATURES="-ccache".
 	has ccache $FEATURES || export CCACHE_DISABLE=1
 
-	local phase_func=$(__ebuild_arg_to_phase "$EAPI" "$EBUILD_PHASE")
+	local phase_func=$(__ebuild_arg_to_phase "$EBUILD_PHASE")
 	[[ -n $phase_func ]] && __ebuild_phase_funcs "$EAPI" "$phase_func"
 	unset phase_func
 
@@ -871,7 +852,7 @@ __ebuild_main() {
 	nofetch)
 		__ebuild_phase_with_hooks pkg_nofetch
 		;;
-	prerm|postrm|postinst|config|info)
+	prerm|postrm|preinst|postinst|config|info)
 		if has "${1}" config info && \
 			! declare -F "pkg_${1}" >/dev/null ; then
 			ewarn  "pkg_${1}() is not defined: '${EBUILD##*/}'"
@@ -884,7 +865,7 @@ __ebuild_main() {
 			__ebuild_phase_with_hooks pkg_${1}
 			set +x
 		fi
-		if [[ $EBUILD_PHASE == postinst ]] && [[ -n $PORTAGE_UPDATE_ENV ]]; then
+		if [[ -n $PORTAGE_UPDATE_ENV ]] ; then
 			# Update environment.bz2 in case installation phases
 			# need to pass some variables to uninstallation phases.
 			__save_ebuild_env --exclude-init-phases | \
@@ -960,7 +941,7 @@ __ebuild_main() {
 		fi
 		export SANDBOX_ON="0"
 		;;
-	help|pretend|setup|preinst)
+	help|pretend|setup)
 		#pkg_setup needs to be out of the sandbox for tmp file creation;
 		#for example, awking and piping a file in /tmp requires a temp file to be created
 		#in /etc.  If pkg_setup is in the sandbox, both our lilo and apache ebuilds break.
@@ -990,8 +971,8 @@ __ebuild_main() {
 		__save_ebuild_env | __filter_readonly_variables \
 			--filter-features > "$T/environment"
 		assert "__save_ebuild_env failed"
-		chown portage:portage "$T/environment" &>/dev/null
-		chmod g+w "$T/environment" &>/dev/null
+		chgrp "${PORTAGE_GRPNAME:-portage}" "$T/environment"
+		chmod g+w "$T/environment"
 	fi
 	[[ -n $PORTAGE_EBUILD_EXIT_FILE ]] && > "$PORTAGE_EBUILD_EXIT_FILE"
 	if [[ -n $PORTAGE_IPC_DAEMON ]] ; then

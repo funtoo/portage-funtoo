@@ -12,7 +12,7 @@ portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.dbapi.dep_expand:dep_expand',
 	'portage.dbapi._MergeProcess:MergeProcess',
 	'portage.dep:dep_getkey,isjustname,isvalidatom,match_from_list,' + \
-	 	'use_reduce,_get_slot_re',
+	 	'use_reduce,_get_slot_re,_slot_separator,_repo_separator',
 	'portage.eapi:_get_eapi_attrs',
 	'portage.elog:collect_ebuild_messages,collect_messages,' + \
 		'elog_process,_merge_logentries',
@@ -32,6 +32,8 @@ portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.util.movefile:movefile',
 	'portage.util._dyn_libs.PreservedLibsRegistry:PreservedLibsRegistry',
 	'portage.util._dyn_libs.LinkageMapELF:LinkageMapELF@LinkageMap',
+	'portage.util._async.SchedulerInterface:SchedulerInterface',
+	'portage.util._eventloop.EventLoop:EventLoop',
 	'portage.versions:best,catpkgsplit,catsplit,cpv_getkey,vercmp,' + \
 		'_pkgsplit@pkgsplit,_pkg_str',
 	'subprocess',
@@ -40,7 +42,6 @@ portage.proxy.lazyimport.lazyimport(globals(),
 
 from portage.const import CACHE_PATH, CONFIG_MEMORY_FILE, \
 	PORTAGE_PACKAGE_ATOM, PRIVATE_PATH, VDB_PATH
-from portage.const import _ENABLE_DYN_LINK_MAP, _ENABLE_PRESERVE_LIBS
 from portage.dbapi import dbapi
 from portage.exception import CommandNotFound, \
 	InvalidData, InvalidLocation, InvalidPackageName, \
@@ -61,7 +62,6 @@ from portage import _unicode_encode
 from _emerge.EbuildBuildDir import EbuildBuildDir
 from _emerge.EbuildPhase import EbuildPhase
 from _emerge.emergelog import emergelog
-from _emerge.PollScheduler import PollScheduler
 from _emerge.MiscFunctionsProcess import MiscFunctionsProcess
 from _emerge.SpawnProcess import SpawnProcess
 
@@ -162,7 +162,7 @@ class vardbapi(dbapi):
 		self.vartree = vartree
 		self._aux_cache_keys = set(
 			["BUILD_TIME", "CHOST", "COUNTER", "DEPEND", "DESCRIPTION",
-			"EAPI", "HOMEPAGE", "IUSE", "KEYWORDS",
+			"EAPI", "HDEPEND", "HOMEPAGE", "IUSE", "KEYWORDS",
 			"LICENSE", "PDEPEND", "PROPERTIES", "PROVIDE", "RDEPEND",
 			"repository", "RESTRICT" , "SLOT", "USE", "DEFINED_PHASES",
 			])
@@ -172,15 +172,9 @@ class vardbapi(dbapi):
 		self._counter_path = os.path.join(self._eroot,
 			CACHE_PATH, "counter")
 
-		self._plib_registry = None
-		if _ENABLE_PRESERVE_LIBS:
-			self._plib_registry = PreservedLibsRegistry(settings["ROOT"],
-				os.path.join(self._eroot, PRIVATE_PATH,
-				"preserved_libs_registry"))
-
-		self._linkmap = None
-		if _ENABLE_DYN_LINK_MAP:
-			self._linkmap = LinkageMap(self)
+		self._plib_registry = PreservedLibsRegistry(settings["ROOT"],
+			os.path.join(self._eroot, PRIVATE_PATH, "preserved_libs_registry"))
+		self._linkmap = LinkageMap(self)
 		self._owners = self._owners_db(self)
 
 		self._cached_counter = None
@@ -592,7 +586,9 @@ class vardbapi(dbapi):
 			aux_cache = mypickle.load()
 			f.close()
 			del f
-		except (AttributeError, EOFError, EnvironmentError, ValueError, pickle.UnpicklingError) as e:
+		except (SystemExit, KeyboardInterrupt):
+			raise
+		except Exception as e:
 			if isinstance(e, EnvironmentError) and \
 				getattr(e, 'errno', None) in (errno.ENOENT, errno.EACCES):
 				pass
@@ -1786,7 +1782,7 @@ class dblink(object):
 		if self._scheduler is None:
 			# We create a scheduler instance and use it to
 			# log unmerge output separately from merge output.
-			self._scheduler = PollScheduler().sched_iface
+			self._scheduler = SchedulerInterface(EventLoop(main=False))
 		if self.settings.get("PORTAGE_BACKGROUND") == "subprocess":
 			if self.settings.get("PORTAGE_BACKGROUND_UNMERGE") == "1":
 				self.settings["PORTAGE_BACKGROUND"] = "1"
@@ -3808,17 +3804,29 @@ class dblink(object):
 					# get_owners is slow for large numbers of files, so
 					# don't look them all up.
 					collisions = collisions[:20]
+
+				pkg_info_strs = {}
 				self.lockdb()
 				try:
 					owners = self.vartree.dbapi._owners.get_owners(collisions)
 					self.vartree.dbapi.flush_cache()
+
+					for pkg in owners:
+						other_slot, other_repo = self.vartree.dbapi.aux_get(
+							pkg.mycpv, ["SLOT", "repository"])
+						pkg_info_str = "%s%s%s" % (pkg.mycpv,
+							_slot_separator, other_slot)
+						if other_repo:
+							pkg_info_str += "%s%s" % (_repo_separator,
+								other_repo)
+						pkg_info_strs[pkg.mycpv] = pkg_info_str
+
 				finally:
 					self.unlockdb()
 
 				for pkg, owned_files in owners.items():
-					cpv = pkg.mycpv
 					msg = []
-					msg.append("%s" % cpv)
+					msg.append(pkg_info_strs[pkg.mycpv])
 					for f in sorted(owned_files):
 						msg.append("\t%s" % os.path.join(destroot,
 							f.lstrip(os.path.sep)))
@@ -4636,7 +4644,7 @@ class dblink(object):
 			self.lockdb()
 		self.vartree.dbapi._bump_mtime(self.mycpv)
 		if self._scheduler is None:
-			self._scheduler = PollScheduler().sched_iface
+			self._scheduler = SchedulerInterface(EventLoop(main=False))
 		try:
 			retval = self.treewalk(mergeroot, myroot, inforoot, myebuild,
 				cleanup=cleanup, mydbapi=mydbapi, prev_mtimes=prev_mtimes,
@@ -4820,7 +4828,7 @@ def merge(mycat, mypkg, pkgloc, infloc,
 	merge_task = MergeProcess(
 		mycat=mycat, mypkg=mypkg, settings=settings,
 		treetype=mytree, vartree=vartree,
-		scheduler=(scheduler or PollScheduler().sched_iface),
+		scheduler=(scheduler or EventLoop(main=False)),
 		background=background, blockers=blockers, pkgloc=pkgloc,
 		infloc=infloc, myebuild=myebuild, mydbapi=mydbapi,
 		prev_mtimes=prev_mtimes, logfile=settings.get('PORTAGE_LOG_FILE'))

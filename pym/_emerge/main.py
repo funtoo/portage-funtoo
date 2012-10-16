@@ -3,51 +3,40 @@
 
 from __future__ import print_function
 
-import logging
-import signal
-import stat
-import subprocess
-import sys
-import textwrap
 import platform
+import signal
+import sys
+
 import portage
 portage.proxy.lazyimport.lazyimport(globals(),
+	'logging',
+	'portage.debug',
+	'portage.dbapi.dep_expand:dep_expand',
 	'portage.news:count_unread_news,display_news_notifications',
 	'portage.emaint.modules.logs.logs:CleanLogs',
+	'portage.output:colorize,xtermTitle,xtermTitleReset',
+	'portage._global_updates:_global_updates',
+	'portage._sets:SETPREFIX',
+	'portage.util:shlex_split,varexpand,writemsg_level,writemsg_stdout',
+	'portage.util._dyn_libs.display_preserved_libs:display_preserved_libs',
+	'portage.util._info_files:chk_updated_info_files',
+	'textwrap',
+	'time',
+	'_emerge.actions:action_build,action_config,action_info,' + \
+		'action_metadata,action_regen,action_search,action_sync,' + \
+		'action_uninstall,adjust_configs,chk_updated_cfg_files,'+ \
+		'display_missing_pkg_set,display_news_notification,' + \
+		'getportageversion,load_emerge_config',
+	'_emerge.emergelog:emergelog',
+	'_emerge.help:help@emerge_help',
+	'_emerge.is_valid_package_atom:is_valid_package_atom',
+	'_emerge.stdout_spinner:stdout_spinner',
+	'_emerge.userquery:userquery',
+	'_emerge._flush_elog_mod_echo:_flush_elog_mod_echo',
 )
 from portage import os
 from portage import _encodings
 from portage import _unicode_decode
-import _emerge.help
-import portage.xpak, errno, re, time
-from portage.output import colorize, xtermTitle, xtermTitleReset
-from portage.output import create_color_func
-good = create_color_func("GOOD")
-bad = create_color_func("BAD")
-
-from portage.const import _ENABLE_DYN_LINK_MAP
-import portage.elog
-import portage.util
-import portage.locks
-import portage.exception
-from portage.data import secpass
-from portage.dbapi.dep_expand import dep_expand
-from portage.util import normalize_path as normpath
-from portage.util import (shlex_split, varexpand,
-	writemsg_level, writemsg_stdout)
-from portage._sets import SETPREFIX
-from portage._global_updates import _global_updates
-
-from _emerge.actions import action_config, action_sync, action_metadata, \
-	action_regen, action_search, action_uninstall, action_info, action_build, \
-	adjust_configs, chk_updated_cfg_files, display_missing_pkg_set, \
-	display_news_notification, getportageversion, load_emerge_config
-import _emerge
-from _emerge.emergelog import emergelog
-from _emerge._flush_elog_mod_echo import _flush_elog_mod_echo
-from _emerge.is_valid_package_atom import is_valid_package_atom
-from _emerge.stdout_spinner import stdout_spinner
-from _emerge.userquery import userquery
 
 if sys.hexversion >= 0x3000000:
 	long = int
@@ -114,220 +103,6 @@ COWSAY_MOO = """
                 ||     ||
 
 """
-
-def chk_updated_info_files(root, infodirs, prev_mtimes, retval):
-
-	if os.path.exists("/usr/bin/install-info"):
-		out = portage.output.EOutput()
-		regen_infodirs=[]
-		for z in infodirs:
-			if z=='':
-				continue
-			inforoot=normpath(root+z)
-			if os.path.isdir(inforoot) and \
-				not [x for x in os.listdir(inforoot) \
-				if x.startswith('.keepinfodir')]:
-					infomtime = os.stat(inforoot)[stat.ST_MTIME]
-					if inforoot not in prev_mtimes or \
-						prev_mtimes[inforoot] != infomtime:
-							regen_infodirs.append(inforoot)
-
-		if not regen_infodirs:
-			portage.writemsg_stdout("\n")
-			if portage.util.noiselimit >= 0:
-				out.einfo("GNU info directory index is up-to-date.")
-		else:
-			portage.writemsg_stdout("\n")
-			if portage.util.noiselimit >= 0:
-				out.einfo("Regenerating GNU info directory index...")
-
-			dir_extensions = ("", ".gz", ".bz2")
-			icount=0
-			badcount=0
-			errmsg = ""
-			for inforoot in regen_infodirs:
-				if inforoot=='':
-					continue
-
-				if not os.path.isdir(inforoot) or \
-					not os.access(inforoot, os.W_OK):
-					continue
-
-				file_list = os.listdir(inforoot)
-				file_list.sort()
-				dir_file = os.path.join(inforoot, "dir")
-				moved_old_dir = False
-				processed_count = 0
-				for x in file_list:
-					if x.startswith(".") or \
-						os.path.isdir(os.path.join(inforoot, x)):
-						continue
-					if x.startswith("dir"):
-						skip = False
-						for ext in dir_extensions:
-							if x == "dir" + ext or \
-								x == "dir" + ext + ".old":
-								skip = True
-								break
-						if skip:
-							continue
-					if processed_count == 0:
-						for ext in dir_extensions:
-							try:
-								os.rename(dir_file + ext, dir_file + ext + ".old")
-								moved_old_dir = True
-							except EnvironmentError as e:
-								if e.errno != errno.ENOENT:
-									raise
-								del e
-					processed_count += 1
-					try:
-						proc = subprocess.Popen(
-							['/usr/bin/install-info',
-							'--dir-file=%s' % os.path.join(inforoot, "dir"),
-							os.path.join(inforoot, x)],
-							env=dict(os.environ, LANG="C", LANGUAGE="C"),
-							stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-					except OSError:
-						myso = None
-					else:
-						myso = _unicode_decode(
-							proc.communicate()[0]).rstrip("\n")
-						proc.wait()
-					existsstr="already exists, for file `"
-					if myso:
-						if re.search(existsstr,myso):
-							# Already exists... Don't increment the count for this.
-							pass
-						elif myso[:44]=="install-info: warning: no info dir entry in ":
-							# This info file doesn't contain a DIR-header: install-info produces this
-							# (harmless) warning (the --quiet switch doesn't seem to work).
-							# Don't increment the count for this.
-							pass
-						else:
-							badcount=badcount+1
-							errmsg += myso + "\n"
-					icount=icount+1
-
-				if moved_old_dir and not os.path.exists(dir_file):
-					# We didn't generate a new dir file, so put the old file
-					# back where it was originally found.
-					for ext in dir_extensions:
-						try:
-							os.rename(dir_file + ext + ".old", dir_file + ext)
-						except EnvironmentError as e:
-							if e.errno != errno.ENOENT:
-								raise
-							del e
-
-				# Clean dir.old cruft so that they don't prevent
-				# unmerge of otherwise empty directories.
-				for ext in dir_extensions:
-					try:
-						os.unlink(dir_file + ext + ".old")
-					except EnvironmentError as e:
-						if e.errno != errno.ENOENT:
-							raise
-						del e
-
-				#update mtime so we can potentially avoid regenerating.
-				prev_mtimes[inforoot] = os.stat(inforoot)[stat.ST_MTIME]
-
-			if badcount:
-				out.eerror("Processed %d info files; %d errors." % \
-					(icount, badcount))
-				writemsg_level(errmsg, level=logging.ERROR, noiselevel=-1)
-			else:
-				if icount > 0 and portage.util.noiselimit >= 0:
-					out.einfo("Processed %d info files." % (icount,))
-
-def display_preserved_libs(vardbapi, myopts):
-	MAX_DISPLAY = 3
-
-	if vardbapi._linkmap is None or \
-		vardbapi._plib_registry is None:
-		# preserve-libs is entirely disabled
-		return
-
-	# Explicitly load and prune the PreservedLibsRegistry in order
-	# to ensure that we do not display stale data.
-	vardbapi._plib_registry.load()
-
-	if vardbapi._plib_registry.hasEntries():
-		if "--quiet" in myopts:
-			print()
-			print(colorize("WARN", "!!!") + " existing preserved libs found")
-			return
-		else:
-			print()
-			print(colorize("WARN", "!!!") + " existing preserved libs:")
-
-		plibdata = vardbapi._plib_registry.getPreservedLibs()
-		linkmap = vardbapi._linkmap
-		consumer_map = {}
-		owners = {}
-
-		try:
-			linkmap.rebuild()
-		except portage.exception.CommandNotFound as e:
-			writemsg_level("!!! Command Not Found: %s\n" % (e,),
-				level=logging.ERROR, noiselevel=-1)
-			del e
-		else:
-			search_for_owners = set()
-			for cpv in plibdata:
-				internal_plib_keys = set(linkmap._obj_key(f) \
-					for f in plibdata[cpv])
-				for f in plibdata[cpv]:
-					if f in consumer_map:
-						continue
-					consumers = []
-					for c in linkmap.findConsumers(f):
-						# Filter out any consumers that are also preserved libs
-						# belonging to the same package as the provider.
-						if linkmap._obj_key(c) not in internal_plib_keys:
-							consumers.append(c)
-					consumers.sort()
-					consumer_map[f] = consumers
-					search_for_owners.update(consumers[:MAX_DISPLAY+1])
-
-			owners = {}
-			for f in search_for_owners:
-				owner_set = set()
-				for owner in linkmap.getOwners(f):
-					owner_dblink = vardbapi._dblink(owner)
-					if owner_dblink.exists():
-						owner_set.add(owner_dblink)
-				if owner_set:
-					owners[f] = owner_set
-
-		for cpv in plibdata:
-			print(colorize("WARN", ">>>") + " package: %s" % cpv)
-			samefile_map = {}
-			for f in plibdata[cpv]:
-				obj_key = linkmap._obj_key(f)
-				alt_paths = samefile_map.get(obj_key)
-				if alt_paths is None:
-					alt_paths = set()
-					samefile_map[obj_key] = alt_paths
-				alt_paths.add(f)
-
-			for alt_paths in samefile_map.values():
-				alt_paths = sorted(alt_paths)
-				for p in alt_paths:
-					print(colorize("WARN", " * ") + " - %s" % (p,))
-				f = alt_paths[0]
-				consumers = consumer_map.get(f, [])
-				for c in consumers[:MAX_DISPLAY]:
-					print(colorize("WARN", " * ") + "     used by %s (%s)" % \
-						(c, ", ".join(x.mycpv for x in owners.get(c, []))))
-				if len(consumers) == MAX_DISPLAY + 1:
-					print(colorize("WARN", " * ") + "     used by %s (%s)" % \
-						(consumers[MAX_DISPLAY], ", ".join(x.mycpv \
-						for x in owners.get(consumers[MAX_DISPLAY], []))))
-				elif len(consumers) > MAX_DISPLAY:
-					print(colorize("WARN", " * ") + "     used by %d other files" % (len(consumers) - MAX_DISPLAY))
-		print("Use " + colorize("GOOD", "emerge @preserved-rebuild") + " to rebuild packages using these libraries")
 
 def post_emerge(myaction, myopts, myfiles,
 	target_root, trees, mtimedb, retval):
@@ -399,13 +174,27 @@ def post_emerge(myaction, myopts, myfiles,
 		try:
 			if "noinfo" not in settings.features:
 				chk_updated_info_files(target_root,
-					infodirs, info_mtimes, retval)
+					infodirs, info_mtimes)
 			mtimedb.commit()
 		finally:
 			if vdb_lock:
 				vardbapi.unlock()
 
-	display_preserved_libs(vardbapi, myopts)
+	# Explicitly load and prune the PreservedLibsRegistry in order
+	# to ensure that we do not display stale data.
+	vardbapi._plib_registry.load()
+
+	if vardbapi._plib_registry.hasEntries():
+		if "--quiet" in myopts:
+			print()
+			print(colorize("WARN", "!!!") + " existing preserved libs found")
+		else:
+			print()
+			print(colorize("WARN", "!!!") + " existing preserved libs:")
+			display_preserved_libs(vardbapi)
+			print("Use " + colorize("GOOD", "emerge @preserved-rebuild") +
+				" to rebuild packages using these libraries")
+
 	chk_updated_cfg_files(settings['EROOT'], config_protect)
 	
 	if settings['EROOT'] == "/":
@@ -423,7 +212,8 @@ def post_emerge(myaction, myopts, myfiles,
 						[postemerge], env=settings.environ())
 		if hook_retval != os.EX_OK:
 			writemsg_level(
-				" %s spawn failed of %s\n" % (bad("*"), postemerge,),
+				" %s spawn failed of %s\n" %
+				(colorize("BAD", "*"), postemerge,),
 				level=logging.ERROR, noiselevel=-1)
 
 	clean_logs(settings)
@@ -461,6 +251,16 @@ def insert_optional_args(args):
 				return False
 
 	valid_integers = valid_integers()
+
+	class valid_floats(object):
+		def __contains__(self, s):
+			try:
+				return float(s) >= 0
+			except (ValueError, OverflowError):
+				return False
+
+	valid_floats = valid_floats()
+
 	y_or_n = ('y', 'n',)
 
 	new_args = []
@@ -474,6 +274,7 @@ def insert_optional_args(args):
 		'--buildpkg'             : y_or_n,
 		'--complete-graph'       : y_or_n,
 		'--deep'       : valid_integers,
+		'--depclean-lib-check'   : y_or_n,
 		'--deselect'             : y_or_n,
 		'--binpkg-respect-use'   : y_or_n,
 		'--fail-clean'           : y_or_n,
@@ -481,6 +282,7 @@ def insert_optional_args(args):
 		'--getbinpkgonly'        : y_or_n,
 		'--jobs'       : valid_integers,
 		'--keep-going'           : y_or_n,
+		'--load-average'         : valid_floats,
 		'--package-moves'        : y_or_n,
 		'--quiet'                : y_or_n,
 		'--quiet-build'          : y_or_n,
@@ -496,9 +298,6 @@ def insert_optional_args(args):
 		'--usepkg'               : y_or_n,
 		'--usepkgonly'           : y_or_n,
 	}
-
-	if _ENABLE_DYN_LINK_MAP:
-		default_arg_opts['--depclean-lib-check'] = y_or_n
 
 	short_arg_opts = {
 		'D' : valid_integers,
@@ -732,6 +531,12 @@ def parse_opts(tmpcmdline, silent=False):
 				"dependencies of installed packages.",
 
 			"action" : "store"
+		},
+
+		"--depclean-lib-check": {
+			"help"    : "check for consumers of libraries before removing them",
+			"type"    : "choice",
+			"choices" : true_y_or_n
 		},
 
 		"--deselect": {
@@ -980,15 +785,7 @@ def parse_opts(tmpcmdline, silent=False):
 			"type"     : "choice",
 			"choices"  : true_y_or_n
 		},
-
 	}
-
-	if _ENABLE_DYN_LINK_MAP:
-		argument_options["--depclean-lib-check"] = {
-			"help"    : "check for consumers of libraries before removing them",
-			"type"    : "choice",
-			"choices" : true_y_or_n
-		}
 
 	from optparse import OptionParser
 	parser = OptionParser()
@@ -1064,9 +861,8 @@ def parse_opts(tmpcmdline, silent=False):
 	else:
 		myoptions.complete_graph = None
 
-	if _ENABLE_DYN_LINK_MAP:
-		if myoptions.depclean_lib_check in true_y:
-			myoptions.depclean_lib_check = True
+	if myoptions.depclean_lib_check in true_y:
+		myoptions.depclean_lib_check = True
 
 	if myoptions.exclude:
 		bad_atoms = _find_bad_atoms(myoptions.exclude)
@@ -1220,6 +1016,9 @@ def parse_opts(tmpcmdline, silent=False):
 					(myoptions.jobs,))
 
 		myoptions.jobs = jobs
+
+	if myoptions.load_average == "True":
+		myoptions.load_average = None
 
 	if myoptions.load_average:
 		try:
@@ -1632,11 +1431,18 @@ def emerge_main(args=None):
 	if args is None:
 		args = sys.argv[1:]
 
-	portage._disable_legacy_globals()
-	portage.dep._internal_warnings = True
 	# Disable color until we're sure that it should be enabled (after
 	# EMERGE_DEFAULT_OPTS has been parsed).
 	portage.output.havecolor = 0
+
+	# optimize --help (no need to load config / EMERGE_DEFAULT_OPTS)
+	if "--help" in args or "-h" in args:
+		emerge_help()
+		return 0
+
+	portage._disable_legacy_globals()
+	portage.dep._internal_warnings = True
+
 	# This first pass is just for options that need to be known as early as
 	# possible, such as --config-root.  They will be parsed again later,
 	# together with EMERGE_DEFAULT_OPTS (which may vary depending on the
@@ -1653,6 +1459,8 @@ def emerge_main(args=None):
 
 	# Portage needs to ensure a sane umask for the files it creates.
 	os.umask(0o22)
+	if myaction == "sync":
+		portage._sync_disabled_warnings = True
 	settings, trees, mtimedb = load_emerge_config()
 	portdb = trees[settings['EROOT']]['porttree'].dbapi
 	rval = profile_check(trees, myaction)
@@ -1700,7 +1508,7 @@ def emerge_main(args=None):
 			trees[settings['EROOT']]['vartree'].dbapi) + '\n', noiselevel=-1)
 		return 0
 	elif myaction == 'help':
-		_emerge.help.help()
+		emerge_help()
 		return 0
 
 	spinner = stdout_spinner()
@@ -1827,8 +1635,7 @@ def emerge_main(args=None):
 		spinner.update = spinner.update_quiet
 		portage.util.noiselimit = 0
 		if "python-trace" in settings.features:
-			import portage.debug as portage_debug
-			portage_debug.set_trace(True)
+			portage.debug.set_trace(True)
 
 	if not ("--quiet" in myopts):
 		if '--nospinner' in myopts or \
@@ -1841,7 +1648,7 @@ def emerge_main(args=None):
 		print("myopts", myopts)
 
 	if not myaction and not myfiles and "--resume" not in myopts:
-		_emerge.help.help()
+		emerge_help()
 		return 1
 
 	pretend = "--pretend" in myopts
@@ -1855,7 +1662,7 @@ def emerge_main(args=None):
 			need_superuser = myaction in ('clean', 'depclean', 'deselect',
 				'prune', 'unmerge') or not \
 				(fetchonly or \
-				(buildpkgonly and secpass >= 1) or \
+				(buildpkgonly and portage.data.secpass >= 1) or \
 				myaction in ("metadata", "regen", "sync"))
 			if portage.secpass < 1 or \
 				need_superuser:
@@ -1865,12 +1672,11 @@ def emerge_main(args=None):
 					access_desc = "portage group"
 				# Always show portage_group_warning() when only portage group
 				# access is required but the user is not in the portage group.
-				from portage.data import portage_group_warning
 				if "--ask" in myopts:
 					writemsg_stdout("This action requires %s access...\n" % \
 						(access_desc,), noiselevel=-1)
 					if portage.secpass < 1 and not need_superuser:
-						portage_group_warning()
+						portage.data.portage_group_warning()
 					if userquery("Would you like to add --pretend to options?",
 						"--ask-enter-invalid" in myopts) == "No":
 						return 128 + signal.SIGINT
@@ -1880,7 +1686,7 @@ def emerge_main(args=None):
 					sys.stderr.write(("emerge: %s access is required\n") \
 						% access_desc)
 					if portage.secpass < 1 and not need_superuser:
-						portage_group_warning()
+						portage.data.portage_group_warning()
 					return 1
 
 	# Disable emergelog for everything except build or unmerge operations.
@@ -1898,6 +1704,7 @@ def emerge_main(args=None):
 	elif portage.data.secpass < 1:
 		disable_emergelog = True
 
+	import _emerge.emergelog
 	_emerge.emergelog._disable = disable_emergelog
 
 	if not disable_emergelog:
@@ -1944,11 +1751,10 @@ def emerge_main(args=None):
 	del oldargs
 
 	def emergeexitsig(signum, frame):
-		signal.signal(signal.SIGINT, signal.SIG_IGN)
 		signal.signal(signal.SIGTERM, signal.SIG_IGN)
 		portage.util.writemsg("\n\nExiting on signal %(signal)s\n" % {"signal":signum})
 		sys.exit(128 + signum)
-	signal.signal(signal.SIGINT, emergeexitsig)
+
 	signal.signal(signal.SIGTERM, emergeexitsig)
 
 	def emergeexit():

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 1999-2011 Gentoo Foundation
+# Copyright 1999-2012 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 #
 # Miscellaneous shell functions that make use of the ebuild env but don't need
@@ -17,8 +17,9 @@ shift $#
 source "${PORTAGE_BIN_PATH:-/usr/lib/portage/bin}/ebuild.sh"
 
 install_symlink_html_docs() {
-	[[ " ${FEATURES} " == *" force-prefix "* ]] || \
-		case "$EAPI" in 0|1|2) local ED=${D} ;; esac
+	if ! ___eapi_has_prefix_variables; then
+		local ED=${D}
+	fi
 	cd "${ED}" || die "cd failed"
 	#symlink the html documentation (if DOC_SYMLINKS_DIR is set in make.conf)
 	if [ -n "${DOC_SYMLINKS_DIR}" ] ; then
@@ -43,7 +44,20 @@ install_symlink_html_docs() {
 }
 
 # replacement for "readlink -f" or "realpath"
+READLINK_F_WORKS=""
 canonicalize() {
+	if [[ -z ${READLINK_F_WORKS} ]] ; then
+		if [[ $(readlink -f -- /../ 2>/dev/null) == "/" ]] ; then
+			READLINK_F_WORKS=true
+		else
+			READLINK_F_WORKS=false
+		fi
+	fi
+	if ${READLINK_F_WORKS} ; then
+		readlink -f -- "$@"
+		return
+	fi
+
 	local f=$1 b n=10 wd=$(pwd)
 	while (( n-- > 0 )); do
 		while [[ ${f: -1} = / && ${#f} -gt 1 ]]; do
@@ -66,8 +80,9 @@ canonicalize() {
 prepcompress() {
 	local -a include exclude incl_d incl_f
 	local f g i real_f real_d
-	[[ " ${FEATURES} " == *" force-prefix "* ]] || \
-		case "$EAPI" in 0|1|2) local ED=${D} ;; esac
+	if ! ___eapi_has_prefix_variables; then
+		local ED=${D}
+	fi
 
 	# Canonicalize path names and check for their existence.
 	real_d=$(canonicalize "${ED}")
@@ -149,13 +164,12 @@ prepcompress() {
 
 install_qa_check() {
 	local f i qa_var x
-	[[ " ${FEATURES} " == *" force-prefix "* ]] || \
-		case "$EAPI" in 0|1|2) local EPREFIX= ED=${D} ;; esac
+	if ! ___eapi_has_prefix_variables; then
+		local EPREFIX= ED=${D}
+	fi
 
 	cd "${ED}" || die "cd failed"
 
-	# Merge QA_FLAGS_IGNORED and QA_DT_HASH into a single array, since
-	# QA_DT_HASH is deprecated.
 	qa_var="QA_FLAGS_IGNORED_${ARCH/-/_}"
 	eval "[[ -n \${!qa_var} ]] && QA_FLAGS_IGNORED=(\"\${${qa_var}[@]}\")"
 	if [[ ${#QA_FLAGS_IGNORED[@]} -eq 1 ]] ; then
@@ -164,29 +178,6 @@ install_qa_check() {
 		QA_FLAGS_IGNORED=(${QA_FLAGS_IGNORED})
 		set +o noglob
 		set -${shopts}
-	fi
-
-	qa_var="QA_DT_HASH_${ARCH/-/_}"
-	eval "[[ -n \${!qa_var} ]] && QA_DT_HASH=(\"\${${qa_var}[@]}\")"
-	if [[ ${#QA_DT_HASH[@]} -eq 1 ]] ; then
-		local shopts=$-
-		set -o noglob
-		QA_DT_HASH=(${QA_DT_HASH})
-		set +o noglob
-		set -${shopts}
-	fi
-
-	if [[ -n ${QA_DT_HASH} ]] ; then
-		QA_FLAGS_IGNORED=("${QA_FLAGS_IGNORED[@]}" "${QA_DT_HASH[@]}")
-		unset QA_DT_HASH
-	fi
-
-	# Merge QA_STRICT_FLAGS_IGNORED and QA_STRICT_DT_HASH, since
-	# QA_STRICT_DT_HASH is deprecated
-	if [ "${QA_STRICT_FLAGS_IGNORED-unset}" = unset ] && \
-		[ "${QA_STRICT_DT_HASH-unset}" != unset ] ; then
-		QA_STRICT_FLAGS_IGNORED=1
-		unset QA_STRICT_DT_HASH
 	fi
 
 	# Check for files built without respecting *FLAGS. Note that
@@ -240,7 +231,7 @@ install_qa_check() {
 
 	export STRIP_MASK
 	prepall
-	has "${EAPI}" 0 1 2 3 || prepcompress
+	___eapi_has_docompress && prepcompress
 	ecompressdir --dequeue
 	ecompress --dequeue
 
@@ -577,10 +568,9 @@ install_qa_check() {
 	# this should help to ensure that all (most?) shared libraries are executable
 	# and that all libtool scripts / static libraries are not executable
 	local j
-	for i in "${ED}"opt/*/lib{,32,64} \
-	         "${ED}"lib{,32,64}       \
-	         "${ED}"usr/lib{,32,64}   \
-	         "${ED}"usr/X11R6/lib{,32,64} ; do
+	for i in "${ED}"opt/*/lib* \
+	         "${ED}"lib* \
+	         "${ED}"usr/lib* ; do
 		[[ ! -d ${i} ]] && continue
 
 		for j in "${i}"/*.so.* "${i}"/*.so ; do
@@ -793,21 +783,41 @@ install_qa_check() {
 	   [[ -x /usr/bin/file && -x /usr/bin/find ]] && \
 	   [[ -n ${MULTILIB_STRICT_DIRS} && -n ${MULTILIB_STRICT_DENY} ]]
 	then
-		local abort=no dir file firstrun=yes
+		rm -f "${T}/multilib-strict.log"
+		local abort=no dir file
 		MULTILIB_STRICT_EXEMPT=$(echo ${MULTILIB_STRICT_EXEMPT} | sed -e 's:\([(|)]\):\\\1:g')
 		for dir in ${MULTILIB_STRICT_DIRS} ; do
 			[[ -d ${ED}/${dir} ]] || continue
 			for file in $(find ${ED}/${dir} -type f | grep -v "^${ED}/${dir}/${MULTILIB_STRICT_EXEMPT}"); do
 				if file ${file} | egrep -q "${MULTILIB_STRICT_DENY}" ; then
-					if [[ ${firstrun} == yes ]] ; then
-						echo "Files matching a file type that is not allowed:"
-						firstrun=no
-					fi
-					abort=yes
-					echo "   ${file#${ED}//}"
+					echo "${file#${ED}//}" >> "${T}/multilib-strict.log"
 				fi
 			done
 		done
+
+		if [[ -s ${T}/multilib-strict.log ]] ; then
+			if [[ ${#QA_MULTILIB_PATHS[@]} -eq 1 ]] ; then
+				local shopts=$-
+				set -o noglob
+				QA_MULTILIB_PATHS=(${QA_MULTILIB_PATHS})
+				set +o noglob
+				set -${shopts}
+			fi
+			if [ "${QA_STRICT_MULTILIB_PATHS-unset}" = unset ] ; then
+				for x in "${QA_MULTILIB_PATHS[@]}" ; do
+					sed -e "s#^${x#/}\$##" -i "${T}/multilib-strict.log"
+				done
+				sed -e "/^\$/d" -i "${T}/multilib-strict.log"
+			fi
+			if [[ -s ${T}/multilib-strict.log ]] ; then
+				abort=yes
+				echo "Files matching a file type that is not allowed:"
+				while read -r ; do
+					echo "   ${REPLY}"
+				done < "${T}/multilib-strict.log"
+			fi
+		fi
+
 		[[ ${abort} == yes ]] && die "multilib-strict check failed!"
 	fi
 
@@ -971,8 +981,9 @@ preinst_mask() {
 		 return 1
 	fi
 
-	[[ " ${FEATURES} " == *" force-prefix "* ]] || \
-		case "$EAPI" in 0|1|2) local ED=${D} ;; esac
+	if ! ___eapi_has_prefix_variables; then
+		local ED=${D}
+	fi
 
 	# Make sure $PWD is not ${D} so that we don't leave gmon.out files
 	# in there in case any tools were built with -pg in CFLAGS.
@@ -1000,8 +1011,9 @@ preinst_sfperms() {
 		 return 1
 	fi
 
-	[[ " ${FEATURES} " == *" force-prefix "* ]] || \
-		case "$EAPI" in 0|1|2) local ED=${D} ;; esac
+	if ! ___eapi_has_prefix_variables; then
+		local ED=${D}
+	fi
 
 	# Smart FileSystem Permissions
 	if has sfperms $FEATURES; then
@@ -1039,8 +1051,9 @@ preinst_suid_scan() {
 		 return 1
 	fi
 
-	[[ " ${FEATURES} " == *" force-prefix "* ]] || \
-		case "$EAPI" in 0|1|2) local ED=${D} ;; esac
+	if ! ___eapi_has_prefix_variables; then
+		local ED=${D}
+	fi
 
 	# total suid control.
 	if has suidctl $FEATURES; then
@@ -1082,7 +1095,7 @@ preinst_selinux_labels() {
 		 return 1
 	fi
 	if has selinux ${FEATURES}; then
-		# SELinux file labeling (needs to always be last in __dyn_preinst)
+		# SELinux file labeling (needs to execute after preinst)
 		# only attempt to label if setfiles is executable
 		# and 'context' is available on selinuxfs.
 		if [ -f /selinux/context -o -f /sys/fs/selinux/context ] && \
@@ -1108,8 +1121,9 @@ preinst_selinux_labels() {
 __dyn_package() {
 	local PROOT
 
-	[[ " ${FEATURES} " == *" force-prefix "* ]] || \
-		case "$EAPI" in 0|1|2) local EPREFIX= ED=${D} ;; esac
+	if ! ___eapi_has_prefix_variables; then
+		local EPREFIX= ED=${D}
+	fi
 
 	# Make sure $PWD is not ${D} so that we don't leave gmon.out files
 	# in there in case any tools were built with -pg in CFLAGS.
@@ -1181,7 +1195,7 @@ Summary: ${DESCRIPTION}
 Name: ${PN}
 Version: ${PV}
 Release: ${PR}
-Copyright: GPL
+License: GPL
 Group: portage/${CATEGORY}
 Source: ${PF}.tar.gz
 Buildroot: ${D}
@@ -1206,9 +1220,9 @@ __END1__
 }
 
 __dyn_rpm() {
-
-	[[ " ${FEATURES} " == *" force-prefix "* ]] || \
-		case "$EAPI" in 0|1|2) local EPREFIX= ;; esac
+	if ! ___eapi_has_prefix_variables; then
+		local EPREFIX=
+	fi
 
 	cd "${T}" || die "cd failed"
 	local machine_name=$(uname -m)

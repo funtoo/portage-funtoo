@@ -1,4 +1,4 @@
-# Copyright 2010-2011 Gentoo Foundation
+# Copyright 2010-2012 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 __all__ = (
@@ -13,6 +13,7 @@ import portage
 from portage import os, eapi_is_supported, _encodings, _unicode_encode
 from portage.const import CUSTOM_PROFILE_PATH, GLOBAL_CONFIG_PATH, \
 	PROFILE_PATH, USER_CONFIG_PATH
+from portage.eapi import eapi_allows_directories_on_profile_level_and_repository_level
 from portage.exception import DirectoryNotFound, ParseError
 from portage.localization import _
 from portage.util import ensure_dirs, grabfile, \
@@ -27,7 +28,7 @@ _PORTAGE1_DIRECTORIES = frozenset([
 	'use.mask', 'use.force'])
 
 _profile_node = collections.namedtuple('_profile_node',
-	'location portage1_directories')
+	'location portage1_directories user_config')
 
 _allow_parent_colon = frozenset(
 	["portage-2"])
@@ -99,9 +100,9 @@ class LocationsManager(object):
 				self._addProfile(os.path.realpath(self.profile_path),
 					repositories, known_repos)
 			except ParseError as e:
-				writemsg(_("!!! Unable to parse profile: '%s'\n") % \
-					self.profile_path, noiselevel=-1)
-				writemsg("!!! ParseError: %s\n" % str(e), noiselevel=-1)
+				if not portage._sync_disabled_warnings:
+					writemsg(_("!!! Unable to parse profile: '%s'\n") % self.profile_path, noiselevel=-1)
+					writemsg("!!! ParseError: %s\n" % str(e), noiselevel=-1)
 				self.profiles = []
 				self.profiles_complex = []
 
@@ -111,7 +112,8 @@ class LocationsManager(object):
 			if os.path.exists(custom_prof):
 				self.user_profile_dir = custom_prof
 				self.profiles.append(custom_prof)
-				self.profiles_complex.append(_profile_node(custom_prof, True))
+				self.profiles_complex.append(
+					_profile_node(custom_prof, True, True))
 			del custom_prof
 
 		self.profiles = tuple(self.profiles)
@@ -130,14 +132,36 @@ class LocationsManager(object):
 		allow_parent_colon = True
 		repo_loc = None
 		compat_mode = False
+
+		eapi_file = os.path.join(currentPath, "eapi")
+		eapi = "0"
+		f = None
+		try:
+			f = io.open(_unicode_encode(eapi_file,
+				encoding=_encodings['fs'], errors='strict'),
+				mode='r', encoding=_encodings['content'], errors='replace')
+			eapi = f.readline().strip()
+		except IOError:
+			pass
+		else:
+			if not eapi_is_supported(eapi):
+				raise ParseError(_(
+					"Profile contains unsupported "
+					"EAPI '%s': '%s'") % \
+					(eapi, os.path.realpath(eapi_file),))
+		finally:
+			if f is not None:
+				f.close()
+
 		intersecting_repos = [x for x in known_repos if current_abs_path.startswith(x[0])]
 		if intersecting_repos:
 			# protect against nested repositories.  Insane configuration, but the longest
 			# path will be the correct one.
 			repo_loc, layout_data = max(intersecting_repos, key=lambda x:len(x[0]))
-			allow_directories = any(x in _portage1_profiles_allow_directories
-				for x in layout_data['profile-formats'])
-			compat_mode = layout_data['profile-formats'] == ('portage-1-compat',)
+			allow_directories = eapi_allows_directories_on_profile_level_and_repository_level(eapi) or \
+				any(x in _portage1_profiles_allow_directories for x in layout_data['profile-formats'])
+			compat_mode = not eapi_allows_directories_on_profile_level_and_repository_level(eapi) and \
+				layout_data['profile-formats'] == ('portage-1-compat',)
 			allow_parent_colon = any(x in _allow_parent_colon
 				for x in layout_data['profile-formats'])
 
@@ -156,24 +180,6 @@ class LocationsManager(object):
 						files=', '.join(offenders)))
 
 		parentsFile = os.path.join(currentPath, "parent")
-		eapi_file = os.path.join(currentPath, "eapi")
-		f = None
-		try:
-			f = io.open(_unicode_encode(eapi_file,
-				encoding=_encodings['fs'], errors='strict'),
-				mode='r', encoding=_encodings['content'], errors='replace')
-			eapi = f.readline().strip()
-		except IOError:
-			pass
-		else:
-			if not eapi_is_supported(eapi):
-				raise ParseError(_(
-					"Profile contains unsupported "
-					"EAPI '%s': '%s'") % \
-					(eapi, os.path.realpath(eapi_file),))
-		finally:
-			if f is not None:
-				f.close()
 		if os.path.exists(parentsFile):
 			parents = grabfile(parentsFile)
 			if not parents:
@@ -205,7 +211,7 @@ class LocationsManager(object):
 
 		self.profiles.append(currentPath)
 		self.profiles_complex.append(
-			_profile_node(currentPath, allow_directories))
+			_profile_node(currentPath, allow_directories, False))
 
 	def _expand_parent_colon(self, parentsFile, parentPath,
 		repo_loc, repositories):

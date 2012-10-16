@@ -31,7 +31,7 @@ from portage import shutil
 from portage import eapi_is_supported, _unicode_decode
 from portage.cache.cache_errors import CacheError
 from portage.const import GLOBAL_CONFIG_PATH
-from portage.const import _ENABLE_DYN_LINK_MAP
+from portage.const import _DEPCLEAN_LIB_CHECK_DEFAULT
 from portage.dbapi.dep_expand import dep_expand
 from portage.dbapi._expand_new_virt import expand_new_virt
 from portage.dep import Atom
@@ -49,6 +49,8 @@ from portage._sets.base import InternalPackageSet
 from portage.util import cmp_sort_key, writemsg, \
 	writemsg_level, writemsg_stdout
 from portage.util.digraph import digraph
+from portage.util._async.SchedulerInterface import SchedulerInterface
+from portage.util._eventloop.global_event_loop import global_event_loop
 from portage._global_updates import _global_updates
 
 from _emerge.clear_caches import clear_caches
@@ -544,7 +546,8 @@ def action_depclean(settings, trees, ldpath_mtimes,
 	# specific packages.
 
 	msg = []
-	if not _ENABLE_DYN_LINK_MAP:
+	if "preserve-libs" not in settings.features and \
+		not myopts.get("--depclean-lib-check", _DEPCLEAN_LIB_CHECK_DEFAULT) != "n":
 		msg.append("Depclean may break link level dependencies. Thus, it is\n")
 		msg.append("recommended to use a tool such as " + good("`revdep-rebuild`") + " (from\n")
 		msg.append("app-portage/gentoolkit) in order to detect such breakage.\n")
@@ -941,7 +944,7 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 
 	if cleanlist and \
 		real_vardb._linkmap is not None and \
-		myopts.get("--depclean-lib-check") != "n" and \
+		myopts.get("--depclean-lib-check", _DEPCLEAN_LIB_CHECK_DEFAULT) != "n" and \
 		"preserve-libs" not in settings.features:
 
 		# Check if any of these packages are the sole providers of libraries
@@ -1146,19 +1149,19 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 		graph = digraph()
 		del cleanlist[:]
 
-		dep_keys = ["DEPEND", "RDEPEND", "PDEPEND"]
 		runtime = UnmergeDepPriority(runtime=True)
 		runtime_post = UnmergeDepPriority(runtime_post=True)
 		buildtime = UnmergeDepPriority(buildtime=True)
 		priority_map = {
 			"RDEPEND": runtime,
 			"PDEPEND": runtime_post,
+			"HDEPEND": buildtime,
 			"DEPEND": buildtime,
 		}
 
 		for node in clean_set:
 			graph.add(node, None)
-			for dep_type in dep_keys:
+			for dep_type in Package._dep_keys:
 				depstr = node.metadata[dep_type]
 				if not depstr:
 					continue
@@ -1865,7 +1868,8 @@ def action_regen(settings, portdb, max_jobs, max_load):
 	#regenerate cache entries
 	sys.stdout.flush()
 
-	regen = MetadataRegen(portdb, max_jobs=max_jobs, max_load=max_load)
+	regen = MetadataRegen(portdb, max_jobs=max_jobs,
+		max_load=max_load, main=True)
 	received_signal = []
 
 	def emergeexitsig(signum, frame):
@@ -1880,7 +1884,8 @@ def action_regen(settings, portdb, max_jobs, max_load):
 	earlier_sigterm_handler = signal.signal(signal.SIGTERM, emergeexitsig)
 
 	try:
-		regen.run()
+		regen.start()
+		regen.wait()
 	finally:
 		# Restore previous handlers
 		if earlier_sigint_handler is not None:
@@ -2045,6 +2050,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		writemsg_level(msg + "\n")
 
 	# Reload the whole config from scratch.
+	portage._sync_disabled_warnings = False
 	settings, trees, mtimedb = load_emerge_config(trees=trees)
 	adjust_configs(myopts, trees)
 	root_config = trees[settings['EROOT']]['root_config']
@@ -2386,20 +2392,20 @@ def action_uninstall(settings, trees, ldpath_mtimes,
 	if action == 'deselect':
 		return action_deselect(settings, trees, opts, valid_atoms)
 
-	# Create a Scheduler for calls to unmerge(), in order to cause
-	# redirection of ebuild phase output to logs as required for
-	# options such as --quiet.
-	sched = Scheduler(settings, trees, None, opts,
-		spinner, uninstall_only=True)
-	sched._background = sched._background_mode()
-	sched._status_display.quiet = True
+	# Use the same logic as the Scheduler class to trigger redirection
+	# of ebuild pkg_prerm/postrm phase output to logs as appropriate
+	# for options such as --jobs, --quiet and --quiet-build.
+	max_jobs = opts.get("--jobs", 1)
+	background = (max_jobs is True or max_jobs > 1 or
+		"--quiet" in opts or opts.get("--quiet-build") == "y")
+	sched_iface = SchedulerInterface(global_event_loop(),
+		is_background=lambda: background)
 
-	if sched._background:
-		sched.settings.unlock()
-		sched.settings["PORTAGE_BACKGROUND"] = "1"
-		sched.settings.backup_changes("PORTAGE_BACKGROUND")
-		sched.settings.lock()
-		sched.pkgsettings[eroot] = portage.config(clone=sched.settings)
+	if background:
+		settings.unlock()
+		settings["PORTAGE_BACKGROUND"] = "1"
+		settings.backup_changes("PORTAGE_BACKGROUND")
+		settings.lock()
 
 	if action in ('clean', 'unmerge') or \
 		(action == 'prune' and "--nodeps" in opts):
@@ -2407,10 +2413,11 @@ def action_uninstall(settings, trees, ldpath_mtimes,
 		ordered = action == 'unmerge'
 		rval = unmerge(trees[settings['EROOT']]['root_config'], opts, action,
 			valid_atoms, ldpath_mtimes, ordered=ordered,
-			scheduler=sched._sched_iface)
+			scheduler=sched_iface)
 	else:
 		rval = action_depclean(settings, trees, ldpath_mtimes,
-			opts, action, valid_atoms, spinner, scheduler=sched._sched_iface)
+			opts, action, valid_atoms, spinner,
+			scheduler=sched_iface)
 
 	return rval
 
