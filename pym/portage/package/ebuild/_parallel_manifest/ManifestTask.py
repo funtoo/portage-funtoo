@@ -13,17 +13,17 @@ from portage.util import (atomic_ofstream, grablines,
 from portage.util._async.PopenProcess import PopenProcess
 from _emerge.CompositeTask import CompositeTask
 from _emerge.PipeReader import PipeReader
-from _emerge.SpawnProcess import SpawnProcess
 from .ManifestProcess import ManifestProcess
 
 class ManifestTask(CompositeTask):
 
 	__slots__ = ("cp", "distdir", "fetchlist_dict", "gpg_cmd",
-		"gpg_vars", "repo_config", "force_sign_key", "_manifest_path",
-		"_proc")
+		"gpg_vars", "repo_config", "force_sign_key", "_manifest_path")
 
 	_PGP_HEADER = b"BEGIN PGP SIGNED MESSAGE"
 	_manifest_line_re = re.compile(r'^(%s) ' % "|".join(MANIFEST2_IDENTIFIERS))
+	_gpg_key_id_re = re.compile(r'^[0-9A-F]*$')
+	_gpg_key_id_lengths = (8, 16, 24, 32, 40)
 
 	def _start(self):
 		self._manifest_path = os.path.join(self.repo_config.location,
@@ -32,16 +32,6 @@ class ManifestTask(CompositeTask):
 			fetchlist_dict=self.fetchlist_dict, repo_config=self.repo_config,
 			scheduler=self.scheduler)
 		self._start_task(manifest_proc, self._manifest_proc_exit)
-
-	def _cancel(self):
-		if self._proc is not None:
-			self._proc.cancel()
-		CompositeTask._cancel(self)
-
-	def _proc_wait(self):
-		if self._proc is not None:
-			self._proc.wait()
-			self._proc = None
 
 	def _manifest_proc_exit(self, manifest_proc):
 		self._assert_current(manifest_proc)
@@ -70,38 +60,56 @@ class ManifestTask(CompositeTask):
 		self._start_gpg_proc()
 
 	def _check_sig_key(self):
-		self._proc = PopenProcess(proc=subprocess.Popen(
+		null_fd = os.open('/dev/null', os.O_RDONLY)
+		popen_proc = PopenProcess(proc=subprocess.Popen(
 			["gpg", "--verify", self._manifest_path],
-			stdout=subprocess.PIPE, stderr=subprocess.STDOUT),
-			scheduler=self.scheduler)
-		pipe_reader = PipeReader(
-			input_files={"producer" : self._proc.proc.stdout},
-			scheduler=self.scheduler)
-		self._start_task(pipe_reader, self._check_sig_key_exit)
+			stdin=null_fd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT),
+			pipe_reader=PipeReader())
+		os.close(null_fd)
+		popen_proc.pipe_reader.input_files = {
+			"producer" : popen_proc.proc.stdout}
+		self._start_task(popen_proc, self._check_sig_key_exit)
 
 	@staticmethod
 	def _parse_gpg_key(output):
 		"""
-		Returns the last token of the first line, or None if there
-		is no such token.
+		Returns the first token which appears to represent a gpg key
+		id, or None if there is no such token.
 		"""
-		output = output.splitlines()
-		if output:
-			output = output[0].split()
-			if output:
-				return output[-1]
+		regex = ManifestTask._gpg_key_id_re
+		lengths = ManifestTask._gpg_key_id_lengths
+		for token in output.split():
+			m = regex.match(token)
+			if m is not None and len(m.group(0)) in lengths:
+				return m.group(0)
 		return None
 
-	def _check_sig_key_exit(self, pipe_reader):
-		self._assert_current(pipe_reader)
+	@staticmethod
+	def _normalize_gpg_key(key_str):
+		"""
+		Strips leading "0x" and trailing "!", and converts to uppercase
+		(intended to be the same format as that in gpg --verify output).
+		"""
+		key_str = key_str.upper()
+		if key_str.startswith("0X"):
+			key_str = key_str[2:]
+		key_str = key_str.rstrip("!")
+		return key_str
+
+	def _check_sig_key_exit(self, proc):
+		self._assert_current(proc)
 
 		parsed_key = self._parse_gpg_key(
-			pipe_reader.getvalue().decode('utf_8', 'replace'))
+			proc.pipe_reader.getvalue().decode('utf_8', 'replace'))
 		if parsed_key is not None and \
-			parsed_key.lower() in self.force_sign_key.lower():
+			self._normalize_gpg_key(parsed_key) == \
+			self._normalize_gpg_key(self.force_sign_key):
 			self.returncode = os.EX_OK
 			self._current_task = None
-			self._proc_wait()
+			self.wait()
+			return
+
+		if self._was_cancelled():
 			self.wait()
 			return
 
@@ -136,13 +144,11 @@ class ManifestTask(CompositeTask):
 		gpg_vars["FILE"] = self._manifest_path
 		gpg_cmd = varexpand(self.gpg_cmd, mydict=gpg_vars)
 		gpg_cmd = shlex_split(gpg_cmd)
-		gpg_proc = SpawnProcess(
-			args=gpg_cmd, env=os.environ, scheduler=self.scheduler)
+		gpg_proc = PopenProcess(proc=subprocess.Popen(gpg_cmd))
 		self._start_task(gpg_proc, self._gpg_proc_exit)
 
 	def _gpg_proc_exit(self, gpg_proc):
 		if self._default_exit(gpg_proc) != os.EX_OK:
-			self._proc_wait()
 			self.wait()
 			return
 
@@ -161,7 +167,6 @@ class ManifestTask(CompositeTask):
 			self.returncode = os.EX_OK
 
 		self._current_task = None
-		self._proc_wait()
 		self.wait()
 
 	def _need_signature(self):

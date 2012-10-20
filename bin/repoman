@@ -39,7 +39,7 @@ pym_path = osp.join(osp.dirname(osp.dirname(osp.realpath(__file__))), "pym")
 sys.path.insert(0, pym_path)
 import portage
 portage._disable_legacy_globals()
-portage.dep._internal_warnings = True
+portage._internal_warnings = True
 
 try:
 	import xml.etree.ElementTree
@@ -88,6 +88,7 @@ util.initialize_logger()
 max_desc_len = 100
 allowed_filename_chars="a-zA-Z0-9._-+:"
 pv_toolong_re = re.compile(r'[0-9]{19,}')
+GPG_KEY_ID_REGEX = r'(0x)?([0-9a-fA-F]{8}|[0-9a-fA-F]{16}|[0-9a-fA-F]{24}|[0-9a-fA-F]{32}|[0-9a-fA-F]{40})!?'
 bad = create_color_func("BAD")
 
 # A sane umask is needed for files that portage creates.
@@ -604,6 +605,14 @@ if repo_config.sign_commit:
 # thin-manifests is designed to prevent.
 sign_manifests = "sign" in repoman_settings.features and \
 	repo_config.sign_manifest
+
+if sign_manifests and options.mode in ("commit",) and \
+	repoman_settings.get("PORTAGE_GPG_KEY") and \
+	re.match(r'^%s$' % GPG_KEY_ID_REGEX,
+	repoman_settings["PORTAGE_GPG_KEY"]) is None:
+	logging.error("PORTAGE_GPG_KEY value is invalid: %s" %
+		repoman_settings["PORTAGE_GPG_KEY"])
+	sys.exit(1)
 
 manifest_hashes = repo_config.manifest_hashes
 if manifest_hashes is None:
@@ -1797,9 +1806,9 @@ for x in effective_scanlist:
 		ebuild_archs = set(kw.lstrip("~") for kw in keywords \
 			if not kw.startswith("-"))
 
-		previous_keywords = slot_keywords.get(myaux["SLOT"])
+		previous_keywords = slot_keywords.get(pkg.slot)
 		if previous_keywords is None:
-			slot_keywords[myaux["SLOT"]] = set()
+			slot_keywords[pkg.slot] = set()
 		elif ebuild_archs and not live_ebuild:
 			dropped_keywords = previous_keywords.difference(ebuild_archs)
 			if dropped_keywords:
@@ -1808,7 +1817,7 @@ for x in effective_scanlist:
 					relative_path + ": %s" % \
 					" ".join(sorted(dropped_keywords)))
 
-		slot_keywords[myaux["SLOT"]].update(ebuild_archs)
+		slot_keywords[pkg.slot].update(ebuild_archs)
 
 		# KEYWORDS="-*" is a stupid replacement for package.mask and screws general KEYWORDS semantics
 		if "-*" in keywords:

@@ -398,8 +398,8 @@ __source_all_bashrcs() {
 	if [[ $EBUILD_PHASE != depend ]] ; then
 		# The user's bashrc is the ONLY non-portage bit of code that can
 		# change shopts without a QA violation.
-		for x in "${PM_EBUILD_HOOK_DIR}"/${CATEGORY}/{${PN},${PN}:${SLOT},${P},${PF}}; do
-			if [ -r "${x}" ] && [ ! -d "${x}" ]; then
+		for x in "${PM_EBUILD_HOOK_DIR}"/${CATEGORY}/{${PN},${PN}:${SLOT%/*},${P},${PF}}; do
+			if [ -r "${x}" ]; then
 				# If $- contains x, then tracing has already been enabled
 				# elsewhere for some reason. We preserve it's state so as
 				# not to interfere.

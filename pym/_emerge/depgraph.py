@@ -25,7 +25,7 @@ from portage.dep import Atom, best_match_to_list, extract_affecting_use, \
 from portage.dep._slot_operator import ignore_built_slot_operator_deps
 from portage.eapi import eapi_has_strong_blocks, eapi_has_required_use, \
 	_get_eapi_attrs
-from portage.exception import (InvalidAtom, InvalidDependString,
+from portage.exception import (InvalidAtom, InvalidData, InvalidDependString,
 	PackageNotFound, PortageException)
 from portage.output import colorize, create_color_func, \
 	darkgreen, green
@@ -2501,13 +2501,8 @@ class depgraph(object):
 				return 0, []
 
 			for cpv in owners:
-				slot = vardb.aux_get(cpv, ["SLOT"])[0]
-				if not slot:
-					# portage now masks packages with missing slot, but it's
-					# possible that one was installed by an older version
-					atom = Atom(portage.cpv_getkey(cpv))
-				else:
-					atom = Atom("%s:%s" % (portage.cpv_getkey(cpv), slot))
+				pkg = vardb._pkg_str(cpv, None)
+				atom = Atom("%s:%s" % (pkg.cp, pkg.slot))
 				args.append(AtomArg(arg=atom, atom=atom,
 					root_config=root_config))
 
@@ -2834,14 +2829,15 @@ class depgraph(object):
 		slots = set()
 		for cpv in vardb.match(atom):
 			# don't mix new virtuals with old virtuals
-			if portage.cpv_getkey(cpv) == highest_pkg.cp:
-				slots.add(vardb.aux_get(cpv, ["SLOT"])[0])
+			pkg = vardb._pkg_str(cpv, None)
+			if pkg.cp == highest_pkg.cp:
+				slots.add(pkg.slot)
 
-		slots.add(highest_pkg.metadata["SLOT"])
+		slots.add(highest_pkg.slot)
 		if len(slots) == 1:
 			return []
 		greedy_pkgs = []
-		slots.remove(highest_pkg.metadata["SLOT"])
+		slots.remove(highest_pkg.slot)
 		while slots:
 			slot = slots.pop()
 			slot_atom = portage.dep.Atom("%s:%s" % (highest_pkg.cp, slot))
@@ -3833,10 +3829,10 @@ class depgraph(object):
 						other_installed, other_keys in dbs:
 						try:
 							if atom.slot == \
-								other_db.aux_get(cpv, ["SLOT"])[0]:
+								other_db._pkg_str(_unicode(cpv), None).slot:
 								slot_available = True
 								break
-						except KeyError:
+						except (KeyError, InvalidData):
 							pass
 					if not slot_available:
 						continue
@@ -6360,7 +6356,7 @@ class depgraph(object):
 							if is_latest:
 								unstable_keyword_msg[root].append(">=%s %s\n" % (pkg.cpv, keyword))
 							elif is_latest_in_slot:
-								unstable_keyword_msg[root].append(">=%s:%s %s\n" % (pkg.cpv, pkg.metadata["SLOT"], keyword))
+								unstable_keyword_msg[root].append(">=%s:%s %s\n" % (pkg.cpv, pkg.slot, keyword))
 							else:
 								unstable_keyword_msg[root].append("=%s %s\n" % (pkg.cpv, keyword))
 						else:
@@ -6400,7 +6396,7 @@ class depgraph(object):
 							if is_latest:
 								p_mask_change_msg[root].append(">=%s\n" % pkg.cpv)
 							elif is_latest_in_slot:
-								p_mask_change_msg[root].append(">=%s:%s\n" % (pkg.cpv, pkg.metadata["SLOT"]))
+								p_mask_change_msg[root].append(">=%s:%s\n" % (pkg.cpv, pkg.slot))
 							else:
 								p_mask_change_msg[root].append("=%s\n" % pkg.cpv)
 						else:
@@ -6425,7 +6421,7 @@ class depgraph(object):
 				if is_latest:
 					use_changes_msg[root].append(">=%s %s\n" % (pkg.cpv, " ".join(adjustments)))
 				elif is_latest_in_slot:
-					use_changes_msg[root].append(">=%s:%s %s\n" % (pkg.cpv, pkg.metadata["SLOT"], " ".join(adjustments)))
+					use_changes_msg[root].append(">=%s:%s %s\n" % (pkg.cpv, pkg.slot, " ".join(adjustments)))
 				else:
 					use_changes_msg[root].append("=%s %s\n" % (pkg.cpv, " ".join(adjustments)))
 
@@ -6442,7 +6438,7 @@ class depgraph(object):
 				if is_latest:
 					license_msg[root].append(">=%s %s\n" % (pkg.cpv, " ".join(sorted(missing_licenses))))
 				elif is_latest_in_slot:
-					license_msg[root].append(">=%s:%s %s\n" % (pkg.cpv, pkg.metadata["SLOT"], " ".join(sorted(missing_licenses))))
+					license_msg[root].append(">=%s:%s %s\n" % (pkg.cpv, pkg.slot, " ".join(sorted(missing_licenses))))
 				else:
 					license_msg[root].append("=%s %s\n" % (pkg.cpv, " ".join(sorted(missing_licenses))))
 

@@ -87,21 +87,6 @@ if sys.hexversion >= 0x3000000:
 else:
 	_unicode = unicode
 
-COWSAY_MOO = """
-
-  Larry loves Gentoo (%s)
-
- _______________________
-< Have you mooed today? >
- -----------------------
-        \   ^__^
-         \  (oo)\_______
-            (__)\       )\/\ 
-                ||----w |
-                ||     ||
-
-"""
-
 def action_build(settings, trees, mtimedb,
 	myopts, myaction, myfiles, spinner):
 
@@ -1300,11 +1285,8 @@ def action_deselect(settings, trees, opts, atoms):
 								allow_repo=True, allow_wildcard=True))
 
 				for cpv in vardb.match(atom):
-					slot, = vardb.aux_get(cpv, ["SLOT"])
-					if not slot:
-						slot = "0"
-					expanded_atoms.add(Atom("%s:%s" % \
-						(portage.cpv_getkey(cpv), slot)))
+					pkg = vardb._pkg_str(cpv, None)
+					expanded_atoms.add(Atom("%s:%s" % (pkg.cp, pkg.slot)))
 
 		discard_atoms = set()
 		for atom in world_set:
@@ -2382,13 +2364,8 @@ def action_uninstall(settings, trees, ldpath_mtimes,
 
 		if owners:
 			for cpv in owners:
-				slot = vardb.aux_get(cpv, ['SLOT'])[0]
-				if not slot:
-					# portage now masks packages with missing slot, but it's
-					# possible that one was installed by an older version
-					atom = portage.cpv_getkey(cpv)
-				else:
-					atom = '%s:%s' % (portage.cpv_getkey(cpv), slot)
+				pkg = vardb._pkg_str(cpv, None)
+				atom = '%s:%s' % (pkg.cp, pkg.slot)
 				valid_atoms.append(portage.dep.Atom(atom))
 		else:
 			writemsg_level(("!!! '%s' is not claimed " + \
@@ -3135,7 +3112,14 @@ def repo_name_duplicate_check(trees):
 
 	return bool(ignored_repos)
 
-def run_action(settings, trees, mtimedb, myaction, myopts, myfiles):
+def run_action(settings, trees, mtimedb, myaction, myopts, myfiles,
+	gc_locals=None):
+
+	# The caller may have its local variables garbage collected, so
+	# they don't consume any memory during this long-running function.
+	if gc_locals is not None:
+		gc_locals()
+		gc_locals = None
 
 	# skip global updates prior to sync, since it's called after sync
 	if myaction not in ('help', 'info', 'sync', 'version') and \
@@ -3224,13 +3208,6 @@ def run_action(settings, trees, mtimedb, myaction, myopts, myfiles):
 
 	del mytrees, mydb
 
-	if "moo" in myfiles:
-		print(COWSAY_MOO % platform.system())
-		msg = ("The above `emerge moo` display is deprecated. "
-			"Please use `emerge --moo` instead.")
-		for line in textwrap.wrap(msg, 50):
-			print(" %s %s" % (colorize("WARN", "*"), line))
-
 	for x in myfiles:
 		ext = os.path.splitext(x)[1]
 		if (ext == ".ebuild" or ext == ".tbz2") and \
@@ -3240,10 +3217,8 @@ def run_action(settings, trees, mtimedb, myaction, myopts, myfiles):
 			break
 
 	root_config = trees[settings['EROOT']]['root_config']
-	if myaction == "moo":
-		print(COWSAY_MOO % platform.system())
-		return os.EX_OK
-	elif myaction == "list-sets":
+
+	if myaction == "list-sets":
 		writemsg_stdout("".join("%s\n" % s for s in sorted(root_config.sets)))
 		return os.EX_OK
 	elif myaction == "check-news":

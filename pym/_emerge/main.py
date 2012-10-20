@@ -3,6 +3,7 @@
 
 from __future__ import print_function
 
+import platform
 import sys
 
 import portage
@@ -66,6 +67,21 @@ shortmapping={
 "u":"--update",
 "v":"--verbose",   "V":"--version"
 }
+
+COWSAY_MOO = """
+
+  Larry loves Gentoo (%s)
+
+ _______________________
+< Have you mooed today? >
+ -----------------------
+        \   ^__^
+         \  (oo)\_______
+            (__)\       )\/\ 
+                ||----w |
+                ||     ||
+
+"""
 
 def multiple_actions(action1, action2):
 	sys.stderr.write("\n!!! Multiple actions requested... Please choose one only.\n")
@@ -958,17 +974,11 @@ def emerge_main(args=None):
 	if args is None:
 		args = sys.argv[1:]
 
+	portage._disable_legacy_globals()
+	portage._internal_warnings = True
 	# Disable color until we're sure that it should be enabled (after
 	# EMERGE_DEFAULT_OPTS has been parsed).
 	portage.output.havecolor = 0
-
-	# optimize --help (no need to load config / EMERGE_DEFAULT_OPTS)
-	if "--help" in args or "-h" in args:
-		emerge_help()
-		return 0
-
-	portage._disable_legacy_globals()
-	portage.dep._internal_warnings = True
 
 	# This first pass is just for options that need to be known as early as
 	# possible, such as --config-root.  They will be parsed again later,
@@ -983,6 +993,14 @@ def emerge_main(args=None):
 		os.environ["ROOT"] = myopts["--root"]
 	if "--accept-properties" in myopts:
 		os.environ["ACCEPT_PROPERTIES"] = myopts["--accept-properties"]
+
+	# optimize --help (no need to load config / EMERGE_DEFAULT_OPTS)
+	if myaction == "help":
+		emerge_help()
+		return os.EX_OK
+	elif myaction == "moo":
+		print(COWSAY_MOO % platform.system())
+		return os.EX_OK
 
 	# Portage needs to ensure a sane umask for the files it creates.
 	os.umask(0o22)
@@ -999,4 +1017,5 @@ def emerge_main(args=None):
 	tmpcmdline.extend(args)
 	myaction, myopts, myfiles = parse_opts(tmpcmdline)
 
-	return run_action(settings, trees, mtimedb, myaction, myopts, myfiles)
+	return run_action(settings, trees, mtimedb, myaction, myopts, myfiles,
+		gc_locals=locals().clear)

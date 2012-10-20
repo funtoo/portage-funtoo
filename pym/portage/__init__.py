@@ -288,11 +288,16 @@ class _unicode_module_wrapper(object):
 import os as _os
 _os_overrides = {
 	id(_os.fdopen)        : _os.fdopen,
-	id(_os.mkfifo)        : _os.mkfifo,
 	id(_os.popen)         : _os.popen,
 	id(_os.read)          : _os.read,
 	id(_os.system)        : _os.system,
 }
+
+
+try:
+	_os_overrides[id(_os.mkfifo)] = _os.mkfifo
+except AttributeError:
+	pass # Jython
 
 if hasattr(_os, 'statvfs'):
 	_os_overrides[id(_os.statvfs)] = _os.statvfs
@@ -328,6 +333,9 @@ except (ImportError, OSError) as e:
 _python_interpreter = os.path.realpath(sys.executable)
 _bin_path = PORTAGE_BIN_PATH
 _pym_path = PORTAGE_PYM_PATH
+
+# Api consumers included in portage should set this to True.
+_internal_warnings = False
 
 _sync_disabled_warnings = False
 
