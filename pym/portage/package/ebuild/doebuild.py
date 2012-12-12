@@ -3,12 +3,14 @@
 
 __all__ = ['doebuild', 'doebuild_environment', 'spawn', 'spawnebuild']
 
+import grp
 import gzip
 import errno
 import io
 from itertools import chain
 import logging
 import os as _os
+import pwd
 import re
 import signal
 import stat
@@ -690,7 +692,7 @@ def doebuild(myebuild, mydo, _unused=None, settings=None, debug=0, listonly=0,
 		if mydo in clean_phases:
 			builddir_lock = None
 			if not returnpid and \
-				'PORTAGE_BUILDIR_LOCKED' not in mysettings:
+				'PORTAGE_BUILDDIR_LOCKED' not in mysettings:
 				builddir_lock = EbuildBuildDir(
 					scheduler=EventLoop(main=False),
 					settings=mysettings)
@@ -832,7 +834,7 @@ def doebuild(myebuild, mydo, _unused=None, settings=None, debug=0, listonly=0,
 
 				if newstuff:
 					if builddir_lock is None and \
-						'PORTAGE_BUILDIR_LOCKED' not in mysettings:
+						'PORTAGE_BUILDDIR_LOCKED' not in mysettings:
 						builddir_lock = EbuildBuildDir(
 							scheduler=EventLoop(main=False),
 							settings=mysettings)
@@ -855,7 +857,7 @@ def doebuild(myebuild, mydo, _unused=None, settings=None, debug=0, listonly=0,
 		if not parallel_fetchonly and \
 			mydo not in ('digest', 'fetch', 'help', 'manifest'):
 			if not returnpid and \
-				'PORTAGE_BUILDIR_LOCKED' not in mysettings:
+				'PORTAGE_BUILDDIR_LOCKED' not in mysettings:
 				builddir_lock = EbuildBuildDir(
 					scheduler=EventLoop(main=False),
 					settings=mysettings)
@@ -1332,10 +1334,10 @@ def _validate_deps(mysettings, myroot, mydo, mydbapi):
 
 	if not pkg.built and \
 		mydo not in ("digest", "help", "manifest") and \
-		pkg.metadata["REQUIRED_USE"] and \
-		eapi_has_required_use(pkg.metadata["EAPI"]):
-		result = check_required_use(pkg.metadata["REQUIRED_USE"],
-			pkg.use.enabled, pkg.iuse.is_valid_flag, eapi=pkg.metadata["EAPI"])
+		pkg._metadata["REQUIRED_USE"] and \
+		eapi_has_required_use(pkg.eapi):
+		result = check_required_use(pkg._metadata["REQUIRED_USE"],
+			pkg.use.enabled, pkg.iuse.is_valid_flag, eapi=pkg.eapi)
 		if not result:
 			reduced_noise = result.tounicode()
 			writemsg("\n  %s\n" % _("The following REQUIRED_USE flag" + \
@@ -1343,7 +1345,7 @@ def _validate_deps(mysettings, myroot, mydo, mydbapi):
 			writemsg("    %s\n" % reduced_noise,
 				noiselevel=-1)
 			normalized_required_use = \
-				" ".join(pkg.metadata["REQUIRED_USE"].split())
+				" ".join(pkg._metadata["REQUIRED_USE"].split())
 			if reduced_noise != normalized_required_use:
 				writemsg("\n  %s\n" % _("The above constraints " + \
 					"are a subset of the following complete expression:"),
@@ -1419,10 +1421,22 @@ def spawn(mystring, mysettings, debug=0, free=0, droppriv=0, sesandbox=0, fakero
 	# fake ownership/permissions will have to be converted to real
 	# permissions in the merge phase.
 	fakeroot = fakeroot and uid != 0 and portage.process.fakeroot_capable
-	if droppriv and uid == 0 and portage_gid and portage_uid and \
-		hasattr(os, "setgroups"):
-		keywords.update({"uid":portage_uid,"gid":portage_gid,
-			"groups":userpriv_groups,"umask":0o02})
+	portage_build_uid = os.getuid()
+	portage_build_gid = os.getgid()
+	if uid == 0 and portage_uid and portage_gid and hasattr(os, "setgroups"):
+		if droppriv:
+			keywords.update({
+				"uid": portage_uid,
+				"gid": portage_gid,
+				"groups": userpriv_groups,
+				"umask": 0o02
+			})
+		if "userpriv" in features and "userpriv" not in mysettings["PORTAGE_RESTRICT"].split() and secpass >= 2:
+			portage_build_uid = portage_uid
+			portage_build_gid = portage_gid
+	mysettings["PORTAGE_BUILD_USER"] = pwd.getpwuid(portage_build_uid).pw_name
+	mysettings["PORTAGE_BUILD_GROUP"] = grp.getgrgid(portage_build_gid).gr_name
+
 	if not free:
 		free=((droppriv and "usersandbox" not in features) or \
 			(not droppriv and "sandbox" not in features and \
@@ -1565,7 +1579,29 @@ def _check_build_log(mysettings, out=None):
 
 	configure_opts_warn = []
 	configure_opts_warn_re = re.compile(
-		r'^configure: WARNING: [Uu]nrecognized options: ')
+		r'^configure: WARNING: [Uu]nrecognized options: (.*)')
+
+	qa_configure_opts = ""
+	try:
+		with io.open(_unicode_encode(os.path.join(
+			mysettings["PORTAGE_BUILDDIR"],
+			"build-info", "QA_CONFIGURE_OPTIONS"),
+			encoding=_encodings['fs'], errors='strict'),
+			mode='r', encoding=_encodings['repo.content'],
+			errors='replace') as qa_configure_opts_f:
+			qa_configure_opts = qa_configure_opts_f.read()
+	except IOError as e:
+		if e.errno not in (errno.ENOENT, errno.ESTALE):
+			raise
+
+	qa_configure_opts = qa_configure_opts.split()
+	if qa_configure_opts:
+		if len(qa_configure_opts) > 1:
+			qa_configure_opts = "|".join("(%s)" % x for x in qa_configure_opts)
+			qa_configure_opts = "^(%s)$" % qa_configure_opts
+		else:
+			qa_configure_opts = "^%s$" % qa_configure_opts[0]
+		qa_configure_opts = re.compile(qa_configure_opts)
 
 	# Exclude output from dev-libs/yaz-3.0.47 which looks like this:
 	#
@@ -1597,8 +1633,11 @@ def _check_build_log(mysettings, out=None):
 			if helper_missing_file_re.match(line) is not None:
 				helper_missing_file.append(line.rstrip("\n"))
 
-			if configure_opts_warn_re.match(line) is not None:
-				configure_opts_warn.append(line.rstrip("\n"))
+			m = configure_opts_warn_re.match(line)
+			if m is not None:
+				for x in m.group(1).split(", "):
+					if not qa_configure_opts or qa_configure_opts.match(x) is None:
+						configure_opts_warn.append(x)
 
 			if make_jobserver_re.match(line) is not None:
 				make_jobserver.append(line.rstrip("\n"))
@@ -1647,7 +1686,7 @@ def _check_build_log(mysettings, out=None):
 	if configure_opts_warn:
 		msg = [_("QA Notice: Unrecognized configure options:")]
 		msg.append("")
-		msg.extend("\t" + line for line in configure_opts_warn)
+		msg.extend("\t%s" % x for x in configure_opts_warn)
 		_eqawarn(msg)
 
 	if make_jobserver:
@@ -1782,7 +1821,6 @@ def _post_src_install_uid_fix(mysettings, out):
 
 	destdir = mysettings["D"]
 	ed_len = len(mysettings["ED"])
-	desktopfile_errors = []
 	unicode_errors = []
 	desktop_file_validate = \
 		portage.process.find_binary("desktop-file-validate") is not None
@@ -1819,6 +1857,7 @@ def _post_src_install_uid_fix(mysettings, out):
 		counted_inodes = set()
 		fixlafiles_announced = False
 		fixlafiles = "fixlafiles" in mysettings.features
+		desktopfile_errors = []
 
 		for parent, dirs, files in os.walk(destdir):
 			try:

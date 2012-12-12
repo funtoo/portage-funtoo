@@ -22,7 +22,6 @@ portage.proxy.lazyimport.lazyimport(globals(),
 		'_merge_unicode_error', '_spawn_phase',
 	'portage.package.ebuild.prepare_build_dirs:prepare_build_dirs',
 	'portage.package.ebuild._ipc.QueryCommand:QueryCommand',
-	'portage.update:fixdbentries',
 	'portage.util:apply_secpass_permissions,ConfigProtect,ensure_dirs,' + \
 		'writemsg,writemsg_level,write_atomic,atomic_ofstream,writedict,' + \
 		'grabdict,normalize_path,new_protect_filename',
@@ -364,7 +363,7 @@ class vardbapi(dbapi):
 					del e
 			write_atomic(os.path.join(newpath, "PF"), new_pf+"\n")
 			write_atomic(os.path.join(newpath, "CATEGORY"), mynewcat+"\n")
-			fixdbentries([mylist], newpath, eapi=mycpv.eapi)
+
 		return moves
 
 	def cp_list(self, mycp, use_cache=1):
@@ -1875,7 +1874,7 @@ class dblink(object):
 		try:
 			# Only create builddir_lock if the caller
 			# has not already acquired the lock.
-			if "PORTAGE_BUILDIR_LOCKED" not in self.settings:
+			if "PORTAGE_BUILDDIR_LOCKED" not in self.settings:
 				builddir_lock = EbuildBuildDir(
 					scheduler=scheduler,
 					settings=self.settings)
@@ -3438,7 +3437,10 @@ class dblink(object):
 		else:
 			logdir = os.path.join(self.settings["T"], "logging")
 			ebuild_logentries = collect_ebuild_messages(logdir)
-			py_logentries = collect_messages(key=cpv).get(cpv, {})
+			# phasefilter is irrelevant for the above collect_ebuild_messages
+			# call, since this package instance has a private logdir. However,
+			# it may be relevant for the following collect_messages call.
+			py_logentries = collect_messages(key=cpv, phasefilter=phasefilter).get(cpv, {})
 			logentries = _merge_logentries(py_logentries, ebuild_logentries)
 			funcnames = {
 				"INFO": "einfo",
@@ -3587,7 +3589,7 @@ class dblink(object):
 			# Clone the config in case one of these has to be unmerged since
 			# we need it to have private ${T} etc... for things like elog.
 			settings_clone = config(clone=self.settings)
-			settings_clone.pop("PORTAGE_BUILDIR_LOCKED", None)
+			settings_clone.pop("PORTAGE_BUILDDIR_LOCKED", None)
 			settings_clone.reset()
 			others_in_slot.append(dblink(self.cat, catsplit(cur_cpv)[1],
 				settings=settings_clone,
@@ -4357,18 +4359,18 @@ class dblink(object):
 		# this is supposed to merge a list of files.  There will be 2 forms of argument passing.
 		if isinstance(stufftomerge, basestring):
 			#A directory is specified.  Figure out protection paths, listdir() it and process it.
-			mergelist = os.listdir(join(srcroot, stufftomerge))
-			offset = stufftomerge
+			mergelist = [join(stufftomerge, child) for child in \
+				os.listdir(join(srcroot, stufftomerge))]
 		else:
-			mergelist = stufftomerge
-			offset = ""
+			mergelist = stufftomerge[:]
 
-		for i, x in enumerate(mergelist):
+		while mergelist:
 
-			mysrc = join(srcroot, offset, x)
-			mydest = join(destroot, offset, x)
+			relative_path = mergelist.pop()
+			mysrc = join(srcroot, relative_path)
+			mydest = join(destroot, relative_path)
 			# myrealdest is mydest without the $ROOT prefix (makes a difference if ROOT!="/")
-			myrealdest = join(sep, offset, x)
+			myrealdest = join(sep, relative_path)
 			# stat file once, test using S_* macros many times (faster that way)
 			mystat = os.lstat(mysrc)
 			mymode = mystat[stat.ST_MODE]
@@ -4576,9 +4578,9 @@ class dblink(object):
 
 				outfile.write("dir "+myrealdest+"\n")
 				# recurse and merge this directory
-				if self.mergeme(srcroot, destroot, outfile, secondhand,
-					join(offset, x), cfgfiledict, thismtime):
-					return 1
+				mergelist.extend(join(relative_path, child) for child in
+					os.listdir(join(srcroot, relative_path)))
+
 			elif stat.S_ISREG(mymode):
 				# we are merging a regular file
 				mymd5 = perform_md5(mysrc, calc_prelink=calc_prelink)

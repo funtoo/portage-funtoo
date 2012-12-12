@@ -69,8 +69,9 @@ import portage.checksum
 import portage.const
 from portage import cvstree, normalize_path
 from portage import util
-from portage.exception import (FileNotFound, MissingParameter,
+from portage.exception import (FileNotFound, InvalidAtom, MissingParameter,
 	ParseError, PermissionDenied)
+from portage.dep import Atom
 from portage.process import find_binary, spawn
 from portage.output import bold, create_color_func, \
 	green, nocolor, red
@@ -124,7 +125,7 @@ signal.signal(signal.SIGINT,exithandler)
 class RepomanHelpFormatter(optparse.IndentedHelpFormatter):
 	"""Repoman needs it's own HelpFormatter for now, because the default ones
 	murder the help text."""
-	
+
 	def __init__(self, indent_increment=1, max_help_position=24, width=150, short_first=1):
 		optparse.HelpFormatter.__init__(self, indent_increment, max_help_position, width, short_first)
 
@@ -134,7 +135,7 @@ class RepomanHelpFormatter(optparse.IndentedHelpFormatter):
 class RepomanOptionParser(optparse.OptionParser):
 	"""Add the on_tail function, ruby has it, optionParser should too
 	"""
-	
+
 	def __init__(self, *args, **kwargs):
 		optparse.OptionParser.__init__(self, *args, **kwargs)
 		self.tail = ""
@@ -168,7 +169,7 @@ def ParseArgs(argv, qahelp):
 		'help' : 'Show this screen',
 		'manifest' : 'Generate a Manifest (fetches files if necessary)',
 		'manifest-check' : 'Check Manifests for missing or incorrect digests',
-		'scan' : 'Scan directory tree for QA issues' 
+		'scan' : 'Scan directory tree for QA issues'
 	}
 
 	mode_keys = list(modes)
@@ -195,7 +196,7 @@ def ParseArgs(argv, qahelp):
 
 	parser.add_option('-p', '--pretend', dest='pretend', default=False,
 		action='store_true', help='don\'t commit or fix anything; just show what would be done')
-	
+
 	parser.add_option('-q', '--quiet', dest="quiet", action="count", default=0,
 		help='do not print unnecessary messages')
 
@@ -243,7 +244,7 @@ def ParseArgs(argv, qahelp):
 	parser.add_option('--without-mask', dest='without_mask', action='store_true',
 		default=False, help='behave as if no package.mask entries exist (not allowed with commit mode)')
 
-	parser.add_option('--mode', type='choice', dest='mode', choices=list(modes), 
+	parser.add_option('--mode', type='choice', dest='mode', choices=list(modes),
 		help='specify which mode repoman will run in (default=full)')
 
 	parser.on_tail("\n " + green("Modes".ljust(20) + " Description\n"))
@@ -278,7 +279,7 @@ def ParseArgs(argv, qahelp):
 
 	if not opts.mode:
 		opts.mode = 'full'
-	
+
 	if opts.mode == 'ci':
 		opts.mode = 'commit'  # backwards compat shortcut
 
@@ -328,7 +329,7 @@ qahelp={
 	"KEYWORDS.dropped":"Ebuilds that appear to have dropped KEYWORDS for some arch",
 	"KEYWORDS.missing":"Ebuilds that have a missing or empty KEYWORDS variable",
 	"KEYWORDS.stable":"Ebuilds that have been added directly with stable KEYWORDS",
-	"KEYWORDS.stupid":"Ebuilds that use KEYWORDS=-* instead of package.mask", 
+	"KEYWORDS.stupid":"Ebuilds that use KEYWORDS=-* instead of package.mask",
 	"LICENSE.missing":"Ebuilds that have a missing or empty LICENSE variable",
 	"LICENSE.virtual":"Virtuals that have a non-empty LICENSE variable",
 	"DESCRIPTION.missing":"Ebuilds that have a missing or empty DESCRIPTION variable",
@@ -359,6 +360,7 @@ qahelp={
 	"IUSE.invalid":"This ebuild has a variable in IUSE that is not in the use.desc or its metadata.xml file",
 	"IUSE.missing":"This ebuild has a USE conditional which references a flag that is not listed in IUSE",
 	"LICENSE.invalid":"This ebuild is listing a license that doesnt exist in portages license/ dir.",
+	"LICENSE.deprecated":"This ebuild is listing a deprecated license.",
 	"KEYWORDS.invalid":"This ebuild contains KEYWORDS that are not listed in profiles/arch.list or for which no valid profile was found",
 	"RDEPEND.implicit":"RDEPEND is unset in the ebuild which triggers implicit RDEPEND=$DEPEND assignment (prior to EAPI 4)",
 	"RDEPEND.suspect":"RDEPEND contains a package that usually only belongs in DEPEND.",
@@ -398,6 +400,7 @@ qawarnings = set((
 "DESCRIPTION.toolong",
 "EAPI.deprecated",
 "HOMEPAGE.virtual",
+"LICENSE.deprecated",
 "LICENSE.virtual",
 "KEYWORDS.dropped",
 "KEYWORDS.stupid",
@@ -921,6 +924,11 @@ for x in repoman_settings.archlist():
 		print(red("You need to either \"cvs update\" your profiles dir or follow this"))
 		print(red("up with the "+x+" team."))
 		print()
+
+liclist_deprecated = set()
+if "DEPRECATED" in repoman_settings._license_manager._license_groups:
+	liclist_deprecated.update(
+		repoman_settings._license_manager.expandLicenseTokens(["@DEPRECATED"]))
 
 if not liclist:
 	logging.fatal("Couldn't find licenses?")
@@ -1622,7 +1630,7 @@ for x in effective_scanlist:
 	if check_changelog and "ChangeLog" not in checkdirlist:
 		stats["changelog.missing"]+=1
 		fails["changelog.missing"].append(x+"/ChangeLog")
-	
+
 	musedict = {}
 	#metadata.xml file check
 	if "metadata.xml" not in checkdirlist:
@@ -1652,6 +1660,22 @@ for x in effective_scanlist:
 				metadata_bad = True
 				stats["metadata.bad"] += 1
 				fails["metadata.bad"].append("%s/metadata.xml: %s" % (x, e))
+			else:
+				for atom in chain(*musedict.values()):
+					if atom is None:
+						continue
+					try:
+						atom = Atom(atom)
+					except InvalidAtom as e:
+						stats["metadata.bad"] += 1
+						fails["metadata.bad"].append(
+							"%s/metadata.xml: Invalid atom: %s" % (x, e))
+					else:
+						if atom.cp != x:
+							stats["metadata.bad"] += 1
+							fails["metadata.bad"].append(
+								("%s/metadata.xml: Atom contains "
+								"unexpected cat/pn: %s") % (x, atom))
 
 			# Run other metadata.xml checkers
 			try:
@@ -1727,7 +1751,7 @@ for x in effective_scanlist:
 					fails[k].append("%s: %s" % (relative_path, msg))
 			continue
 
-		myaux = pkg.metadata
+		myaux = pkg._metadata
 		eapi = myaux["EAPI"]
 		inherited = pkg.inherited
 		live_ebuild = live_eclasses.intersection(inherited)
@@ -1969,7 +1993,7 @@ for x in effective_scanlist:
 
 		badlicsyntax = len([z for z in type_list if z == "LICENSE"])
 		badprovsyntax = len([z for z in type_list if z == "PROVIDE"])
-		baddepsyntax = len(type_list) != badlicsyntax + badprovsyntax 
+		baddepsyntax = len(type_list) != badlicsyntax + badprovsyntax
 		badlicsyntax = badlicsyntax > 0
 		badprovsyntax = badprovsyntax > 0
 
@@ -1999,7 +2023,7 @@ for x in effective_scanlist:
 
 		for mypos in range(len(myuse)):
 			stats["IUSE.invalid"]=stats["IUSE.invalid"]+1
-			fails["IUSE.invalid"].append(x+"/"+y+".ebuild: %s" % myuse[mypos])	
+			fails["IUSE.invalid"].append(x+"/"+y+".ebuild: %s" % myuse[mypos])
 
 		# license checks
 		if not badlicsyntax:
@@ -2014,6 +2038,9 @@ for x in effective_scanlist:
 				if lic not in liclist and lic != "||":
 					stats["LICENSE.invalid"]=stats["LICENSE.invalid"]+1
 					fails["LICENSE.invalid"].append(x+"/"+y+".ebuild: %s" % lic)
+				elif lic in liclist_deprecated:
+					stats["LICENSE.deprecated"] = stats["LICENSE.deprecated"] + 1
+					fails["LICENSE.deprecated"].append("%s: %s" % (relative_path, lic))
 
 		#keyword checks
 		myuse = myaux["KEYWORDS"].split()
@@ -2098,7 +2125,7 @@ for x in effective_scanlist:
 				# A missing profile will create an error further down
 				# during the KEYWORDS verification.
 				continue
-				
+
 			for prof in profiles[arch]:
 
 				if prof.status not in ("stable", "dev") or \
@@ -2145,7 +2172,7 @@ for x in effective_scanlist:
 					if ismasked:
 						if not have_pmasked:
 							have_pmasked = bool(dep_settings._getMaskAtom(
-								pkg.cpv, pkg.metadata))
+								pkg.cpv, pkg._metadata))
 						if options.ignore_masked:
 							continue
 						#we are testing deps for a masked package; give it some lee-way
@@ -2163,7 +2190,7 @@ for x in effective_scanlist:
 						suffix=suffix+"indev"
 
 					for mytype in Package._dep_keys:
-						
+
 						mykey = "dependency.bad" + suffix
 						myvalue = myaux[mytype]
 						if not myvalue:
@@ -2374,7 +2401,7 @@ else:
 		with repoman_popen("hg status --no-status --unknown .") as f:
 			myunadded = f.readlines()
 		myunadded = ["./" + elem.rstrip() for elem in myunadded]
-		
+
 		# Mercurial doesn't handle manually deleted files as removed from
 		# the repository, so the user need to remove them before commit,
 		# using "hg remove [FILES]"
@@ -2678,7 +2705,7 @@ else:
 			elif vcs == "svn":
 				if myfile not in expansion:
 					continue
-				
+
 				# Subversion keywords are case-insensitive in svn:keywords properties, but case-sensitive in contents of files.
 				enabled_keywords = []
 				for k in expansion[myfile]:
