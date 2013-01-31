@@ -1,9 +1,11 @@
 # repoman: Checks
-# Copyright 2007-2012 Gentoo Foundation
+# Copyright 2007-2013 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 """This module contains functions used in Repoman to ascertain the quality
 and correctness of an ebuild."""
+
+from __future__ import unicode_literals
 
 import codecs
 from itertools import chain
@@ -480,6 +482,7 @@ class InheritEclass(LineCheck):
 			self._disabled = any(x in inherited for x in self._exempt_eclasses)
 		else:
 			self._disabled = False
+		self._eapi = pkg.eapi
 
 	def check(self, num, line):
 		if not self._inherit:
@@ -488,10 +491,14 @@ class InheritEclass(LineCheck):
 			if self._disabled or self._ignore_missing:
 				return
 			s = self._func_re.search(line)
-			if s:
-				self._func_call = True
-				return '%s.eclass is not inherited, but "%s" found at line: %s' % \
-					(self._eclass, s.group(3), '%d')
+			if s is not None:
+				func_name = s.group(3)
+				eapi_func = _eclass_eapi_functions.get(func_name)
+				if eapi_func is None or not eapi_func(self._eapi):
+					self._func_call = True
+					return ('%s.eclass is not inherited, '
+						'but "%s" found at line: %s') % \
+						(self._eclass, func_name, '%d')
 		elif not self._func_call:
 			self._func_call = self._func_re.search(line)
 
@@ -499,6 +506,10 @@ class InheritEclass(LineCheck):
 		if not self._disabled and self._comprehensive and self._inherit and not self._func_call:
 			self.repoman_check_name = 'inherit.unused'
 			yield 'no function called from %s.eclass; please drop' % self._eclass
+
+_eclass_eapi_functions = {
+	"usex" : lambda eapi: eapi not in ("0", "1", "2", "3", "4", "4-python", "4-slot-abi")
+}
 
 # eclasses that export ${ECLASS}_src_(compile|configure|install)
 _eclass_export_functions = (
@@ -552,8 +563,7 @@ _eclass_info = {
 		'funcs': (
 			'estack_push', 'estack_pop', 'eshopts_push', 'eshopts_pop',
 			'eumask_push', 'eumask_pop', 'epatch', 'epatch_user',
-			'emktemp', 'edos2unix', 'in_iuse', 'use_if_iuse', 'usex',
-			'makeopts_jobs'
+			'emktemp', 'edos2unix', 'in_iuse', 'use_if_iuse', 'usex'
 		),
 		'comprehensive': False,
 
@@ -585,6 +595,13 @@ _eclass_info = {
 		# These are "eclasses are the whole ebuild" type thing.
 		'exempt_eclasses': _eclass_export_functions + ('autotools', 'libtool'),
 
+		'comprehensive': False
+	},
+
+	'multiprocessing': {
+		'funcs': (
+			'makeopts_jobs',
+		),
 		'comprehensive': False
 	},
 
@@ -802,7 +819,8 @@ class PortageInternalVariableAssignment(LineCheck):
 _base_check_classes = (InheritEclass, LineCheck, PhaseCheck)
 _constant_checks = tuple(chain((v() for k, v in globals().items()
 	if isinstance(v, type) and issubclass(v, LineCheck) and v not in _base_check_classes),
-	(InheritEclass(k, **kwargs) for k, kwargs in _eclass_info.items())))
+	(InheritEclass(k, **portage._native_kwargs(kwargs))
+	for k, kwargs in _eclass_info.items())))
 
 _here_doc_re = re.compile(r'.*\s<<[-]?(\w+)$')
 _ignore_comment_re = re.compile(r'^\s*#')

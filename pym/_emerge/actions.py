@@ -1,7 +1,7 @@
-# Copyright 1999-2012 Gentoo Foundation
+# Copyright 1999-2013 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
-from __future__ import print_function
+from __future__ import print_function, unicode_literals
 
 import errno
 import logging
@@ -25,6 +25,7 @@ portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.dbapi._similar_name_search:similar_name_search',
 	'portage.debug',
 	'portage.news:count_unread_news,display_news_notifications',
+	'portage.util._get_vm_info:get_vm_info',
 	'_emerge.chk_updated_cfg_files:chk_updated_cfg_files',
 	'_emerge.help:help@emerge_help',
 	'_emerge.post_emerge:display_news_notification,post_emerge',
@@ -55,6 +56,7 @@ from portage._sets.base import InternalPackageSet
 from portage.util import cmp_sort_key, writemsg, varexpand, \
 	writemsg_level, writemsg_stdout
 from portage.util.digraph import digraph
+from portage.util._async.run_main_scheduler import run_main_scheduler
 from portage.util._async.SchedulerInterface import SchedulerInterface
 from portage.util._eventloop.global_event_loop import global_event_loop
 from portage._global_updates import _global_updates
@@ -285,8 +287,14 @@ def action_build(settings, trees, mtimedb,
 					"dropped due to\n" + \
 					"!!! masking or unsatisfied dependencies:\n\n",
 					noiselevel=-1)
-				for task in dropped_tasks:
-					portage.writemsg("  " + str(task) + "\n", noiselevel=-1)
+				for task, atoms in dropped_tasks.items():
+					if not atoms:
+						writemsg("  %s is masked or unavailable\n" %
+							(task,), noiselevel=-1)
+					else:
+						writemsg("  %s requires %s\n" %
+							(task, ", ".join(atoms)), noiselevel=-1)
+
 				portage.writemsg("\n", noiselevel=-1)
 			del dropped_tasks
 		else:
@@ -619,11 +627,17 @@ def action_depclean(settings, trees, ldpath_mtimes,
 	if not cleanlist and "--quiet" in myopts:
 		return rval
 
+	set_atoms = {}
+	for k in ("system", "selected"):
+		try:
+			set_atoms[k] = root_config.setconfig.getSetAtoms(k)
+		except portage.exception.PackageSetNotFound:
+			# A nested set could not be resolved, so ignore nested sets.
+			set_atoms[k] = root_config.sets[k].getAtoms()
+
 	print("Packages installed:   " + str(len(vardb.cpv_all())))
-	print("Packages in world:    " + \
-		str(len(root_config.sets["selected"].getAtoms())))
-	print("Packages in system:   " + \
-		str(len(root_config.sets["system"].getAtoms())))
+	print("Packages in world:    %d" % len(set_atoms["selected"]))
+	print("Packages in system:   %d" % len(set_atoms["system"]))
 	print("Required packages:    "+str(req_pkg_count))
 	if "--pretend" in myopts:
 		print("Number to remove:     "+str(len(cleanlist)))
@@ -656,13 +670,21 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 	required_sets[protected_set_name] = protected_set
 	system_set = psets["system"]
 
-	if not system_set or not selected_set:
+	set_atoms = {}
+	for k in ("system", "selected"):
+		try:
+			set_atoms[k] = root_config.setconfig.getSetAtoms(k)
+		except portage.exception.PackageSetNotFound:
+			# A nested set could not be resolved, so ignore nested sets.
+			set_atoms[k] = root_config.sets[k].getAtoms()
 
-		if not system_set:
+	if not set_atoms["system"] or not set_atoms["selected"]:
+
+		if not set_atoms["system"]:
 			writemsg_level("!!! You have no system list.\n",
 				level=logging.ERROR, noiselevel=-1)
 
-		if not selected_set:
+		if not set_atoms["selected"]:
 			writemsg_level("!!! You have no world file.\n",
 					level=logging.WARNING, noiselevel=-1)
 
@@ -814,7 +836,12 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 			msg.append("the following required packages not being installed:")
 			msg.append("")
 			for atom, parent in unresolvable:
-				msg.append("  %s pulled in by:" % (atom,))
+				if atom != atom.unevaluated_atom and \
+					vardb.match(_unicode(atom)):
+					msg.append("  %s (%s) pulled in by:" %
+						(atom.unevaluated_atom, atom))
+				else:
+					msg.append("  %s pulled in by:" % (atom,))
 				msg.append("    %s" % (parent,))
 				msg.append("")
 			msg.extend(textwrap.wrap(
@@ -857,15 +884,27 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 			required_pkgs_total += 1
 
 	def show_parents(child_node):
-		parent_nodes = graph.parent_nodes(child_node)
-		if not parent_nodes:
+		parent_atoms = \
+			resolver._dynamic_config._parent_atoms.get(child_node, [])
+
+		# Never display the special internal protected_set.
+		parent_atoms = [parent_atom for parent_atom in parent_atoms
+			if not (isinstance(parent_atom[0], SetArg) and
+			parent_atom[0].name == protected_set_name)]
+
+		if not parent_atoms:
 			# With --prune, the highest version can be pulled in without any
 			# real parent since all installed packages are pulled in.  In that
 			# case there's nothing to show here.
 			return
+		parent_atom_dict = {}
+		for parent, atom in parent_atoms:
+			parent_atom_dict.setdefault(parent, []).append(atom)
+
 		parent_strs = []
-		for node in parent_nodes:
-			parent_strs.append(str(getattr(node, "cpv", node)))
+		for parent, atoms in parent_atom_dict.items():
+			parent_strs.append("%s requires %s" %
+				(getattr(parent, "cpv", parent), ", ".join(atoms)))
 		parent_strs.sort()
 		msg = []
 		msg.append("  %s pulled in by:\n" % (child_node.cpv,))
@@ -889,12 +928,6 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 			writemsg("\ndigraph:\n\n", noiselevel=-1)
 			graph.debug_print()
 			writemsg("\n", noiselevel=-1)
-
-		# Never display the special internal protected_set.
-		for node in graph:
-			if isinstance(node, SetArg) and node.name == protected_set_name:
-				graph.remove(node)
-				break
 
 		pkgs_to_remove = []
 
@@ -1174,11 +1207,11 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 				priority = priority_map[dep_type]
 
 				if debug:
-					writemsg_level(_unicode_decode("\nParent:    %s\n") \
+					writemsg_level("\nParent:    %s\n"
 						% (node,), noiselevel=-1, level=logging.DEBUG)
-					writemsg_level(_unicode_decode(  "Depstring: %s\n") \
+					writemsg_level(  "Depstring: %s\n"
 						% (depstr,), noiselevel=-1, level=logging.DEBUG)
-					writemsg_level(_unicode_decode(  "Priority:  %s\n") \
+					writemsg_level(  "Priority:  %s\n"
 						% (priority,), noiselevel=-1, level=logging.DEBUG)
 
 				try:
@@ -1192,7 +1225,7 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 
 				if debug:
 					writemsg_level("Candidates: [%s]\n" % \
-						', '.join(_unicode_decode("'%s'") % (x,) for x in atoms),
+						', '.join("'%s'" % (x,) for x in atoms),
 						noiselevel=-1, level=logging.DEBUG)
 
 				for atom in atoms:
@@ -1455,6 +1488,18 @@ def action_info(settings, trees, myopts, myfiles):
 		append(header_title.rjust(int(header_width/2 + len(header_title)/2)))
 	append(header_width * "=")
 	append("System uname: %s" % (platform.platform(aliased=1),))
+
+	vm_info = get_vm_info()
+	if "ram.total" in vm_info:
+		line = "%-9s %10d total" % ("KiB Mem:", vm_info["ram.total"] / 1024)
+		if "ram.free" in vm_info:
+			line += ",%10d free" % (vm_info["ram.free"] / 1024,)
+		append(line)
+	if "swap.total" in vm_info:
+		line = "%-9s %10d total" % ("KiB Swap:", vm_info["swap.total"] / 1024)
+		if "swap.free" in vm_info:
+			line += ",%10d free" % (vm_info["swap.free"] / 1024,)
+		append(line)
 
 	lastSync = portage.grabfile(os.path.join(
 		settings["PORTDIR"], "metadata", "timestamp.chk"))
@@ -1937,35 +1982,10 @@ def action_regen(settings, portdb, max_jobs, max_load):
 
 	regen = MetadataRegen(portdb, max_jobs=max_jobs,
 		max_load=max_load, main=True)
-	received_signal = []
 
-	def emergeexitsig(signum, frame):
-		signal.signal(signal.SIGINT, signal.SIG_IGN)
-		signal.signal(signal.SIGTERM, signal.SIG_IGN)
-		portage.util.writemsg("\n\nExiting on signal %(signal)s\n" % \
-			{"signal":signum})
-		regen.terminate()
-		received_signal.append(128 + signum)
-
-	earlier_sigint_handler = signal.signal(signal.SIGINT, emergeexitsig)
-	earlier_sigterm_handler = signal.signal(signal.SIGTERM, emergeexitsig)
-
-	try:
-		regen.start()
-		regen.wait()
-	finally:
-		# Restore previous handlers
-		if earlier_sigint_handler is not None:
-			signal.signal(signal.SIGINT, earlier_sigint_handler)
-		else:
-			signal.signal(signal.SIGINT, signal.SIG_DFL)
-		if earlier_sigterm_handler is not None:
-			signal.signal(signal.SIGTERM, earlier_sigterm_handler)
-		else:
-			signal.signal(signal.SIGTERM, signal.SIG_DFL)
-
-	if received_signal:
-		sys.exit(received_signal[0])
+	signum = run_main_scheduler(regen)
+	if signum is not None:
+		sys.exit(128 + signum)
 
 	portage.writemsg_stdout("done!\n")
 	return regen.returncode
@@ -3436,10 +3456,15 @@ def run_action(settings, trees, mtimedb, myaction, myopts, myfiles,
 			portage.util.ensure_dirs(_emerge.emergelog._emerge_log_dir)
 
 	if not "--pretend" in myopts:
-		emergelog(xterm_titles, "Started emerge on: "+\
-			_unicode_decode(
-				time.strftime("%b %d, %Y %H:%M:%S", time.localtime()),
-				encoding=_encodings['content'], errors='replace'))
+		time_fmt = "%b %d, %Y %H:%M:%S"
+		if sys.hexversion < 0x3000000:
+			time_fmt = portage._unicode_encode(time_fmt)
+		time_str = time.strftime(time_fmt, time.localtime(time.time()))
+		# Avoid potential UnicodeDecodeError in Python 2, since strftime
+		# returns bytes in Python 2, and %b may contain non-ascii chars.
+		time_str = _unicode_decode(time_str,
+			encoding=_encodings['content'], errors='replace')
+		emergelog(xterm_titles, "Started emerge on: %s" % time_str)
 		myelogstr=""
 		if myopts:
 			opt_list = []

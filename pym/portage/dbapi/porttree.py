@@ -1,5 +1,7 @@
-# Copyright 1998-2012 Gentoo Foundation
+# Copyright 1998-2013 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
+
+from __future__ import unicode_literals
 
 __all__ = [
 	"close_portdbapi_caches", "FetchlistDict", "portagetree", "portdbapi"
@@ -34,6 +36,7 @@ from portage import _encodings
 from portage import _unicode_encode
 from portage import OrderedDict
 from portage.util._eventloop.EventLoop import EventLoop
+from portage.util._eventloop.global_event_loop import global_event_loop
 from _emerge.EbuildMetadataPhase import EbuildMetadataPhase
 
 import os as _os
@@ -65,7 +68,7 @@ class portdbapi(dbapi):
 			return None
 		return main_repo.eclass_db
 
-	def __init__(self, _unused_param=None, mysettings=None):
+	def __init__(self, _unused_param=DeprecationWarning, mysettings=None):
 		"""
 		@param _unused_param: deprecated, use mysettings['PORTDIR'] instead
 		@type _unused_param: None
@@ -81,7 +84,7 @@ class portdbapi(dbapi):
 			from portage import settings
 			self.settings = config(clone=settings)
 
-		if _unused_param is not None:
+		if _unused_param is not DeprecationWarning:
 			warnings.warn("The first parameter of the " + \
 				"portage.dbapi.porttree.portdbapi" + \
 				" constructor is unused since portage-2.1.8. " + \
@@ -96,7 +99,6 @@ class portdbapi(dbapi):
 		# this purpose because doebuild makes many changes to the config
 		# instance that is passed in.
 		self.doebuild_settings = config(clone=self.settings)
-		self._event_loop = EventLoop(main=False)
 		self.depcachedir = os.path.realpath(self.settings.depcachedir)
 		
 		if os.environ.get("SANDBOX_ON") == "1":
@@ -153,10 +155,10 @@ class portdbapi(dbapi):
 			# portage group.
 			depcachedir_unshared = True
 		else:
-			cache_kwargs.update({
+			cache_kwargs.update(portage._native_kwargs({
 				'gid'     : portage_gid,
 				'perms'   : 0o664
-			})
+			}))
 
 		# If secpass < 1, we don't want to write to the cache
 		# since then we won't be able to apply group permissions
@@ -194,6 +196,17 @@ class portdbapi(dbapi):
 
 		self._aux_cache = {}
 		self._broken_ebuilds = set()
+
+	@property
+	def _event_loop(self):
+		if portage._internal_caller:
+			# For internal portage usage, the global_event_loop is safe.
+			return global_event_loop()
+		else:
+			# For external API consumers, use a local EventLoop, since
+			# we don't want to assume that it's safe to override the
+			# global SIGCHLD handler.
+			return EventLoop(main=False)
 
 	def _create_pregen_cache(self, tree):
 		conf = self.repositories.get_repo_for_location(tree)
@@ -635,13 +648,14 @@ class portdbapi(dbapi):
 		else:
 			return 0
 
-	def cp_all(self, categories=None, trees=None):
+	def cp_all(self, categories=None, trees=None, reverse=False):
 		"""
 		This returns a list of all keys in our tree or trees
 		@param categories: optional list of categories to search or 
 			defaults to self.settings.categories
 		@param trees: optional list of trees to search the categories in or
 			defaults to self.porttrees
+		@param reverse: reverse sort order (default is False)
 		@rtype list of [cat/pkg,...]
 		"""
 		d = {}
@@ -660,7 +674,7 @@ class portdbapi(dbapi):
 						continue
 					d[atom.cp] = None
 		l = list(d)
-		l.sort()
+		l.sort(reverse=reverse)
 		return l
 
 	def cp_list(self, mycp, use_cache=1, mytree=None):
@@ -986,7 +1000,8 @@ def close_portdbapi_caches():
 portage.process.atexit_register(portage.portageexit)
 
 class portagetree(object):
-	def __init__(self, root=None, virtual=DeprecationWarning, settings=None):
+	def __init__(self, root=DeprecationWarning, virtual=DeprecationWarning,
+		settings=None):
 		"""
 		Constructor for a PortageTree
 		
@@ -1002,7 +1017,7 @@ class portagetree(object):
 			settings = portage.settings
 		self.settings = settings
 
-		if root is not None and root != settings['ROOT']:
+		if root is not DeprecationWarning:
 			warnings.warn("The root parameter of the " + \
 				"portage.dbapi.porttree.portagetree" + \
 				" constructor is now unused. Use " + \

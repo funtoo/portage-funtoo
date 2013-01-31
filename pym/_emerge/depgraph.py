@@ -1,7 +1,7 @@
-# Copyright 1999-2012 Gentoo Foundation
+# Copyright 1999-2013 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
-from __future__ import print_function
+from __future__ import print_function, unicode_literals
 
 import errno
 import io
@@ -41,6 +41,7 @@ from portage.util import ensure_dirs
 from portage.util import writemsg_level, write_atomic
 from portage.util.digraph import digraph
 from portage.util.listdir import _ignorecvs_dirs
+from portage.util._async.TaskScheduler import TaskScheduler
 from portage.versions import catpkgsplit
 
 from _emerge.AtomArg import AtomArg
@@ -54,6 +55,7 @@ from _emerge.DependencyArg import DependencyArg
 from _emerge.DepPriority import DepPriority
 from _emerge.DepPriorityNormalRange import DepPriorityNormalRange
 from _emerge.DepPrioritySatisfiedRange import DepPrioritySatisfiedRange
+from _emerge.EbuildMetadataPhase import EbuildMetadataPhase
 from _emerge.FakeVartree import FakeVartree
 from _emerge._find_deep_system_runtime_deps import _find_deep_system_runtime_deps
 from _emerge.is_valid_package_atom import insert_category_into_atom, \
@@ -551,16 +553,58 @@ class depgraph(object):
 				fakedb = self._dynamic_config._graph_trees[
 					myroot]["vartree"].dbapi
 
-				for pkg in vardb:
-					self._spinner_update()
-					if dynamic_deps:
-						# This causes FakeVartree to update the
-						# Package instance dependencies via
-						# PackageVirtualDbapi.aux_update()
-						vardb.aux_get(pkg.cpv, [])
-					fakedb.cpv_inject(pkg)
+				if not dynamic_deps:
+					for pkg in vardb:
+						fakedb.cpv_inject(pkg)
+				else:
+					max_jobs = self._frozen_config.myopts.get("--jobs")
+					max_load = self._frozen_config.myopts.get("--load-average")
+					scheduler = TaskScheduler(
+						self._dynamic_deps_preload(fake_vartree, fakedb),
+						max_jobs=max_jobs,
+						max_load=max_load,
+						event_loop=fake_vartree._portdb._event_loop)
+					scheduler.start()
+					scheduler.wait()
 
 		self._dynamic_config._vdb_loaded = True
+
+	def _dynamic_deps_preload(self, fake_vartree, fakedb):
+		portdb = fake_vartree._portdb
+		for pkg in fake_vartree.dbapi:
+			self._spinner_update()
+			fakedb.cpv_inject(pkg)
+			ebuild_path, repo_path = \
+				portdb.findname2(pkg.cpv, myrepo=pkg.repo)
+			if ebuild_path is None:
+				fake_vartree.dynamic_deps_preload(pkg, None)
+				continue
+			metadata, ebuild_hash = portdb._pull_valid_cache(
+				pkg.cpv, ebuild_path, repo_path)
+			if metadata is not None:
+				fake_vartree.dynamic_deps_preload(pkg, metadata)
+			else:
+				proc =  EbuildMetadataPhase(cpv=pkg.cpv,
+					ebuild_hash=ebuild_hash,
+					portdb=portdb, repo_path=repo_path,
+					settings=portdb.doebuild_settings)
+				proc.addExitListener(
+					self._dynamic_deps_proc_exit(pkg, fake_vartree))
+				yield proc
+
+	class _dynamic_deps_proc_exit(object):
+
+		__slots__ = ('_pkg', '_fake_vartree')
+
+		def __init__(self, pkg, fake_vartree):
+			self._pkg = pkg
+			self._fake_vartree = fake_vartree
+
+		def __call__(self, proc):
+			metadata = None
+			if proc.returncode == os.EX_OK:
+				metadata = proc.metadata
+			self._fake_vartree.dynamic_deps_preload(self._pkg, metadata)
 
 	def _spinner_update(self):
 		if self._frozen_config.spinner:
@@ -2405,7 +2449,7 @@ class depgraph(object):
 				#      came from, if any.
 				#   2) It takes away freedom from the resolver to choose other
 				#      possible expansions when necessary.
-				if "/" in x:
+				if "/" in x.split(":")[0]:
 					args.append(AtomArg(arg=x, atom=Atom(x, allow_repo=True),
 						root_config=root_config))
 					continue
@@ -2927,7 +2971,8 @@ class depgraph(object):
 		not been scheduled for replacement.
 		"""
 		kwargs["trees"] = self._dynamic_config._graph_trees
-		return self._select_atoms_highest_available(*pargs, **kwargs)
+		return self._select_atoms_highest_available(*pargs,
+			**portage._native_kwargs(kwargs))
 
 	def _select_atoms_highest_available(self, root, depstring,
 		myuse=None, parent=None, strict=True, trees=None, priority=None):
@@ -3143,7 +3188,7 @@ class depgraph(object):
 					if not node.installed:
 						raise
 			affecting_use.difference_update(node.use.mask, node.use.force)
-			pkg_name = _unicode_decode("%s") % (node.cpv,)
+			pkg_name = "%s" % (node.cpv,)
 			if affecting_use:
 				usedep = []
 				for flag in affecting_use:
@@ -3198,7 +3243,7 @@ class depgraph(object):
 					node_type = "set"
 				else:
 					node_type = "argument"
-				dep_chain.append((_unicode_decode("%s") % (node,), node_type))
+				dep_chain.append(("%s" % (node,), node_type))
 
 			elif node is not start_node:
 				for ppkg, patom in all_parents[child]:
@@ -3240,7 +3285,7 @@ class depgraph(object):
 				affecting_use.difference_update(node.use.mask, \
 					node.use.force)
 
-				pkg_name = _unicode_decode("%s") % (node.cpv,)
+				pkg_name = "%s" % (node.cpv,)
 				if affecting_use:
 					usedep = []
 					for flag in affecting_use:
@@ -3292,8 +3337,7 @@ class depgraph(object):
 				if self._dynamic_config.digraph.parent_nodes(parent_arg):
 					selected_parent = parent_arg
 				else:
-					dep_chain.append(
-						(_unicode_decode("%s") % (parent_arg,), "argument"))
+					dep_chain.append(("%s" % (parent_arg,), "argument"))
 					selected_parent = None
 
 			node = selected_parent
@@ -3329,7 +3373,7 @@ class depgraph(object):
 		if arg:
 			xinfo='"%s"' % arg
 		if isinstance(myparent, AtomArg):
-			xinfo = _unicode_decode('"%s"') % (myparent,)
+			xinfo = '"%s"' % (myparent,)
 		# Discard null/ from failed cpv_expand category expansion.
 		xinfo = xinfo.replace("null/", "")
 		if root != self._frozen_config._running_root.root:
@@ -3707,8 +3751,7 @@ class depgraph(object):
 			dep_chain = self._get_dep_chain(myparent, atom)
 			for node, node_type in dep_chain:
 				msg.append('(dependency required by "%s" [%s])' % \
-						(colorize('INFORM', _unicode_decode("%s") % \
-						(node)), node_type))
+						(colorize('INFORM', "%s" % (node)), node_type))
 
 		if msg:
 			writemsg("\n".join(msg), noiselevel=-1)
@@ -4375,8 +4418,11 @@ class depgraph(object):
 
 						use_match = True
 						can_adjust_use = not pkg.built
-						missing_enabled = atom.use.missing_enabled.difference(pkg.iuse.all)
-						missing_disabled = atom.use.missing_disabled.difference(pkg.iuse.all)
+						is_valid_flag = pkg.iuse.is_valid_flag
+						missing_enabled = frozenset(x for x in
+							atom.use.missing_enabled if not is_valid_flag(x))
+						missing_disabled = frozenset(x for x in
+							atom.use.missing_disabled if not is_valid_flag(x))
 
 						if atom.use.enabled:
 							if any(x in atom.use.enabled for x in missing_disabled):
@@ -4995,7 +5041,7 @@ class depgraph(object):
 							# matches (this can happen if an atom lacks a
 							# category).
 							show_invalid_depstring_notice(
-								pkg, depstr, _unicode_decode("%s") % (e,))
+								pkg, depstr, "%s" % (e,))
 							del e
 							raise
 						if not success:
@@ -5025,8 +5071,7 @@ class depgraph(object):
 						except portage.exception.InvalidAtom as e:
 							depstr = " ".join(vardb.aux_get(pkg.cpv, dep_keys))
 							show_invalid_depstring_notice(
-								pkg, depstr,
-								_unicode_decode("Invalid Atom: %s") % (e,))
+								pkg, depstr, "Invalid Atom: %s" % (e,))
 							return False
 				for cpv in stale_cache:
 					del blocker_cache[cpv]
@@ -6532,24 +6577,25 @@ class depgraph(object):
 			if len(roots) > 1:
 				writemsg("\nFor %s:\n" % abs_user_config, noiselevel=-1)
 
+			def _writemsg(reason, file):
+				writemsg(('\nThe following %s are necessary to proceed:\n'
+				          ' (see "%s" in the portage(5) man page for more details)\n')
+				         % (colorize('BAD', reason), file), noiselevel=-1)
+
 			if root in unstable_keyword_msg:
-				writemsg("\nThe following " + colorize("BAD", "keyword changes") + \
-					" are necessary to proceed:\n", noiselevel=-1)
+				_writemsg('keyword changes', 'package.accept_keywords')
 				writemsg(format_msg(unstable_keyword_msg[root]), noiselevel=-1)
 
 			if root in p_mask_change_msg:
-				writemsg("\nThe following " + colorize("BAD", "mask changes") + \
-					" are necessary to proceed:\n", noiselevel=-1)
+				_writemsg('mask changes', 'package.unmask')
 				writemsg(format_msg(p_mask_change_msg[root]), noiselevel=-1)
 
 			if root in use_changes_msg:
-				writemsg("\nThe following " + colorize("BAD", "USE changes") + \
-					" are necessary to proceed:\n", noiselevel=-1)
+				_writemsg('USE changes', 'package.use')
 				writemsg(format_msg(use_changes_msg[root]), noiselevel=-1)
 
 			if root in license_msg:
-				writemsg("\nThe following " + colorize("BAD", "license changes") + \
-					" are necessary to proceed:\n", noiselevel=-1)
+				_writemsg('license changes', 'package.license')
 				writemsg(format_msg(license_msg[root]), noiselevel=-1)
 
 		protect_obj = {}
@@ -6636,7 +6682,10 @@ class depgraph(object):
 			writemsg("\nAutounmask changes successfully written. Remember to run dispatch-conf.\n", \
 				noiselevel=-1)
 		elif not pretend and not autounmask_write and roots:
-			writemsg("\nUse --autounmask-write to write changes to config files (honoring CONFIG_PROTECT).\n", \
+			writemsg("\nUse --autounmask-write to write changes to config files (honoring\n"
+				"CONFIG_PROTECT). Carefully examine the list of proposed changes,\n"
+				"paying special attention to mask or keyword changes that may expose\n"
+				"experimental or unstable packages.\n",
 				noiselevel=-1)
 
 
@@ -6768,7 +6817,8 @@ class depgraph(object):
 			writemsg("\n", noiselevel=-1)
 
 		for pargs, kwargs in self._dynamic_config._unsatisfied_deps_for_display:
-			self._show_unsatisfied_dep(*pargs, **kwargs)
+			self._show_unsatisfied_dep(*pargs,
+				**portage._native_kwargs(kwargs))
 
 	def saveNomergeFavorites(self):
 		"""Find atoms in favorites that are not in the mergelist and add them
@@ -7113,7 +7163,8 @@ class depgraph(object):
 		try:
 			for pargs, kwargs in self._dynamic_config._unsatisfied_deps_for_display:
 				self._show_unsatisfied_dep(
-					*pargs, check_autounmask_breakage=True, **kwargs)
+					*pargs, check_autounmask_breakage=True,
+					**portage._native_kwargs(kwargs))
 		except self._autounmask_breakage:
 			return True
 		return False
@@ -7433,7 +7484,7 @@ def _resume_depgraph(settings, trees, mtimedb, myopts, myparams, spinner):
 	skip_masked = True
 	skip_unsatisfied = True
 	mergelist = mtimedb["resume"]["mergelist"]
-	dropped_tasks = set()
+	dropped_tasks = {}
 	frozen_config = _frozen_depgraph_config(settings, trees,
 		myopts, spinner)
 	while True:
@@ -7447,12 +7498,21 @@ def _resume_depgraph(settings, trees, mtimedb, myopts, myparams, spinner):
 				raise
 
 			graph = mydepgraph._dynamic_config.digraph
-			unsatisfied_parents = dict((dep.parent, dep.parent) \
-				for dep in e.value)
+			unsatisfied_parents = {}
 			traversed_nodes = set()
-			unsatisfied_stack = list(unsatisfied_parents)
+			unsatisfied_stack = [(dep.parent, dep.atom) for dep in e.value]
 			while unsatisfied_stack:
-				pkg = unsatisfied_stack.pop()
+				pkg, atom = unsatisfied_stack.pop()
+				if atom is not None and \
+					mydepgraph._select_pkg_from_installed(
+					pkg.root, atom)[0] is not None:
+					continue
+				atoms = unsatisfied_parents.get(pkg)
+				if atoms is None:
+					atoms = []
+					unsatisfied_parents[pkg] = atoms
+				if atom is not None:
+					atoms.append(atom)
 				if pkg in traversed_nodes:
 					continue
 				traversed_nodes.add(pkg)
@@ -7461,7 +7521,8 @@ def _resume_depgraph(settings, trees, mtimedb, myopts, myparams, spinner):
 				# package scheduled for merge, removing this
 				# package may cause the the parent package's
 				# dependency to become unsatisfied.
-				for parent_node in graph.parent_nodes(pkg):
+				for parent_node, atom in \
+					mydepgraph._dynamic_config._parent_atoms.get(pkg, []):
 					if not isinstance(parent_node, Package) \
 						or parent_node.operation not in ("merge", "nomerge"):
 						continue
@@ -7469,8 +7530,7 @@ def _resume_depgraph(settings, trees, mtimedb, myopts, myparams, spinner):
 					# ensure that a package with an unsatisfied depenedency
 					# won't get pulled in, even indirectly via a soft
 					# dependency.
-					unsatisfied_parents[parent_node] = parent_node
-					unsatisfied_stack.append(parent_node)
+					unsatisfied_stack.append((parent_node, atom))
 
 			unsatisfied_tuples = frozenset(tuple(parent_node)
 				for parent_node in unsatisfied_parents
@@ -7491,8 +7551,8 @@ def _resume_depgraph(settings, trees, mtimedb, myopts, myparams, spinner):
 			# Exclude installed packages that have been removed from the graph due
 			# to failure to build/install runtime dependencies after the dependent
 			# package has already been installed.
-			dropped_tasks.update(pkg for pkg in \
-				unsatisfied_parents if pkg.operation != "nomerge")
+			dropped_tasks.update((pkg, atoms) for pkg, atoms in \
+				unsatisfied_parents.items() if pkg.operation != "nomerge")
 
 			del e, graph, traversed_nodes, \
 				unsatisfied_parents, unsatisfied_stack

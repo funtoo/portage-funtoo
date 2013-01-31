@@ -1,5 +1,7 @@
-# Copyright 2010-2012 Gentoo Foundation
+# Copyright 2010-2013 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
+
+from __future__ import unicode_literals
 
 __all__ = [
 	'autouse', 'best_from_dict', 'check_config_instance', 'config',
@@ -44,6 +46,7 @@ from portage.util import ensure_dirs, getconfig, grabdict, \
 	grabdict_package, grabfile, grabfile_package, LazyItemsDict, \
 	normalize_path, shlex_split, stack_dictlist, stack_dicts, stack_lists, \
 	writemsg, writemsg_level, _eapi_cache
+from portage.util._path import exists_raise_eaccess, isdir_raise_eaccess
 from portage.versions import catpkgsplit, catsplit, cpv_getkey, _pkg_str
 
 from portage.package.ebuild._config import special_env_vars
@@ -180,7 +183,8 @@ class config(object):
 		@type config_incrementals: List
 		@param config_root: path to read local config from (defaults to "/", see PORTAGE_CONFIGROOT)
 		@type config_root: String
-		@param target_root: __init__ override of $ROOT env variable.
+		@param target_root: the target root, which typically corresponds to the
+			value of the $ROOT env variable (default is /)
 		@type target_root: String
 		@param eprefix: set the EPREFIX variable (default is portage.const.EPREFIX)
 		@type eprefix: String
@@ -329,11 +333,20 @@ class config(object):
 			except OSError:
 				pass
 
+			make_conf_count = 0
 			make_conf = {}
 			for x in make_conf_paths:
-				make_conf.update(getconfig(x,
+				mygcfg = getconfig(x,
 					tolerant=tolerant, allow_sourcing=True,
-					expand=make_conf) or {})
+					expand=make_conf)
+				if mygcfg is not None:
+					make_conf.update(mygcfg)
+					make_conf_count += 1
+
+			if make_conf_count == 2:
+				writemsg("!!! %s\n" %
+					_("Found 2 make.conf files, using both '%s' and '%s'") %
+					tuple(make_conf_paths), noiselevel=-1)
 
 			# Allow ROOT setting to come from make.conf if it's not overridden
 			# by the constructor argument (from the calling environment).
@@ -366,8 +379,22 @@ class config(object):
 			# Allow make.globals to set default paths relative to ${EPREFIX}.
 			expand_map["EPREFIX"] = eprefix
 
-			make_globals = getconfig(os.path.join(
-				self.global_config_path, 'make.globals'),
+			make_globals_path = os.path.join(
+				self.global_config_path, 'make.globals')
+			old_make_globals = os.path.join(config_root,
+				'etc', 'make.globals')
+			if os.path.isfile(old_make_globals) and \
+				not os.path.samefile(make_globals_path, old_make_globals):
+				# Don't warn if they refer to the same path, since
+				# that can be used for backward compatibility with
+				# old software.
+				writemsg("!!! %s\n" %
+					_("Found obsolete make.globals file: "
+					"'%s', (using '%s' instead)") %
+					(old_make_globals, make_globals_path),
+					noiselevel=-1)
+
+			make_globals = getconfig(make_globals_path,
 				tolerant=tolerant, expand=expand_map)
 			if make_globals is None:
 				make_globals = {}
@@ -594,7 +621,7 @@ class config(object):
 				shell_quote_re = re.compile(r"[\s\\\"'$`]")
 				for ov in portdir_overlay:
 					ov = normalize_path(ov)
-					if os.path.isdir(ov):
+					if isdir_raise_eaccess(ov):
 						if shell_quote_re.search(ov) is not None:
 							ov = portage._shell_quote(ov)
 						new_ov.append(ov)
@@ -618,7 +645,8 @@ class config(object):
 				self._repo_make_defaults[repo.name] = d
 
 			#Read all USE related files from profiles and optionally from user config.
-			self._use_manager = UseManager(self.repositories, profiles_complex, abs_user_config, user_config=local_config)
+			self._use_manager = UseManager(self.repositories, profiles_complex,
+				abs_user_config, self._isStable, user_config=local_config)
 			#Initialize all USE related variables we track ourselves.
 			self.usemask = self._use_manager.getUseMask()
 			self.useforce = self._use_manager.getUseForce()
@@ -979,8 +1007,8 @@ class config(object):
 						noiselevel=-1)
 
 		profile_broken = not self.profile_path or \
-			not os.path.exists(os.path.join(self.profile_path, "parent")) and \
-			os.path.exists(os.path.join(self["PORTDIR"], "profiles"))
+			not exists_raise_eaccess(os.path.join(self.profile_path, "parent")) and \
+			exists_raise_eaccess(os.path.join(self["PORTDIR"], "profiles"))
 
 		if profile_broken:
 			abs_profile_path = None
@@ -2354,7 +2382,7 @@ class config(object):
 				return portage._pym_path
 
 			elif mykey == "PORTAGE_GID":
-				return _unicode_decode(str(portage_gid))
+				return "%s" % portage_gid
 
 		for d in self.lookuplist:
 			try:

@@ -1,4 +1,4 @@
-# Copyright 1999-2012 Gentoo Foundation
+# Copyright 1999-2013 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 from _emerge.SubProcess import SubProcess
@@ -6,7 +6,7 @@ import sys
 from portage.cache.mappings import slot_dict_class
 import portage
 portage.proxy.lazyimport.lazyimport(globals(),
-	'portage.package.ebuild._eapi_invalid:eapi_invalid',
+	'portage.package.ebuild._metadata_invalid:eapi_invalid',
 )
 from portage import os
 from portage import _encodings
@@ -32,7 +32,6 @@ class EbuildMetadataPhase(SubProcess):
 
 	_file_names = ("ebuild",)
 	_files_dict = slot_dict_class(_file_names, prefix="")
-	_metadata_fd = 9
 
 	def _start(self):
 		ebuild_path = self.ebuild_hash.location
@@ -51,14 +50,14 @@ class EbuildMetadataPhase(SubProcess):
 			# An empty EAPI setting is invalid.
 			self._eapi_invalid(None)
 			self._set_returncode((self.pid, 1 << 8))
-			self.wait()
+			self._async_wait()
 			return
 
 		self.eapi_supported = portage.eapi_is_supported(parsed_eapi)
 		if not self.eapi_supported:
 			self.metadata = {"EAPI": parsed_eapi}
 			self._set_returncode((self.pid, os.EX_OK << 8))
-			self.wait()
+			self._async_wait()
 			return
 
 		settings = self.settings
@@ -91,10 +90,20 @@ class EbuildMetadataPhase(SubProcess):
 		files = self._files
 
 		master_fd, slave_fd = os.pipe()
-		fcntl.fcntl(master_fd, fcntl.F_SETFL,
-			fcntl.fcntl(master_fd, fcntl.F_GETFL) | os.O_NONBLOCK)
 
-		fd_pipes[self._metadata_fd] = slave_fd
+		fcntl_flags = os.O_NONBLOCK
+		try:
+			fcntl.FD_CLOEXEC
+		except AttributeError:
+			pass
+		else:
+			fcntl_flags |= fcntl.FD_CLOEXEC
+
+		fcntl.fcntl(master_fd, fcntl.F_SETFL,
+			fcntl.fcntl(master_fd, fcntl.F_GETFL) | fcntl_flags)
+
+		fd_pipes[slave_fd] = slave_fd
+		settings["PORTAGE_PIPE_FD"] = str(slave_fd)
 
 		self._raw_metadata = []
 		files.ebuild = master_fd
@@ -106,6 +115,7 @@ class EbuildMetadataPhase(SubProcess):
 			settings=settings, debug=debug,
 			mydbapi=self.portdb, tree="porttree",
 			fd_pipes=fd_pipes, returnpid=True)
+		settings.pop("PORTAGE_PIPE_FD", None)
 
 		os.close(slave_fd)
 		null_input.close()
@@ -114,7 +124,7 @@ class EbuildMetadataPhase(SubProcess):
 			# doebuild failed before spawning
 			self._unregister()
 			self._set_returncode((self.pid, retval << 8))
-			self.wait()
+			self._async_wait()
 			return
 
 		self.pid = retval[0]

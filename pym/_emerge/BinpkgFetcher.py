@@ -63,7 +63,7 @@ class BinpkgFetcher(SpawnProcess):
 		if pretend:
 			portage.writemsg_stdout("\n%s\n" % uri, noiselevel=-1)
 			self._set_returncode((self.pid, os.EX_OK << 8))
-			self.wait()
+			self._async_wait()
 			return
 
 		protocol = urllib_parse_urlparse(uri)[0]
@@ -91,7 +91,7 @@ class BinpkgFetcher(SpawnProcess):
 		# Redirect all output to stdout since some fetchers like
 		# wget pollute stderr (if portage detects a problem then it
 		# can send it's own message to stderr).
-		fd_pipes.setdefault(0, sys.__stdin__.fileno())
+		fd_pipes.setdefault(0, portage._get_stdin().fileno())
 		fd_pipes.setdefault(1, sys.__stdout__.fileno())
 		fd_pipes.setdefault(2, sys.__stdout__.fileno())
 

@@ -1,5 +1,7 @@
-# Copyright 2010-2012 Gentoo Foundation
+# Copyright 2010-2013 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
+
+from __future__ import unicode_literals
 
 __all__ = ['doebuild', 'doebuild_environment', 'spawn', 'spawnebuild']
 
@@ -33,6 +35,7 @@ portage.proxy.lazyimport.lazyimport(globals(),
 	'portage.util._desktop_entry:validate_desktop_entry',
 	'portage.util._async.SchedulerInterface:SchedulerInterface',
 	'portage.util._eventloop.EventLoop:EventLoop',
+	'portage.util._eventloop.global_event_loop:global_event_loop',
 	'portage.util.ExtractKernelVersion:ExtractKernelVersion'
 )
 
@@ -110,6 +113,11 @@ def _doebuild_spawn(phase, settings, actionmap=None, **kwargs):
 
 	if phase == 'depend':
 		kwargs['droppriv'] = 'userpriv' in settings.features
+		# It's not necessary to close_fds for this phase, since
+		# it should not spawn any daemons, and close_fds is
+		# best avoided since it can interact badly with some
+		# garbage collectors (see _setup_pipes docstring).
+		kwargs['close_fds'] = False
 
 	if actionmap is not None and phase in actionmap:
 		kwargs.update(actionmap[phase]["args"])
@@ -127,7 +135,7 @@ def _doebuild_spawn(phase, settings, actionmap=None, **kwargs):
 
 	settings['EBUILD_PHASE'] = phase
 	try:
-		return spawn(cmd, settings, **kwargs)
+		return spawn(cmd, settings, **portage._native_kwargs(kwargs))
 	finally:
 		settings.pop('EBUILD_PHASE', None)
 
@@ -136,7 +144,8 @@ def _spawn_phase(phase, settings, actionmap=None, **kwargs):
 		return _doebuild_spawn(phase, settings, actionmap=actionmap, **kwargs)
 
 	ebuild_phase = EbuildPhase(actionmap=actionmap, background=False,
-		phase=phase, scheduler=SchedulerInterface(EventLoop(main=False)),
+		phase=phase, scheduler=SchedulerInterface(portage._internal_caller and
+			global_event_loop() or EventLoop(main=False)),
 		settings=settings)
 	ebuild_phase.start()
 	ebuild_phase.wait()
@@ -153,13 +162,15 @@ def _doebuild_path(settings, eapi=None):
 	eprefix = settings["EPREFIX"]
 	prerootpath = [x for x in settings.get("PREROOTPATH", "").split(":") if x]
 	rootpath = [x for x in settings.get("ROOTPATH", "").split(":") if x]
+	overrides = [x for x in settings.get(
+		"__PORTAGE_TEST_PATH_OVERRIDE", "").split(":") if x]
 
 	prefixes = []
 	if eprefix:
 		prefixes.append(eprefix)
 	prefixes.append("/")
 
-	path = []
+	path = overrides
 
 	if eprefix and uid != 0 and "fakeroot" not in settings.features:
 		path.append(os.path.join(portage_bin_path,
@@ -445,8 +456,8 @@ _doebuild_commands_without_builddir = (
 	'fetch', 'fetchall', 'help', 'manifest'
 )
 
-def doebuild(myebuild, mydo, _unused=None, settings=None, debug=0, listonly=0,
-	fetchonly=0, cleanup=0, dbkey=None, use_cache=1, fetchall=0, tree=None,
+def doebuild(myebuild, mydo, _unused=DeprecationWarning, settings=None, debug=0, listonly=0,
+	fetchonly=0, cleanup=0, dbkey=DeprecationWarning, use_cache=1, fetchall=0, tree=None,
 	mydbapi=None, vartree=None, prev_mtimes=None,
 	fd_pipes=None, returnpid=False):
 	"""
@@ -509,10 +520,15 @@ def doebuild(myebuild, mydo, _unused=None, settings=None, debug=0, listonly=0,
 	mysettings = settings
 	myroot = settings['EROOT']
 
-	if _unused is not None and _unused != mysettings['EROOT']:
+	if _unused is not DeprecationWarning:
 		warnings.warn("The third parameter of the "
-			"portage.doebuild() is now unused. Use "
-			"settings['ROOT'] instead.",
+			"portage.doebuild() is deprecated. Instead "
+			"settings['EROOT'] is used.",
+			DeprecationWarning, stacklevel=2)
+
+	if dbkey is not DeprecationWarning:
+		warnings.warn("portage.doebuild() called "
+			"with deprecated dbkey argument.",
 			DeprecationWarning, stacklevel=2)
 
 	if not tree:
@@ -694,7 +710,8 @@ def doebuild(myebuild, mydo, _unused=None, settings=None, debug=0, listonly=0,
 			if not returnpid and \
 				'PORTAGE_BUILDDIR_LOCKED' not in mysettings:
 				builddir_lock = EbuildBuildDir(
-					scheduler=EventLoop(main=False),
+					scheduler=(portage._internal_caller and
+						global_event_loop() or EventLoop(main=False)),
 					settings=mysettings)
 				builddir_lock.lock()
 			try:
@@ -710,42 +727,7 @@ def doebuild(myebuild, mydo, _unused=None, settings=None, debug=0, listonly=0,
 			if returnpid:
 				return _spawn_phase(mydo, mysettings,
 					fd_pipes=fd_pipes, returnpid=returnpid)
-			elif isinstance(dbkey, dict):
-				warnings.warn("portage.doebuild() called " + \
-					"with dict dbkey argument. This usage will " + \
-					"not be supported in the future.",
-					DeprecationWarning, stacklevel=2)
-				mysettings["dbkey"] = ""
-				pr, pw = os.pipe()
-				fd_pipes = {
-					0:sys.__stdin__.fileno(),
-					1:sys.__stdout__.fileno(),
-					2:sys.__stderr__.fileno(),
-					9:pw}
-				mypids = _spawn_phase(mydo, mysettings, returnpid=True,
-					fd_pipes=fd_pipes)
-				os.close(pw) # belongs exclusively to the child process now
-				f = os.fdopen(pr, 'rb', 0)
-				for k, v in zip(auxdbkeys,
-					(_unicode_decode(line).rstrip('\n') for line in f)):
-					dbkey[k] = v
-				f.close()
-				retval = os.waitpid(mypids[0], 0)[1]
-				portage.process.spawned_pids.remove(mypids[0])
-				# If it got a signal, return the signal that was sent, but
-				# shift in order to distinguish it from a return value. (just
-				# like portage.process.spawn() would do).
-				if retval & 0xff:
-					retval = (retval & 0xff) << 8
-				else:
-					# Otherwise, return its exit code.
-					retval = retval >> 8
-				if retval == os.EX_OK and len(dbkey) != len(auxdbkeys):
-					# Don't trust bash's returncode if the
-					# number of lines is incorrect.
-					retval = 1
-				return retval
-			elif dbkey:
+			elif dbkey and dbkey is not DeprecationWarning:
 				mysettings["dbkey"] = dbkey
 			else:
 				mysettings["dbkey"] = \
@@ -836,7 +818,8 @@ def doebuild(myebuild, mydo, _unused=None, settings=None, debug=0, listonly=0,
 					if builddir_lock is None and \
 						'PORTAGE_BUILDDIR_LOCKED' not in mysettings:
 						builddir_lock = EbuildBuildDir(
-							scheduler=EventLoop(main=False),
+							scheduler=(portage._internal_caller and
+								global_event_loop() or EventLoop(main=False)),
 							settings=mysettings)
 						builddir_lock.lock()
 					try:
@@ -859,7 +842,8 @@ def doebuild(myebuild, mydo, _unused=None, settings=None, debug=0, listonly=0,
 			if not returnpid and \
 				'PORTAGE_BUILDDIR_LOCKED' not in mysettings:
 				builddir_lock = EbuildBuildDir(
-					scheduler=EventLoop(main=False),
+					scheduler=(portage._internal_caller and
+						global_event_loop() or EventLoop(main=False)),
 					settings=mysettings)
 				builddir_lock.lock()
 			mystatus = prepare_build_dirs(myroot, mysettings, cleanup)
@@ -1199,7 +1183,9 @@ def _prepare_env_file(settings):
 	"""
 
 	env_extractor = BinpkgEnvExtractor(background=False,
-		scheduler=EventLoop(main=False), settings=settings)
+		scheduler=(portage._internal_caller and
+			global_event_loop() or EventLoop(main=False)),
+		settings=settings)
 
 	if env_extractor.dest_env_exists():
 		# There are lots of possible states when doebuild()
@@ -1402,7 +1388,7 @@ def spawn(mystring, mysettings, debug=0, free=0, droppriv=0, sesandbox=0, fakero
 	fd_pipes = keywords.get("fd_pipes")
 	if fd_pipes is None:
 		fd_pipes = {
-			0:sys.__stdin__.fileno(),
+			0:portage._get_stdin().fileno(),
 			1:sys.__stdout__.fileno(),
 			2:sys.__stderr__.fileno(),
 		}
@@ -1434,8 +1420,30 @@ def spawn(mystring, mysettings, debug=0, free=0, droppriv=0, sesandbox=0, fakero
 		if "userpriv" in features and "userpriv" not in mysettings["PORTAGE_RESTRICT"].split() and secpass >= 2:
 			portage_build_uid = portage_uid
 			portage_build_gid = portage_gid
-	mysettings["PORTAGE_BUILD_USER"] = pwd.getpwuid(portage_build_uid).pw_name
-	mysettings["PORTAGE_BUILD_GROUP"] = grp.getgrgid(portage_build_gid).gr_name
+
+	if "PORTAGE_BUILD_USER" not in mysettings:
+		user = None
+		try:
+			user = pwd.getpwuid(portage_build_uid).pw_name
+		except KeyError:
+			if portage_build_uid == 0:
+				user = "root"
+			elif portage_build_uid == portage_uid:
+				user = portage.data._portage_username
+		if user is not None:
+			mysettings["PORTAGE_BUILD_USER"] = user
+
+	if "PORTAGE_BUILD_GROUP" not in mysettings:
+		group = None
+		try:
+			group = grp.getgrgid(portage_build_gid).gr_name
+		except KeyError:
+			if portage_build_gid == 0:
+				group = "root"
+			elif portage_build_gid == portage_gid:
+				group = portage.data._portage_grpname
+		if group is not None:
+			mysettings["PORTAGE_BUILD_GROUP"] = group
 
 	if not free:
 		free=((droppriv and "usersandbox" not in features) or \
@@ -1467,13 +1475,15 @@ def spawn(mystring, mysettings, debug=0, free=0, droppriv=0, sesandbox=0, fakero
 			mysettings["PORTAGE_SANDBOX_T"])
 
 	if keywords.get("returnpid"):
-		return spawn_func(mystring, env=mysettings.environ(), **keywords)
+		return spawn_func(mystring, env=mysettings.environ(),
+			**portage._native_kwargs(keywords))
 
 	proc = EbuildSpawnProcess(
 		background=False, args=mystring,
-		scheduler=SchedulerInterface(EventLoop(main=False)),
+		scheduler=SchedulerInterface(portage._internal_caller and
+			global_event_loop() or EventLoop(main=False)),
 		spawn_func=spawn_func,
-		settings=mysettings, **keywords)
+		settings=mysettings, **portage._native_kwargs(keywords))
 
 	proc.start()
 	proc.wait()
@@ -1603,6 +1613,29 @@ def _check_build_log(mysettings, out=None):
 			qa_configure_opts = "^%s$" % qa_configure_opts[0]
 		qa_configure_opts = re.compile(qa_configure_opts)
 
+	qa_am_maintainer_mode = []
+	try:
+		with io.open(_unicode_encode(os.path.join(
+			mysettings["PORTAGE_BUILDDIR"],
+			"build-info", "QA_AM_MAINTAINER_MODE"),
+			encoding=_encodings['fs'], errors='strict'),
+			mode='r', encoding=_encodings['repo.content'],
+			errors='replace') as qa_am_maintainer_mode_f:
+			qa_am_maintainer_mode = [x for x in
+				qa_am_maintainer_mode_f.read().splitlines() if x]
+	except IOError as e:
+		if e.errno not in (errno.ENOENT, errno.ESTALE):
+			raise
+
+	if qa_am_maintainer_mode:
+		if len(qa_am_maintainer_mode) > 1:
+			qa_am_maintainer_mode = \
+				"|".join("(%s)" % x for x in qa_am_maintainer_mode)
+			qa_am_maintainer_mode = "^(%s)$" % qa_am_maintainer_mode
+		else:
+			qa_am_maintainer_mode = "^%s$" % qa_am_maintainer_mode[0]
+		qa_am_maintainer_mode = re.compile(qa_am_maintainer_mode)
+
 	# Exclude output from dev-libs/yaz-3.0.47 which looks like this:
 	#
 	#Configuration:
@@ -1623,7 +1656,9 @@ def _check_build_log(mysettings, out=None):
 		for line in f:
 			line = _unicode_decode(line)
 			if am_maintainer_mode_re.search(line) is not None and \
-				am_maintainer_mode_exclude_re.search(line) is None:
+				am_maintainer_mode_exclude_re.search(line) is None and \
+				(not qa_am_maintainer_mode or
+					qa_am_maintainer_mode.search(line) is None):
 				am_maintainer_mode.append(line.rstrip("\n"))
 
 			if bash_command_not_found_re.match(line) is not None and \
@@ -1732,7 +1767,7 @@ def _post_src_install_write_metadata(settings):
 		'BUILD_TIME'), encoding=_encodings['fs'], errors='strict'),
 		mode='w', encoding=_encodings['repo.content'],
 		errors='strict') as f:
-		f.write(_unicode_decode("%.0f\n" % (time.time(),)))
+		f.write("%.0f\n" % (time.time(),))
 
 	use = frozenset(settings['PORTAGE_USE'].split())
 	for k in _vdb_use_conditional_keys:
@@ -1764,7 +1799,7 @@ def _post_src_install_write_metadata(settings):
 			k), encoding=_encodings['fs'], errors='strict'),
 			mode='w', encoding=_encodings['repo.content'],
 			errors='strict') as f:
-			f.write(_unicode_decode(v + '\n'))
+			f.write('%s\n' % v)
 
 	if eapi_attrs.slot_operator:
 		deps = evaluate_slot_operator_equal_deps(settings, use, QueryCommand.get_db())
@@ -1780,7 +1815,7 @@ def _post_src_install_write_metadata(settings):
 				k), encoding=_encodings['fs'], errors='strict'),
 				mode='w', encoding=_encodings['repo.content'],
 				errors='strict') as f:
-				f.write(_unicode_decode(v + '\n'))
+				f.write('%s\n' % v)
 
 def _preinst_bsdflags(mysettings):
 	if bsd_chflags:
@@ -1989,7 +2024,7 @@ def _post_src_install_uid_fix(mysettings, out):
 		'SIZE'), encoding=_encodings['fs'], errors='strict'),
 		mode='w', encoding=_encodings['repo.content'],
 		errors='strict')
-	f.write(_unicode_decode(str(size) + '\n'))
+	f.write('%d\n' % size)
 	f.close()
 
 	_reapply_bsdflags_to_image(mysettings)

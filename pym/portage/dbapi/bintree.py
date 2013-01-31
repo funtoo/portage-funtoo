@@ -1,5 +1,7 @@
-# Copyright 1998-2012 Gentoo Foundation
+# Copyright 1998-2013 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
+
+from __future__ import unicode_literals
 
 __all__ = ["bindbapi", "binarytree"]
 
@@ -138,15 +140,15 @@ class bindbapi(fakedbapi):
 			if myval:
 				mydata[x] = " ".join(myval.split())
 
-		if not mydata.setdefault('EAPI', _unicode_decode('0')):
-			mydata['EAPI'] = _unicode_decode('0')
+		if not mydata.setdefault('EAPI', '0'):
+			mydata['EAPI'] = '0'
 
 		if cache_me:
 			aux_cache = self._aux_cache_slot_dict()
 			for x in self._aux_cache_keys:
-				aux_cache[x] = mydata.get(x, _unicode_decode(''))
+				aux_cache[x] = mydata.get(x, '')
 			self._aux_cache[mycpv] = aux_cache
-		return [mydata.get(x, _unicode_decode('')) for x in wants]
+		return [mydata.get(x, '') for x in wants]
 
 	def aux_update(self, cpv, values):
 		if not self.bintree.populated:
@@ -258,7 +260,7 @@ def _pkgindex_cpv_map_latest_build(pkgindex):
 
 class binarytree(object):
 	"this tree scans for a list of all packages available in PKGDIR"
-	def __init__(self, _unused=None, pkgdir=None,
+	def __init__(self, _unused=DeprecationWarning, pkgdir=None,
 		virtual=DeprecationWarning, settings=None):
 
 		if pkgdir is None:
@@ -267,11 +269,11 @@ class binarytree(object):
 		if settings is None:
 			raise TypeError("settings parameter is required")
 
-		if _unused is not None and _unused != settings['ROOT']:
-			warnings.warn("The root parameter of the "
+		if _unused is not DeprecationWarning:
+			warnings.warn("The first parameter of the "
 				"portage.dbapi.bintree.binarytree"
-				" constructor is now unused. Use "
-				"settings['ROOT'] instead.",
+				" constructor is now unused. Instead "
+				"settings['ROOT'] is used.",
 				DeprecationWarning, stacklevel=2)
 
 		if virtual is not DeprecationWarning:
@@ -1356,19 +1358,14 @@ class binarytree(object):
 				f.close()
 		return pkgindex
 
-	def digestCheck(self, pkg):
-		"""
-		Verify digests for the given package and raise DigestException
-		if verification fails.
-		@rtype: bool
-		@return: True if digests could be located, False otherwise.
-		"""
-		cpv = pkg
-		if not isinstance(cpv, basestring):
-			cpv = pkg.cpv
-			pkg = None
+	def _get_digests(self, pkg):
 
-		pkg_path = self.getname(cpv)
+		try:
+			cpv = pkg.cpv
+		except AttributeError:
+			cpv = pkg
+
+		digests = {}
 		metadata = None
 		if self._remotepkgs is None or cpv not in self._remotepkgs:
 			for d in self._load_pkgindex().packages:
@@ -1378,9 +1375,8 @@ class binarytree(object):
 		else:
 			metadata = self._remotepkgs[cpv]
 		if metadata is None:
-			return False
+			return digests
 
-		digests = {}
 		for k in hashfunc_map:
 			v = metadata.get(k)
 			if not v:
@@ -1394,9 +1390,27 @@ class binarytree(object):
 				writemsg(_("!!! Malformed SIZE attribute in remote " \
 				"metadata for '%s'\n") % cpv)
 
+		return digests
+
+	def digestCheck(self, pkg):
+		"""
+		Verify digests for the given package and raise DigestException
+		if verification fails.
+		@rtype: bool
+		@return: True if digests could be located, False otherwise.
+		"""
+
+		digests = self._get_digests(pkg)
+
 		if not digests:
 			return False
 
+		try:
+			cpv = pkg.cpv
+		except AttributeError:
+			cpv = pkg
+
+		pkg_path = self.getname(cpv)
 		hash_filter = _hash_filter(
 			self.settings.get("PORTAGE_CHECKSUM_FILTER", ""))
 		if not hash_filter.transparent:

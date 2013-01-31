@@ -1,12 +1,12 @@
 #!/usr/bin/python -O
-# Copyright 1999-2012 Gentoo Foundation
+# Copyright 1999-2013 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 # Next to do: dep syntax checking in mask files
 # Then, check to make sure deps are satisfiable (to avoid "can't find match for" problems)
 # that last one is tricky because multiple profiles need to be checked.
 
-from __future__ import print_function
+from __future__ import print_function, unicode_literals
 
 import calendar
 import codecs
@@ -38,8 +38,8 @@ from os import path as osp
 pym_path = osp.join(osp.dirname(osp.dirname(osp.realpath(__file__))), "pym")
 sys.path.insert(0, pym_path)
 import portage
+portage._internal_caller = True
 portage._disable_legacy_globals()
-portage._internal_warnings = True
 
 try:
 	import xml.etree.ElementTree
@@ -646,19 +646,6 @@ if options.mode in ("commit", "fix", "manifest"):
 			logging.error(line)
 		sys.exit(1)
 
-if "commit" == options.mode and \
-	repo_config.name == "gentoo" and \
-	"RMD160" in manifest_hashes and \
-	"RMD160" not in portage.checksum.hashorigin_map:
-	msg = "Please install " \
-	"pycrypto or enable python's ssl USE flag in order " \
-	"to enable RMD160 hash support. See bug #198398 for " \
-	"more information."
-	prefix = bad(" * ")
-	for line in textwrap.wrap(msg, 70):
-		print(prefix + line)
-	sys.exit(1)
-
 if options.echangelog is None and repo_config.update_changelog:
 	options.echangelog = 'y'
 
@@ -1022,7 +1009,7 @@ def git_supports_gpg_sign():
 	if cmd_output:
 		version = re.match(r'^(\d+)\.(\d+)\.(\d+)', cmd_output[-1])
 		if version is not None:
-			version = [int(x) for x in version.groups()[1:]]
+			version = [int(x) for x in version.groups()]
 			if version[0] > 1 or \
 				(version[0] == 1 and version[1] > 7) or \
 				(version[0] == 1 and version[1] == 7 and version[2] >= 9):
@@ -1084,7 +1071,7 @@ def parsedate(s):
 	m = month_map.get(b)
 	if m is None:
 		return None
-	m = str(m).rjust(2, '0')
+	m = "%02d" % m
 
 	return time.strptime(':'.join((Y, m, d, H_M_S)), '%Y:%m:%d:%H:%M:%S')
 
@@ -1267,12 +1254,12 @@ check_ebuild_notadded = not \
 	(vcs == "svn" and repolevel < 3 and options.mode != "commit")
 
 # Build a regex from thirdpartymirrors for the SRC_URI.mirror check.
-thirdpartymirrors = []
-for v in repoman_settings.thirdpartymirrors().values():
+thirdpartymirrors = {}
+for k, v in repoman_settings.thirdpartymirrors().items():
 	for v in v:
 		if not v.endswith("/"):
 			v += "/"
-		thirdpartymirrors.append(v)
+		thirdpartymirrors[v] = k
 
 class _MetadataTreeBuilder(xml.etree.ElementTree.TreeBuilder):
 	"""
@@ -1772,17 +1759,18 @@ for x in effective_scanlist:
 			for uri in portage.dep.use_reduce( \
 				myaux["SRC_URI"], matchall=True, is_src_uri=True, eapi=eapi, flat=True):
 				contains_mirror = False
-				for mirror in thirdpartymirrors:
+				for mirror, mirror_alias in thirdpartymirrors.items():
 					if uri.startswith(mirror):
 						contains_mirror = True
 						break
 				if not contains_mirror:
 					continue
 
+				new_uri = "mirror://%s/%s" % (mirror_alias, uri[len(mirror):])
 				stats["SRC_URI.mirror"] += 1
 				fails["SRC_URI.mirror"].append(
-					"%s: '%s' found in thirdpartymirrors" % \
-					(relative_path, mirror))
+					"%s: '%s' found in thirdpartymirrors, use '%s'" % \
+					(relative_path, mirror, new_uri))
 
 		if myaux.get("PROVIDE"):
 			stats["virtual.oldstyle"]+=1
@@ -1820,7 +1808,7 @@ for x in effective_scanlist:
 				not keyword.startswith("-"):
 				stable_keywords.append(keyword)
 		if stable_keywords:
-			if ebuild_path in new_ebuilds:
+			if ebuild_path in new_ebuilds and catdir != "virtual":
 				stable_keywords.sort()
 				stats["KEYWORDS.stable"] += 1
 				fails["KEYWORDS.stable"].append(
@@ -1833,7 +1821,7 @@ for x in effective_scanlist:
 		previous_keywords = slot_keywords.get(pkg.slot)
 		if previous_keywords is None:
 			slot_keywords[pkg.slot] = set()
-		elif ebuild_archs and not live_ebuild:
+		elif ebuild_archs and "*" not in ebuild_archs and not live_ebuild:
 			dropped_keywords = previous_keywords.difference(ebuild_archs)
 			if dropped_keywords:
 				stats["KEYWORDS.dropped"] += 1
@@ -1881,18 +1869,33 @@ for x in effective_scanlist:
 			arches = [[repoman_settings["ARCH"], repoman_settings["ARCH"],
 				repoman_settings["ACCEPT_KEYWORDS"].split()]]
 		else:
-			arches=[]
-			for keyword in myaux["KEYWORDS"].split():
+			arches = set()
+			for keyword in keywords:
 				if (keyword[0]=="-"):
 					continue
 				elif (keyword[0]=="~"):
-					arches.append([keyword, keyword[1:], [keyword[1:], keyword]])
+					arch = keyword[1:]
+					if arch == "*":
+						for expanded_arch in profiles:
+							if expanded_arch == "**":
+								continue
+							arches.add((keyword, expanded_arch,
+								(expanded_arch, "~" + expanded_arch)))
+					else:
+						arches.add((keyword, arch, (arch, keyword)))
 				else:
-					arches.append([keyword, keyword, [keyword]])
+					if keyword == "*":
+						for expanded_arch in profiles:
+							if expanded_arch == "**":
+								continue
+							arches.add((keyword, expanded_arch,
+								(expanded_arch,)))
+					else:
+						arches.add((keyword, keyword, (keyword,)))
 			if not arches:
 				# Use an empty profile for checking dependencies of
 				# packages that have empty KEYWORDS.
-				arches.append(['**', '**', ['**']])
+				arches.add(('**', '**', ('**',)))
 
 		unknown_pkgs = set()
 		baddepsyntax = False
@@ -2119,14 +2122,22 @@ for x in effective_scanlist:
 			# user is intent on forcing the commit anyway.
 			continue
 
+		relevant_profiles = []
 		for keyword,arch,groups in arches:
 
 			if arch not in profiles:
 				# A missing profile will create an error further down
 				# during the KEYWORDS verification.
 				continue
+			relevant_profiles.extend((keyword, groups, prof)
+				for prof in profiles[arch])
 
-			for prof in profiles[arch]:
+		def sort_key(item):
+			return item[2].sub_path
+
+		relevant_profiles.sort(key=sort_key)
+
+		for keyword, groups, prof in relevant_profiles:
 
 				if prof.status not in ("stable", "dev") or \
 					prof.status == "dev" and not options.include_dev:

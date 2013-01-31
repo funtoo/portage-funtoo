@@ -1,6 +1,8 @@
 # portage.py -- core Portage functionality
-# Copyright 1998-2012 Gentoo Foundation
+# Copyright 1998-2013 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
+
+from __future__ import unicode_literals
 
 VERSION="HEAD"
 
@@ -181,6 +183,8 @@ if sys.hexversion >= 0x3000000:
 		if isinstance(s, bytes):
 			s = str(s, encoding=encoding, errors=errors)
 		return s
+
+	_native_string = _unicode_decode
 else:
 	def _unicode_encode(s, encoding=_encodings['content'], errors='backslashreplace'):
 		if isinstance(s, unicode):
@@ -191,6 +195,17 @@ else:
 		if isinstance(s, bytes):
 			s = unicode(s, encoding=encoding, errors=errors)
 		return s
+
+	_native_string = _unicode_encode
+
+if sys.hexversion >= 0x20605f0:
+	def _native_kwargs(kwargs):
+		return kwargs
+else:
+	# Avoid "TypeError: keywords must be strings" issue triggered
+	# by unicode_literals: http://bugs.python.org/issue4978
+	def _native_kwargs(kwargs):
+		return dict((_native_string(k), v) for k, v in kwargs.iteritems())
 
 class _unicode_func_wrapper(object):
 	"""
@@ -209,7 +224,7 @@ class _unicode_func_wrapper(object):
 		self._func = func
 		self._encoding = encoding
 
-	def __call__(self, *args, **kwargs):
+	def _process_args(self, args, kwargs):
 
 		encoding = self._encoding
 		wrapped_args = [_unicode_encode(x, encoding=encoding, errors='strict')
@@ -220,6 +235,13 @@ class _unicode_func_wrapper(object):
 				for k, v in kwargs.items())
 		else:
 			wrapped_kwargs = {}
+
+		return (wrapped_args, wrapped_kwargs)
+
+	def __call__(self, *args, **kwargs):
+
+		encoding = self._encoding
+		wrapped_args, wrapped_kwargs = self._process_args(args, kwargs)
 
 		rval = self._func(*wrapped_args, **wrapped_kwargs)
 
@@ -243,6 +265,23 @@ class _unicode_func_wrapper(object):
 			rval = _unicode_decode(rval, encoding=encoding, errors='replace')
 
 		return rval
+
+class _chown_func_wrapper(_unicode_func_wrapper):
+	"""
+	Compatibility workaround for Python 2.7.3 in Fedora 18, which throws
+	"TypeError: group id must be integer" if we try to pass an ObjectProxy
+	instance into chown.
+	"""
+
+	def _process_args(self, args, kwargs):
+
+		wrapped_args, wrapped_kwargs = \
+			_unicode_func_wrapper._process_args(self, args, kwargs)
+
+		for i in (1, 2):
+			wrapped_args[i] = int(wrapped_args[i])
+
+		return (wrapped_args, wrapped_kwargs)
 
 class _unicode_module_wrapper(object):
 	"""
@@ -287,6 +326,7 @@ class _unicode_module_wrapper(object):
 
 import os as _os
 _os_overrides = {
+	id(_os.chown)         : _chown_func_wrapper(_os.chown),
 	id(_os.fdopen)        : _os.fdopen,
 	id(_os.popen)         : _os.popen,
 	id(_os.read)          : _os.read,
@@ -335,9 +375,20 @@ _bin_path = PORTAGE_BIN_PATH
 _pym_path = PORTAGE_PYM_PATH
 
 # Api consumers included in portage should set this to True.
-_internal_warnings = False
+_internal_caller = False
 
 _sync_disabled_warnings = False
+
+def _get_stdin():
+	"""
+	Buggy code in python's multiprocessing/process.py closes sys.stdin
+	and reassigns it to open(os.devnull), but fails to update the
+	corresponding __stdin__ reference. So, detect that case and handle
+	it appropriately.
+	"""
+	if not sys.__stdin__.closed:
+		return sys.__stdin__
+	return sys.stdin
 
 def _shell_quote(s):
 	"""

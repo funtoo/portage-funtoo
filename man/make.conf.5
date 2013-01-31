@@ -1,4 +1,4 @@
-.TH "MAKE.CONF" "5" "Oct 2012" "Portage VERSION" "Portage"
+.TH "MAKE.CONF" "5" "Jan 2013" "Portage VERSION" "Portage"
 .SH "NAME"
 make.conf \- custom settings for Portage
 .SH "SYNOPSIS"
@@ -55,12 +55,12 @@ Defaults to the value of * -@EULA.
 .br
 .I Examples:
 .nf
-# Accept any license
-ACCEPT_LICENSE="*"
-# Accept any license except the "public-domain" license
-ACCEPT_LICENSE="* -public-domain"
-# Only accept licenses in the FSF-APPROVED license group
-ACCEPT_LICENSE="-* @FSF-APPROVED"
+# Only accept licenses in the FREE license group (i.e. Free Software)
+ACCEPT_LICENSE="-* @FREE"
+# As before, but exclude the "Artistic" license
+ACCEPT_LICENSE="-* @FREE -Artistic"
+# Accept any license except those in the EULA license group (default)
+ACCEPT_LICENSE="* -@EULA"
 .fi
 .TP
 \fBACCEPT_PROPERTIES\fR = \fI[space delimited list of properties]\fR
@@ -273,7 +273,7 @@ If set then a compressed copy of 'Packages' index file will be written.
 This feature is intended for Gentoo binhosts using certain webservers
 (such as, but not limited to, Nginx with gzip_static module) to avoid
 redundant on\-the\-fly compression.  The resulting file will be called
-'Packages.gz' and its modification time will match that of 'Packages'.
+\[aq]Packages.gz' and its modification time will match that of 'Packages'.
 .TP
 .B config\-protect\-if\-modified
 This causes the \fBCONFIG_PROTECT\fR behavior to be skipped for files
@@ -441,6 +441,9 @@ already prelinked files to be merged.
 .B preserve\-libs
 Preserve libraries when the sonames change during upgrade or downgrade.
 Libraries are preserved only if consumers of those libraries are detected.
+Preserved libraries are automatically removed when there are no remaining
+consumers. Run `emerge @preserved\-rebuild` in order to rebuild all
+consumers of preserved libraries.
 .TP
 .B protect\-owned
 This is identical to the \fIcollision\-protect\fR feature except that files
@@ -875,7 +878,7 @@ be necessary in order to continue a partially downloaded file located at
 Use \fBROOT\fR to specify the target root filesystem to be used for merging 
 packages or ebuilds.
 Typically, you should set this setting in the environment rather than in 
-\fI/etc/make.conf\fR itself.  It's commonly used for creating new build 
+\fImake.conf\fR itself. It's commonly used for creating new build
 images. Make sure you use an absolute path. Refer to the
 \fBCross-compilation\fR section of \fBebuild\fR(5) for information about
 how dependencies are handled for \fBROOT\fR.
@@ -973,7 +976,7 @@ Saleem Abdulrasool <compnerd@gentoo.org>
 Contains variables for the build\-process and overwrites those in make.defaults.
 .TP
 .B /usr/share/portage/config/make.globals
-Contains the default variables for the build\-process, you should edit \fI/etc/make.conf\fR instead.
+Contains the default variables for the build\-process, you should edit \fI/etc/portage/make.conf\fR instead.
 .TP
 .B /etc/portage/color.map
 Contains variables customizing colors.

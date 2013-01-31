@@ -1,7 +1,7 @@
-# Copyright 1999-2012 Gentoo Foundation
+# Copyright 1999-2013 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
-from __future__ import print_function
+from __future__ import print_function, unicode_literals
 
 from collections import deque
 import gc
@@ -18,7 +18,7 @@ import zlib
 import portage
 from portage import os
 from portage import _encodings
-from portage import _unicode_decode, _unicode_encode
+from portage import _unicode_encode
 from portage.cache.mappings import slot_dict_class
 from portage.elog.messages import eerror
 from portage.localization import _
@@ -1145,9 +1145,9 @@ class Scheduler(PollScheduler):
 				printer.eerror(line)
 			printer.eerror("")
 			for failed_pkg in self._failed_pkgs_all:
-				# Use _unicode_decode() to force unicode format string so
+				# Use unicode_literals to force unicode format string so
 				# that Package.__unicode__() is called in python2.
-				msg = _unicode_decode(" %s") % (failed_pkg.pkg,)
+				msg = " %s" % (failed_pkg.pkg,)
 				log_path = self._locate_failure_log(failed_pkg)
 				if log_path is not None:
 					msg += ", Log file:"
@@ -1531,7 +1531,7 @@ class Scheduler(PollScheduler):
 		self._config_pool[settings['EROOT']].append(settings)
 
 	def _keep_scheduling(self):
-		return bool(not self._terminated_tasks and self._pkg_queue and \
+		return bool(not self._terminated.is_set() and self._pkg_queue and \
 			not (self._failed_pkgs and not self._build_opts.fetchonly))
 
 	def _is_work_scheduled(self):
@@ -1791,7 +1791,7 @@ class Scheduler(PollScheduler):
 			#              scope
 			e = exc
 			mydepgraph = e.depgraph
-			dropped_tasks = set()
+			dropped_tasks = {}
 
 		if e is not None:
 			def unsatisfied_resume_dep_msg():
@@ -1841,7 +1841,7 @@ class Scheduler(PollScheduler):
 		self._init_graph(mydepgraph.schedulerGraph())
 
 		msg_width = 75
-		for task in dropped_tasks:
+		for task, atoms in dropped_tasks.items():
 			if not (isinstance(task, Package) and task.operation == "merge"):
 				continue
 			pkg = task
@@ -1849,7 +1849,10 @@ class Scheduler(PollScheduler):
 				" %s" % (pkg.cpv,)
 			if pkg.root_config.settings["ROOT"] != "/":
 				msg += " for %s" % (pkg.root,)
-			msg += " dropped due to unsatisfied dependency."
+			if not atoms:
+				msg += " dropped because it is masked or unavailable"
+			else:
+				msg += " dropped because it requires %s" % ", ".join(atoms)
 			for line in textwrap.wrap(msg, msg_width):
 				eerror(line, phase="other", key=pkg.cpv)
 			settings = self.pkgsettings[pkg.root]

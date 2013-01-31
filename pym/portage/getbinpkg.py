@@ -1,6 +1,8 @@
 # getbinpkg.py -- Portage binary-package helper functions
-# Copyright 2003-2012 Gentoo Foundation
+# Copyright 2003-2013 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
+
+from __future__ import unicode_literals
 
 from portage.output import colorize
 from portage.cache.mappings import slot_dict_class
@@ -499,7 +501,7 @@ def file_get(baseurl,dest,conn=None,fcmd=None,filename=None):
 	myfetch = portage.util.shlex_split(fcmd)
 	myfetch = [varexpand(x, mydict=variables) for x in myfetch]
 	fd_pipes= {
-		0:sys.__stdin__.fileno(),
+		0:portage._get_stdin().fileno(),
 		1:sys.__stdout__.fileno(),
 		2:sys.__stdout__.fileno()
 	}

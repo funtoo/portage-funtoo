@@ -1,8 +1,11 @@
-# Copyright 1999-2012 Gentoo Foundation
+# Copyright 1999-2013 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
+
+from __future__ import unicode_literals
 
 import errno
 import io
+import re
 import sys
 import warnings
 
@@ -25,8 +28,13 @@ from portage.const import (MANIFEST1_HASH_FUNCTIONS, MANIFEST2_HASH_DEFAULTS,
 	MANIFEST2_HASH_FUNCTIONS, MANIFEST2_IDENTIFIERS, MANIFEST2_REQUIRED_HASH)
 from portage.localization import _
 
+_manifest_re = re.compile(
+	r'^(' + '|'.join(MANIFEST2_IDENTIFIERS) + r') (.*)( \d+( \S+ \S+)+)$',
+	re.UNICODE)
+
 if sys.hexversion >= 0x3000000:
 	_unicode = str
+	basestring = str
 else:
 	_unicode = unicode
 
@@ -66,18 +74,17 @@ def guessThinManifestFileType(filename):
 		return None
 	return "DIST"
 
-def parseManifest2(mysplit):
+def parseManifest2(line):
+	if not isinstance(line, basestring):
+		line = ' '.join(line)
 	myentry = None
-	if len(mysplit) > 4 and mysplit[0] in MANIFEST2_IDENTIFIERS:
-		mytype = mysplit[0]
-		myname = mysplit[1]
-		try:
-			mysize = int(mysplit[2])
-		except ValueError:
-			return None
-		myhashes = dict(zip(mysplit[3::2], mysplit[4::2]))
-		myhashes["size"] = mysize
-		myentry = Manifest2Entry(type=mytype, name=myname, hashes=myhashes)
+	match = _manifest_re.match(line)
+	if match is not None:
+		tokens = match.group(3).split()
+		hashes = dict(zip(tokens[1::2], tokens[2::2]))
+		hashes["size"] = int(tokens[0])
+		myentry = Manifest2Entry(type=match.group(1),
+			name=match.group(2), hashes=hashes)
 	return myentry
 
 class ManifestEntry(object):
@@ -117,7 +124,7 @@ class Manifest2Entry(ManifestEntry):
 
 class Manifest(object):
 	parsers = (parseManifest2,)
-	def __init__(self, pkgdir, distdir, fetchlist_dict=None,
+	def __init__(self, pkgdir, distdir=None, fetchlist_dict=None,
 		manifest1_compat=DeprecationWarning, from_scratch=False, thin=False,
 		allow_missing=False, allow_create=True, hashes=None,
 		find_invalid_path_char=None):
@@ -184,13 +191,12 @@ class Manifest(object):
 		"""Parse a manifest.  If myhashdict is given then data will be added too it.
 		   Otherwise, a new dict will be created and returned."""
 		try:
-			fd = io.open(_unicode_encode(file_path,
+			with io.open(_unicode_encode(file_path,
 				encoding=_encodings['fs'], errors='strict'), mode='r',
-				encoding=_encodings['repo.content'], errors='replace')
-			if myhashdict is None:
-				myhashdict = {}
-			self._parseDigests(fd, myhashdict=myhashdict, **kwargs)
-			fd.close()
+				encoding=_encodings['repo.content'], errors='replace') as f:
+				if myhashdict is None:
+					myhashdict = {}
+				self._parseDigests(f, myhashdict=myhashdict, **kwargs)
 			return myhashdict
 		except (OSError, IOError) as e:
 			if e.errno == errno.ENOENT:
@@ -209,9 +215,8 @@ class Manifest(object):
 		"""Parse manifest lines and return a list of manifest entries."""
 		for myline in mylines:
 			myentry = None
-			mysplit = myline.split()
 			for parser in self.parsers:
-				myentry = parser(mysplit)
+				myentry = parser(myline)
 				if myentry is not None:
 					yield myentry
 					break # go to the next line
@@ -380,7 +385,7 @@ class Manifest(object):
 			distfilehashes = self.fhashdict["DIST"]
 		else:
 			distfilehashes = {}
-		self.__init__(self.pkgdir, self.distdir,
+		self.__init__(self.pkgdir, distdir=self.distdir,
 			fetchlist_dict=self.fetchlist_dict, from_scratch=True,
 			thin=self.thin, allow_missing=self.allow_missing,
 			allow_create=self.allow_create, hashes=self.hashes,
