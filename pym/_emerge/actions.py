@@ -2107,6 +2107,8 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		# Everything looks OK, so now we will clone the repository:
 		
 		print(">>> Starting initial git clone with "+syncuri+"...")
+		
+		if portage.process.spawn_bash("su - %s -s /bin/sh -c 'umask %s && cd %s && exec git clone %s %s && mv '" % (syncuser, syncumask, work_path, portage._shell_quote(syncuri), repo_dir)) != os.EX_OK:
 			print("!!! git clone error; exiting.")
 			sys.exit(1)
 		
