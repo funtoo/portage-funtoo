@@ -1,4 +1,4 @@
-.TH "EBUILD" "5" "Jan 2013" "Portage VERSION" "Portage"
+.TH "EBUILD" "5" "Mar 2013" "Portage VERSION" "Portage"
 
 .SH "NAME"
 ebuild \- the internal format, variables, and functions in an ebuild script
@@ -675,6 +675,11 @@ files in \fBSRC_URI\fR will not be downloaded from the \fBGENTOO_MIRRORS\fR.
 .TP
 .I primaryuri
 fetch from URIs in \fBSRC_URI\fR before \fBGENTOO_MIRRORS\fR.
+.TP
+.I splitdebug
+Disables splitdebug for specific packages. This is for packages with
+binaries that trigger problems with splitdebug, such as file\-collisions
+between symlinks in /usr/lib/debug/.build-id (triggered by bundled libraries).
 .TP
 .I strip
 final binaries/libraries will not be stripped of debug symbols.
@@ -1360,6 +1365,7 @@ foo.\fI<locale>\fR.1 will be installed as
 /usr/share/man/\fI<locale>\fR/man1/foo.1. Beginning with \fBEAPI 4\fR,
 the \fI\-i18n\fR option takes precedence over the locale suffix of the
 file name.
+
 .PD 0
 .TP
 .B dohard\fR \fI<filename> <linkname>
@@ -1508,7 +1514,7 @@ src_install() {
 
 .SH "FILES"
 .TP
-The \fI/usr/sbin/ebuild.sh\fR script.
+The \fI/usr/lib/portage/bin/ebuild.sh\fR script.
 .TP
 The helper apps in \fI/usr/lib/portage/bin\fR.
 .TP

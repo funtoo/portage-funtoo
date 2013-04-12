@@ -191,8 +191,7 @@ install_qa_check() {
 		[[ "${FFLAGS}" == *-frecord-gcc-switches* ]] && \
 		[[ "${FCFLAGS}" == *-frecord-gcc-switches* ]] ; then
 		rm -f "${T}"/scanelf-ignored-CFLAGS.log
-		for x in $(scanelf -qyRF '%k %p' -k \!.GCC.command.line "${ED}" | \
-			sed -e "s:\!.GCC.command.line ::") ; do
+		for x in $(scanelf -qyRF '#k%p' -k '!.GCC.command.line' "${ED}") ; do
 			# Separate out file types that are known to support
 			# .GCC.command.line sections, using the `file` command
 			# similar to how prepstrip uses it.
@@ -249,16 +248,17 @@ install_qa_check() {
 		eqawarn "$f"
 	fi
 
-	if [[ -d ${ED}/etc/udev/rules.d ]] ; then
-		f=
-		for x in $(ls "${ED}/etc/udev/rules.d") ; do
-			f+="  etc/udev/rules.d/$x\n"
-		done
-		if [[ -n $f ]] ; then
-			eqawarn "QA Notice: udev rules should be installed in /lib/udev/rules.d:"
-			eqawarn
-			eqawarn "$f"
-		fi
+	set +f
+	f=
+	for x in "${ED}etc/udev/rules.d/"* "${ED}lib"*"/udev/rules.d/"* ; do
+		[[ -e ${x} ]] || continue
+		[[ ${x} == ${ED}lib/udev/rules.d/* ]] && continue
+		f+="  ${x#${ED}}\n"
+	done
+	if [[ -n $f ]] ; then
+		eqawarn "QA Notice: udev rules should be installed in /lib/udev/rules.d:"
+		eqawarn
+		eqawarn "$f"
 	fi
 
 	# Now we look for all world writable files.
@@ -355,7 +355,7 @@ install_qa_check() {
 			*-linux-gnu*)
 			# Check for files with executable stacks, but only on arches which
 			# are supported at the moment.  Keep this list in sync with
-			# http://hardened.gentoo.org/gnu-stack.xml (Arch Status)
+			# http://www.gentoo.org/proj/en/hardened/gnu-stack.xml (Arch Status)
 			case ${CTARGET:-${CHOST}} in
 				arm*|i?86*|ia64*|m68k*|s390*|sh*|x86_64*)
 					# Allow devs to mark things as ignorable ... e.g. things
@@ -398,7 +398,7 @@ install_qa_check() {
 		# Check for files built without respecting LDFLAGS
 		if [[ "${LDFLAGS}" == *,--hash-style=gnu* ]] && \
 			! has binchecks ${RESTRICT} ; then
-			f=$(scanelf -qyRF '%k %p' -k .hash "${ED}" | sed -e "s:\.hash ::")
+			f=$(scanelf -qyRF '#k%p' -k .hash "${ED}")
 			if [[ -n ${f} ]] ; then
 				echo "${f}" > "${T}"/scanelf-ignored-LDFLAGS.log
 				if [ "${QA_STRICT_FLAGS_IGNORED-unset}" = unset ] ; then
@@ -433,7 +433,7 @@ install_qa_check() {
 		# Check for shared libraries lacking SONAMEs
 		qa_var="QA_SONAME_${ARCH/-/_}"
 		eval "[[ -n \${!qa_var} ]] && QA_SONAME=(\"\${${qa_var}[@]}\")"
-		f=$(scanelf -ByF '%S %p' "${ED}"{,usr/}lib*/lib*.so* | gawk '$2 == "" { print }' | sed -e "s:^[[:space:]]${ED}:/:")
+		f=$(scanelf -ByF '%S %p' "${ED}"{,usr/}lib*/lib*.so* | awk '$2 == "" { print }' | sed -e "s:^[[:space:]]${ED}:/:")
 		if [[ -n ${f} ]] ; then
 			echo "${f}" > "${T}"/scanelf-missing-SONAME.log
 			if [[ "${QA_STRICT_SONAME-unset}" == unset ]] ; then
@@ -467,7 +467,7 @@ install_qa_check() {
 		# Check for shared libraries lacking NEEDED entries
 		qa_var="QA_DT_NEEDED_${ARCH/-/_}"
 		eval "[[ -n \${!qa_var} ]] && QA_DT_NEEDED=(\"\${${qa_var}[@]}\")"
-		f=$(scanelf -ByF '%n %p' "${ED}"{,usr/}lib*/lib*.so* | gawk '$2 == "" { print }' | sed -e "s:^[[:space:]]${ED}:/:")
+		f=$(scanelf -ByF '%n %p' "${ED}"{,usr/}lib*/lib*.so* | awk '$2 == "" { print }' | sed -e "s:^[[:space:]]${ED}:/:")
 		if [[ -n ${f} ]] ; then
 			echo "${f}" > "${T}"/scanelf-missing-NEEDED.log
 			if [[ "${QA_STRICT_DT_NEEDED-unset}" == unset ]] ; then
@@ -650,7 +650,7 @@ install_qa_check() {
 		eqawarn "QA Notice: Excessive files found in the / partition"
 		eqawarn "${f}"
 		__vecho -ne '\n'
-		die "static archives (*.a) and libtool library files (*.la) do not belong in /"
+		die "static archives (*.a) and libtool library files (*.la) belong in /usr/lib*, not /lib*"
 	fi
 
 	# Verify that the libtool files don't contain bogus $D entries.
@@ -841,16 +841,6 @@ install_qa_check() {
 
 		[[ ${abort} == yes ]] && die "multilib-strict check failed!"
 	fi
-
-	# ensure packages don't install systemd units automagically
-	if ! has systemd ${INHERITED} && \
-		[[ -d "${ED}"/lib/systemd/system ]]
-	then
-		eqawarn "QA Notice: package installs systemd unit files (/lib/systemd/system)"
-		eqawarn "           but does not inherit systemd.eclass."
-		has stricter ${FEATURES} \
-			&& die "install aborted due to missing inherit of systemd.eclass"
-	fi
 }
 
 install_qa_check_prefix() {
@@ -881,16 +871,6 @@ install_qa_check_prefix() {
 
 	# all further checks rely on ${ED} existing
 	[[ -d ${ED} ]] || return
-
-	# this does not really belong here, but it's closely tied to
-	# the code below; many runscripts generate positives here, and we
-	# know they don't work (bug #196294) so as long as that one
-	# remains an issue, simply remove them as they won't work
-	# anyway, avoid etc/init.d/functions.sh from being thrown away
-	if [[ ( -d "${ED}"/etc/conf.d || -d "${ED}"/etc/init.d ) && ! -f "${ED}"/etc/init.d/functions.sh ]] ; then
-		ewarn "removed /etc/init.d and /etc/conf.d directories until bug #196294 has been resolved"
-		rm -Rf "${ED}"/etc/{conf,init}.d
-	fi
 
 	# check shebangs, bug #282539
 	rm -f "${T}"/non-prefix-shebangs-errs

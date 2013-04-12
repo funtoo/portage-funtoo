@@ -37,8 +37,7 @@ from portage import os
 from portage import shutil
 from portage import eapi_is_supported, _encodings, _unicode_decode
 from portage.cache.cache_errors import CacheError
-from portage.const import GLOBAL_CONFIG_PATH
-from portage.const import _DEPCLEAN_LIB_CHECK_DEFAULT
+from portage.const import GLOBAL_CONFIG_PATH, VCS_DIRS, _DEPCLEAN_LIB_CHECK_DEFAULT
 from portage.dbapi.dep_expand import dep_expand
 from portage.dbapi._expand_new_virt import expand_new_virt
 from portage.dep import Atom
@@ -325,6 +324,7 @@ def action_build(settings, trees, mtimedb,
 			mydepgraph.display_problems()
 			return 1
 
+	mergecount = None
 	if "--pretend" not in myopts and \
 		("--ask" in myopts or "--tree" in myopts or \
 		"--verbose" in myopts) and \
@@ -356,6 +356,7 @@ def action_build(settings, trees, mtimedb,
 				if isinstance(x, Package) and x.operation == "merge":
 					mergecount += 1
 
+			prompt = None
 			if mergecount==0:
 				sets = trees[settings['EROOT']]['root_config'].sets
 				world_candidates = None
@@ -368,12 +369,11 @@ def action_build(settings, trees, mtimedb,
 					world_candidates = [x for x in favorites \
 						if not (x.startswith(SETPREFIX) and \
 						not sets[x[1:]].world_candidate)]
+
 				if "selective" in myparams and \
 					not oneshot and world_candidates:
-					print()
-					for x in world_candidates:
-						print(" %s %s" % (good("*"), x))
-					prompt="Would you like to add these packages to your world favorites?"
+					# Prompt later, inside saveNomergeFavorites.
+					prompt = None
 				elif settings["AUTOCLEAN"] and "yes"==settings["AUTOCLEAN"]:
 					prompt="Nothing to merge; would you like to auto-clean packages?"
 				else:
@@ -386,13 +386,15 @@ def action_build(settings, trees, mtimedb,
 			else:
 				prompt="Would you like to merge these packages?"
 		print()
-		if "--ask" in myopts and userquery(prompt, enter_invalid) == "No":
+		if prompt is not None and "--ask" in myopts and \
+			userquery(prompt, enter_invalid) == "No":
 			print()
 			print("Quitting.")
 			print()
 			return 128 + signal.SIGINT
 		# Don't ask again (e.g. when auto-cleaning packages after merge)
-		myopts.pop("--ask", None)
+		if mergecount != 0:
+			myopts.pop("--ask", None)
 
 	if ("--pretend" in myopts) and not ("--fetchonly" in myopts or "--fetch-all-uri" in myopts):
 		if ("--resume" in myopts):
@@ -462,25 +464,29 @@ def action_build(settings, trees, mtimedb,
 
 			mydepgraph.saveNomergeFavorites()
 
-		mergetask = Scheduler(settings, trees, mtimedb, myopts,
-			spinner, favorites=favorites,
-			graph_config=mydepgraph.schedulerGraph())
+		if mergecount == 0:
+			retval = os.EX_OK
+		else:
+			mergetask = Scheduler(settings, trees, mtimedb, myopts,
+				spinner, favorites=favorites,
+				graph_config=mydepgraph.schedulerGraph())
 
-		del mydepgraph
-		clear_caches(trees)
+			del mydepgraph
+			clear_caches(trees)
 
-		retval = mergetask.merge()
+			retval = mergetask.merge()
 
-		if retval == os.EX_OK and not (buildpkgonly or fetchonly or pretend):
-			if "yes" == settings.get("AUTOCLEAN"):
-				portage.writemsg_stdout(">>> Auto-cleaning packages...\n")
-				unmerge(trees[settings['EROOT']]['root_config'],
-					myopts, "clean", [],
-					ldpath_mtimes, autoclean=1)
-			else:
-				portage.writemsg_stdout(colorize("WARN", "WARNING:")
-					+ " AUTOCLEAN is disabled.  This can cause serious"
-					+ " problems due to overlapping packages.\n")
+			if retval == os.EX_OK and \
+				not (buildpkgonly or fetchonly or pretend):
+				if "yes" == settings.get("AUTOCLEAN"):
+					portage.writemsg_stdout(">>> Auto-cleaning packages...\n")
+					unmerge(trees[settings['EROOT']]['root_config'],
+						myopts, "clean", [],
+						ldpath_mtimes, autoclean=1)
+				else:
+					portage.writemsg_stdout(colorize("WARN", "WARNING:")
+						+ " AUTOCLEAN is disabled.  This can cause serious"
+						+ " problems due to overlapping packages.\n")
 
 		return retval
 
@@ -2050,8 +2056,6 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 	if not os.path.exists(myportdir):
 		if not syncuri:
 			writemsg_level("SYNC is undefined.\nPlease set SYNC to the remote location of the Portage repository.\n", noiselevel=-1, level=logging.ERROR)
-			return 1
-		# A few tricks are required to get git cloning by a non-root user. We will create a temporary working directory called work_path
 		# (/usr/portage.sync). We will make sure this directory is owned by the SYNC_USER user, and then we will use "su" to run git clone
 		# inside this directory, so that git can create the initial repository directory with the proper user permissiosn. After git
 		# clone completes, we will move our new portage tree in repo_path_tmp to repo_path_fin, its final location. And then we will remove
@@ -2103,8 +2107,6 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 		# Everything looks OK, so now we will clone the repository:
 		
 		print(">>> Starting initial git clone with "+syncuri+"...")
-
-		if portage.process.spawn_bash("su - %s -s /bin/sh -c 'umask %s && cd %s && exec git clone %s %s && mv '" % (syncuser, syncumask, work_path, portage._shell_quote(syncuri), repo_dir)) != os.EX_OK:
 			print("!!! git clone error; exiting.")
 			sys.exit(1)
 		
@@ -2832,7 +2834,7 @@ def load_emerge_config(trees=None):
 		v = os.environ.get(envvar, None)
 		if v and v.strip():
 			kwargs[k] = v
-	trees = portage.create_trees(trees=trees, **kwargs)
+	trees = portage.create_trees(trees=trees, **portage._native_kwargs(kwargs))
 
 	for root_trees in trees.values():
 		settings = root_trees["vartree"].settings
@@ -3036,7 +3038,7 @@ def expand_set_arguments(myfiles, myaction, root_config):
 	# world file, the depgraph performs set expansion later. It will get
 	# confused about where the atoms came from if it's not allowed to
 	# expand them itself.
-	do_not_expand = (None, )
+	do_not_expand = myaction is None
 	newargs = []
 	for a in myfiles:
 		if a in ("system", "world"):
@@ -3102,6 +3104,14 @@ def expand_set_arguments(myfiles, myaction, root_config):
 					for line in textwrap.wrap(msg, 50):
 						out.ewarn(line)
 				setconfig.active.append(s)
+
+				if do_not_expand:
+					# Loading sets can be slow, so skip it here, in order
+					# to allow the depgraph to indicate progress with the
+					# spinner while sets are loading (bug #461412).
+					newargs.append(a)
+					continue
+
 				try:
 					set_atoms = setconfig.getSetAtoms(s)
 				except portage.exception.PackageSetNotFound as e:
@@ -3117,17 +3127,18 @@ def expand_set_arguments(myfiles, myaction, root_config):
 					return (None, 1)
 				if myaction in unmerge_actions and \
 						not sets[s].supportsOperation("unmerge"):
-					sys.stderr.write("emerge: the given set '%s' does " % s + \
-						"not support unmerge operations\n")
+					writemsg_level("emerge: the given set '%s' does " % s + \
+						"not support unmerge operations\n",
+						level=logging.ERROR, noiselevel=-1)
 					retval = 1
 				elif not set_atoms:
-					print("emerge: '%s' is an empty set" % s)
-				elif myaction not in do_not_expand:
-					newargs.extend(set_atoms)
+					writemsg_level("emerge: '%s' is an empty set\n" % s,
+						level=logging.INFO, noiselevel=-1)
 				else:
-					newargs.append(SETPREFIX+s)
-				for e in sets[s].errors:
-					print(e)
+					newargs.extend(set_atoms)
+				for error_msg in sets[s].errors:
+					writemsg_level("%s\n" % (error_msg,),
+						level=logging.ERROR, noiselevel=-1)
 		else:
 			newargs.append(a)
 	return (newargs, retval)
@@ -3292,8 +3303,7 @@ def run_action(settings, trees, mtimedb, myaction, myopts, myfiles,
 	del mytrees, mydb
 
 	for x in myfiles:
-		ext = os.path.splitext(x)[1]
-		if (ext == ".ebuild" or ext == ".tbz2") and \
+		if x.endswith((".ebuild", ".tbz2")) and \
 			os.path.exists(os.path.abspath(x)):
 			print(colorize("BAD", "\n*** emerging by path is broken "
 				"and may not always work!!!\n"))

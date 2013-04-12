@@ -164,6 +164,9 @@ class EbuildQuote(LineCheck):
 		"GAMES_DATADIR_BASE", "GAMES_SYSCONFDIR", "GAMES_STATEDIR",
 		"GAMES_LOGDIR", "GAMES_BINDIR"]
 
+	# variables for multibuild.eclass
+	var_names += ["BUILD_DIR"]
+
 	var_names = "(%s)" % "|".join(var_names)
 	var_reference = re.compile(r'\$(\{'+var_names+'\}|' + \
 		var_names + '\W)')
@@ -593,7 +596,8 @@ _eclass_info = {
 		),
 
 		# These are "eclasses are the whole ebuild" type thing.
-		'exempt_eclasses': _eclass_export_functions + ('autotools', 'libtool'),
+		'exempt_eclasses': _eclass_export_functions + ('autotools', 'libtool',
+			'multilib-minimal'),
 
 		'comprehensive': False
 	},
@@ -883,17 +887,18 @@ def run_checks(contents, pkg):
 				multiline = line
 				continue
 
-		# Finally we have a full line to parse.
-		is_comment = _ignore_comment_re.match(line) is not None
-		for lc in checks:
-			if is_comment and lc.ignore_comment:
-				continue
-			if lc.check_eapi(pkg.eapi):
-				ignore = lc.ignore_line
-				if not ignore or not ignore.match(line):
-					e = lc.check(num, line)
-					if e:
-						yield lc.repoman_check_name, e % (num + 1)
+		if not line.endswith("#nowarn\n"):
+			# Finally we have a full line to parse.
+			is_comment = _ignore_comment_re.match(line) is not None
+			for lc in checks:
+				if is_comment and lc.ignore_comment:
+					continue
+				if lc.check_eapi(pkg.eapi):
+					ignore = lc.ignore_line
+					if not ignore or not ignore.match(line):
+						e = lc.check(num, line)
+						if e:
+							yield lc.repoman_check_name, e % (num + 1)
 
 	for lc in checks:
 		i = lc.end()

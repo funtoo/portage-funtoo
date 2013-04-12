@@ -7,12 +7,17 @@ except ImportError:
 	# http://bugs.jython.org/issue1074
 	fcntl = None
 
-from _emerge.SubProcess import SubProcess
+import platform
 import sys
+
+from _emerge.SubProcess import SubProcess
 import portage
 from portage import os
 from portage.const import BASH_BINARY
 from portage.util._async.PipeLogger import PipeLogger
+
+# On Darwin, FD_CLOEXEC triggers errno 35 for stdout (bug #456296)
+_disable_cloexec_stdout = platform.system() in ("Darwin",)
 
 class SpawnProcess(SubProcess):
 
@@ -114,7 +119,7 @@ class SpawnProcess(SubProcess):
 		stdout_fd = None
 		if can_log and not self.background:
 			stdout_fd = os.dup(fd_pipes_orig[1])
-			if fcntl is not None:
+			if fcntl is not None and not _disable_cloexec_stdout:
 				try:
 					fcntl.FD_CLOEXEC
 				except AttributeError:
