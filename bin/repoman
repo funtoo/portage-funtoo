@@ -8,7 +8,6 @@
 
 from __future__ import print_function, unicode_literals
 
-import calendar
 import codecs
 import copy
 import errno
@@ -25,14 +24,13 @@ import tempfile
 import textwrap
 import time
 import platform
-
-try:
-	from urllib.request import urlopen as urllib_request_urlopen
-except ImportError:
-	from urllib import urlopen as urllib_request_urlopen
-
 from itertools import chain
 from stat import S_ISDIR
+
+try:
+	from urllib.parse import urlparse
+except ImportError:
+	from urlparse import urlparse
 
 from os import path as osp
 pym_path = osp.join(osp.dirname(osp.dirname(osp.realpath(__file__))), "pym")
@@ -234,6 +232,11 @@ def ParseArgs(argv, qahelp):
 
 	parser.add_option('-I', '--ignore-masked', dest='ignore_masked', action='store_true',
 		default=False, help='ignore masked packages (not allowed with commit mode)')
+
+	parser.add_option('--include-arches', dest='include_arches',
+		metavar='ARCHES', action='append',
+		help='A space separated list of arches used to '
+		'filter the selection of profiles for dependency checks')
 
 	parser.add_option('-d', '--include-dev', dest='include_dev', action='store_true',
 		default=False, help='include dev profiles in dependency checks')
@@ -445,7 +448,7 @@ for x in missingvars:
 		qawarnings.add(x)
 
 valid_restrict = frozenset(["binchecks", "bindist",
-	"fetch", "installsources", "mirror",
+	"fetch", "installsources", "mirror", "preserve-libs",
 	"primaryuri", "splitdebug", "strip", "test", "userpriv"])
 
 live_eclasses = frozenset([
@@ -1067,33 +1070,6 @@ for x in qacats:
 xmllint_capable = False
 metadata_dtd = os.path.join(repoman_settings["DISTDIR"], 'metadata.dtd')
 
-def parsedate(s):
-	"""Parse a RFC 822 date and time string.
-	This is required for python3 compatibility, since the
-	rfc822.parsedate() function is not available."""
-
-	s_split = []
-	for x in s.upper().split():
-		for y in x.split(','):
-			if y:
-				s_split.append(y)
-
-	if len(s_split) != 6:
-		return None
-
-	# %a, %d %b %Y %H:%M:%S %Z
-	a, d, b, Y, H_M_S, Z = s_split
-
-	# Convert month to integer, since strptime %w is locale-dependent.
-	month_map = {'JAN':1, 'FEB':2, 'MAR':3, 'APR':4, 'MAY':5, 'JUN':6,
-		'JUL':7, 'AUG':8, 'SEP':9, 'OCT':10, 'NOV':11, 'DEC':12}
-	m = month_map.get(b)
-	if m is None:
-		return None
-	m = "%02d" % m
-
-	return time.strptime(':'.join((Y, m, d, H_M_S)), '%Y:%m:%d:%H:%M:%S')
-
 def fetch_metadata_dtd():
 	"""
 	Fetch metadata.dtd if it doesn't exist or the ctime is older than
@@ -1122,45 +1098,40 @@ def fetch_metadata_dtd():
 		print(green("***") + " the local copy of metadata.dtd " + \
 			"needs to be refetched, doing that now")
 		print()
+		parsed_url = urlparse(metadata_dtd_uri)
+		setting = 'FETCHCOMMAND_' + parsed_url.scheme.upper()
+		fcmd = repoman_settings.get(setting)
+		if not fcmd:
+			fcmd = repoman_settings.get('FETCHCOMMAND')
+			if not fcmd:
+				logging.error("FETCHCOMMAND is unset")
+				return False
+
+		destdir = repoman_settings["DISTDIR"]
+		fd, metadata_dtd_tmp = tempfile.mkstemp(
+			prefix='metadata.dtd.', dir=destdir)
+		os.close(fd)
+
 		try:
-			url_f = urllib_request_urlopen(metadata_dtd_uri)
-			msg_info = url_f.info()
-			last_modified = msg_info.get('last-modified')
-			if last_modified is not None:
-				last_modified = parsedate(last_modified)
-				if last_modified is not None:
-					last_modified = calendar.timegm(last_modified)
+			if not portage.getbinpkg.file_get(metadata_dtd_uri,
+				destdir, fcmd=fcmd,
+				filename=os.path.basename(metadata_dtd_tmp)):
+				logging.error("failed to fetch metadata.dtd from '%s'" %
+					metadata_dtd_uri)
+				return False
 
-			metadata_dtd_tmp = "%s.%s" % (metadata_dtd, os.getpid())
 			try:
-				local_f = open(metadata_dtd_tmp, mode='wb')
-				local_f.write(url_f.read())
-				local_f.close()
-				if last_modified is not None:
-					try:
-						os.utime(metadata_dtd_tmp,
-							(int(last_modified), int(last_modified)))
-					except OSError:
-						# This fails on some odd non-unix-like filesystems.
-						# We don't really need the mtime to be preserved
-						# anyway here (currently we use ctime to trigger
-						# fetch), so just ignore it.
-						pass
-				os.rename(metadata_dtd_tmp, metadata_dtd)
-			finally:
-				try:
-					os.unlink(metadata_dtd_tmp)
-				except OSError:
-					pass
+				portage.util.apply_secpass_permissions(metadata_dtd_tmp,
+					gid=portage.data.portage_gid, mode=0o664, mask=0o2)
+			except portage.exception.PortageException:
+				pass
 
-			url_f.close()
-
-		except EnvironmentError as e:
-			print()
-			print(red("!!!")+" attempting to fetch '%s', caught" % metadata_dtd_uri)
-			print(red("!!!")+" exception '%s' though." % (e,))
-			print(red("!!!")+" fetching new metadata.dtd failed, aborting")
-			return False
+			os.rename(metadata_dtd_tmp, metadata_dtd)
+		finally:
+			try:
+				os.unlink(metadata_dtd_tmp)
+			except OSError:
+				pass
 
 	return True
 
@@ -1266,6 +1237,11 @@ dofail = 0
 arch_caches = {}
 arch_xmatch_caches = {}
 shared_xmatch_caches = {"cp-list":{}}
+
+include_arches = None
+if options.include_arches:
+	include_arches = set()
+	include_arches.update(*[x.split() for x in options.include_arches])
 
 # Disable the "ebuild.notadded" check when not in commit mode and
 # running `svn status` in every package dir will be too expensive.
@@ -2223,6 +2199,11 @@ for x in effective_scanlist:
 				# A missing profile will create an error further down
 				# during the KEYWORDS verification.
 				continue
+
+			if include_arches is not None:
+				if arch not in include_arches:
+					continue
+
 			relevant_profiles.extend((keyword, groups, prof)
 				for prof in profiles[arch])
 
@@ -2665,11 +2646,20 @@ else:
 		sys.stderr.flush()
 		portage_version = "Unknown"
 
+	report_options = []
+	if options.force:
+		report_options.append("--force")
+	if options.ignore_arches:
+		report_options.append("--ignore-arches")
+	if include_arches is not None:
+		report_options.append("--include-arches=\"%s\"" %
+			" ".join(sorted(include_arches)))
+
 	if vcs == "git":
 		# Use new footer only for git (see bug #438364).
 		commit_footer = "\n\nPackage-Manager: portage-%s" % portage_version
-		if options.force:
-			commit_footer += "\nRepoMan-Options: --force"
+		if report_options:
+			commit_footer += "\nRepoMan-Options: " + " ".join(report_options)
 		if sign_manifests:
 			commit_footer += "\nManifest-Sign-Key: %s" % (gpg_key, )
 		if dco_sob:
@@ -2685,8 +2675,8 @@ else:
 			commit_footer += "Signed-off-by: %s\n" % (dco_sob, )
 		commit_footer += "(Portage version: %s/%s/%s" % \
 			(portage_version, vcs, unameout)
-		if options.force:
-			commit_footer += ", RepoMan options: --force"
+		if report_options:
+			commit_footer += ", RepoMan options: " + " ".join(report_options)
 		if sign_manifests:
 			commit_footer += ", signed Manifest commit with key %s" % \
 				(gpg_key, )

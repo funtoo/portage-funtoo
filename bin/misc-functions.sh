@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 1999-2012 Gentoo Foundation
+# Copyright 1999-2013 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 #
 # Miscellaneous shell functions that make use of the ebuild env but don't need
@@ -536,14 +536,13 @@ install_qa_check() {
 		die "Unsafe files found in \${D}.  Portage will not install them."
 	fi
 
-	if [[ -d ${D}/${D} ]] ; then
-		declare -i INSTALLTOD=0
-		for i in $(find "${D}/${D}/"); do
-			eqawarn "QA Notice: /${i##${D}/${D}} installed in \${D}/\${D}"
+	if [[ -d ${D%/}${D} ]] ; then
+		local -i INSTALLTOD=0
+		while read -r -d $'\0' i ; do
+			eqawarn "QA Notice: /${i##${D%/}${D}} installed in \${D}/\${D}"
 			((INSTALLTOD++))
-		done
-		die "Aborting due to QA concerns: ${INSTALLTOD} files installed in ${D}/${D}"
-		unset INSTALLTOD
+		done < <(find "${D%/}${D}" -print0)
+		die "Aborting due to QA concerns: ${INSTALLTOD} files installed in ${D%/}${D}"
 	fi
 
 	# Sanity check syntax errors in init.d scripts
@@ -748,7 +747,8 @@ install_qa_check() {
 		local cat_cmd=cat
 		[[ $PORTAGE_LOG_FILE = *.gz ]] && cat_cmd=zcat
 		[[ $reset_debug = 1 ]] && set -x
-		f=$($cat_cmd "${PORTAGE_LOG_FILE}" | \
+		# Use safe cwd, avoiding unsafe import for bug #469338.
+		f=$(cd "${PORTAGE_PYM_PATH}" ; $cat_cmd "${PORTAGE_LOG_FILE}" | \
 			"${PORTAGE_PYTHON:-/usr/bin/python}" "$PORTAGE_BIN_PATH"/check-implicit-pointer-usage.py || die "check-implicit-pointer-usage.py failed")
 		if [[ -n ${f} ]] ; then
 
