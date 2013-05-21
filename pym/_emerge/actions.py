@@ -2072,6 +2072,8 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 	if not os.path.exists(myportdir):
 		if not syncuri:
 			writemsg_level("SYNC is undefined.\nPlease set SYNC to the remote location of the Portage repository.\n", noiselevel=-1, level=logging.ERROR)
+			return 1
+		# A few tricks are required to get git cloning by a non-root user. We will create a temporary working directory called work_path
 		# (/usr/portage.sync). We will make sure this directory is owned by the SYNC_USER user, and then we will use "su" to run git clone
 		# inside this directory, so that git can create the initial repository directory with the proper user permissiosn. After git
 		# clone completes, we will move our new portage tree in repo_path_tmp to repo_path_fin, its final location. And then we will remove
