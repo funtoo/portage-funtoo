@@ -2007,198 +2007,243 @@ def action_search(root_config, myopts, myfiles, spinner):
 			searchinstance.output()
 
 def action_sync(settings, trees, mtimedb, myopts, myaction):
-	enter_invalid = '--ask-enter-invalid' in myopts
-	xterm_titles = "notitles" not in settings.features
-	emergelog(xterm_titles, " === sync")
-	portdb = trees[settings['EROOT']]['porttree'].dbapi
-	myportdir = portdb.porttree_root
-	if not myportdir:
-		myportdir = settings.get('PORTDIR', '')
-		if myportdir and myportdir.strip():
-			myportdir = os.path.realpath(myportdir)
-		else:
-			myportdir = None
-	out = portage.output.EOutput()
-	global_config_path = GLOBAL_CONFIG_PATH
-	if settings['EPREFIX']:
-		global_config_path = os.path.join(settings['EPREFIX'],
-				GLOBAL_CONFIG_PATH.lstrip(os.sep))
-	if not myportdir:
-		sys.stderr.write("!!! PORTDIR is undefined. Is %s/make.globals missing?\n" % global_config_path)
-		sys.exit(1)
-	if myportdir[-1]=="/":
-		myportdir=myportdir[:-1]
-	try:
-		st = os.stat(myportdir)
-	except OSError:
-		st = None
+        enter_invalid = '--ask-enter-invalid' in myopts
+        xterm_titles = "notitles" not in settings.features
+        emergelog(xterm_titles, " === sync")
+        portdb = trees[settings['EROOT']]['porttree'].dbapi
+        myportdir = portdb.porttree_root
 
-	syncuri = settings.get("SYNC", "").strip()
-	syncuser = settings.get("SYNC_USER", "root").strip()
-	syncumask = settings.get("SYNC_UMASK", "022").strip()
-	updatecache_flg = False
-	git = False
-	if myaction == "metadata":
-		print("skipping sync")
-		updatecache_flg = True
-	if portage.process.find_binary("git") is None:
-		msg = ["Command not found: git", "Type \"emerge dev-vcs/git\" to enable git support."]
-		for l in msg:
-			writemsg_level("!!! %s\n" % l, level=logging.ERROR, noiselevel=-1)
-		return 1
-	updatecache_flg = True
-	if not os.path.exists(myportdir):
-		if not syncuri:
-			writemsg_level("SYNC is undefined.\nPlease set SYNC to the remote location of the Portage repository.\n", noiselevel=-1, level=logging.ERROR)
-			return 1
-		# A few tricks are required to get git cloning by a non-root user. We will create a temporary working directory called work_path
-		# (/usr/portage.sync). We will make sure this directory is owned by the SYNC_USER user, and then we will use "su" to run git clone
-		# inside this directory, so that git can create the initial repository directory with the proper user permissiosn. After git
-		# clone completes, we will move our new portage tree in repo_path_tmp to repo_path_fin, its final location. And then we will remove
-		# work_path, our temporary directory.
+        if not myportdir:
+                myportdir = settings.get('PORTDIR', '')
+                if myportdir and myportdir.strip():
+                        myportdir = os.path.realpath(myportdir)
+                else:
+                        myportdir = None
+        out = portage.output.EOutput()
+        global_config_path = GLOBAL_CONFIG_PATH
+        if settings['EPREFIX']:
+                global_config_path = os.path.join(settings['EPREFIX'],
+                                GLOBAL_CONFIG_PATH.lstrip(os.sep))
+        if not myportdir:
+                sys.stderr.write("!!! PORTDIR is undefined. Is %s/make.globals missing?\n" % global_config_path)
+                sys.exit(1)
+        if myportdir[-1]=="/":
+                myportdir=myportdir[:-1]
+        try:
+                st = os.stat(myportdir)
+        except OSError:
+                st = None
 
-		# common_path = /usr
-		# repo_dir = portage
-		# work_path = /usr/portage.sync
-		# repo_path_tmp = /usr/portage.sync/portage
-		# repo_path_fin = /usr/portage
+        syncuri = settings.get("SYNC", "").strip()
+        syncuser = settings.get("SYNC_USER", "root").strip()
+        syncumask = settings.get("SYNC_UMASK", "022").strip()
+        updatecache_flg = False
+        git = False
 
-		common_path = os.path.dirname(myportdir)
-		repo_dir = os.path.basename(myportdir)
-		work_path = os.path.join(common_path, repo_dir + ".sync")
-		repo_path_tmp = os.path.join(work_path, repo_dir)
-		repo_path_fin = os.path.join(common_path, repo_dir)
-			
-		print(">>> Using %s as temporary clone directory..." % repo_path_tmp)
+        if myaction == "metadata":
+                print("skipping sync")
+                updatecache_flg = True
+        if portage.process.find_binary("git") is None:
+                msg = ["Command not found: git", "Type \"emerge dev-vcs/git\" to enable git support."]
+                for l in msg:
+                        writemsg_level("!!! %s\n" % l, level=logging.ERROR, noiselevel=-1)
+                return 1
+        updatecache_flg = True
 
-		# if the directories we will be using exist, try to remove them, non-recursively. If that doesn't work, there are files in them
-		# and throw an error message, requesting the user remove these files so that sync can proceed.
+        # These variables have been moved here so that we don't have to redefine them again later
+        # (if a portdir exists but it's an empty directory or if it's not a git repo aka .git doesn't exist)
 
-		for checkdir in [ repo_path_tmp, work_path ]:
-			if os.path.exists(checkdir):
-				try:
-					os.rmdir(checkdir)
-				except OSError as e:
-					print("!!! %s exists and contains files. Please remove so that clone can proceed." % checkdir )
-					sys.exit(1)
+        # A few tricks are required to get git cloning by a non-root user. We will create a temporary working directory called work_path
+        # (/usr/portage.sync). We will make sure this directory is owned by the SYNC_USER user, and then we will use "su" to run git clone
+        # inside this directory, so that git can create the initial repository directory with the proper user permissiosn. After git
+        # clone completes, we will move our new portage tree in repo_path_tmp to repo_path_fin, its final location. And then we will remove
+        # work_path, our temporary directory.
 
-		# at this point, we want to create an initial portage.sync directory, owned by the user, into which we can use su to run git as
-		# the user, and create the new portage tree directory owned by the user.
+        # common_path = /usr
+        # repo_dir = portage
+        # work_path = /usr/portage.sync
+        # repo_path_tmp = /usr/portage.sync/portage
+        # repo_path_fin = /usr/portage
 
-		if not os.path.exists(common_path):
-			# create common path directory, ie. /var/git, if it doesn't exist.
-			os.makedirs(common_path)
+        common_path = os.path.dirname(myportdir)
+        repo_dir = os.path.basename(myportdir)
+        work_path = os.path.join(common_path, repo_dir + ".sync")
+        repo_path_tmp = os.path.join(work_path, repo_dir)
+        repo_path_fin = os.path.join(common_path, repo_dir)
+        repo_path_tmpin = os.path.join(repo_path_fin, repo_dir)
 
-		if portage.process.spawn_bash("cd %s && umask %s && install -d -o %s %s" % ( common_path, syncumask, syncuser, work_path)) != os.EX_OK:
-			print("!!! Unable to create initial sync directory %s; exiting." % work_path)
-			sys.exit(1)
+        if not os.path.exists(myportdir):
+                if not syncuri:
+                        writemsg_level("SYNC is undefined.\nPlease set SYNC to the remote location of the Portage repository.\n", noiselevel=-1, level=logging.ERROR)
+                        return 1
 
-		# We've created our temporary work directory, but is the final location actually reachable - ie. readable, by SYNC_USER? We'll
-		# find out now.
+                print(">>> Using %s as temporary clone directory..." % repo_path_tmp)
 
-		if portage.process.spawn_bash("su - %s -s /bin/sh -c 'cd %s'" % ( syncuser, common_path )) != os.EX_OK:
-			print("!!! Path %s is not reachable by user %s; please adjust permissions or SYNC_USER setting to correct." %  ( common_path, syncuser ))
-			sys.exit(1)
+                # if the directories we will be using exist, try to remove them, non-recursively. If that doesn't work, there are files in them
+                # and throw an error message, requesting the user remove these files so that sync can proceed.
 
-		# Everything looks OK, so now we will clone the repository:
-		
-		print(">>> Starting initial git clone with "+syncuri+"...")
+                for checkdir in [ repo_path_tmp, work_path ]:
+                        if os.path.exists(checkdir):
+                                try:
+                                        os.rmdir(checkdir)
+                                except OSError as e:
+                                        print("!!! %s exists and contains files. Please remove so that clone can proceed." % checkdir )
+                                        sys.exit(1)
 
-		if portage.process.spawn_bash("su - %s -s /bin/sh -c 'umask %s && cd %s && exec git clone %s %s && mv '" % (syncuser, syncumask, work_path, portage._shell_quote(syncuri), repo_dir)) != os.EX_OK:
-			print("!!! git clone error; exiting.")
-			sys.exit(1)
-		
-		# Our clone should now exist in the temporary location, now move it to the final location, as root:
+                # at this point, we want to create an initial portage.sync directory, owned by the user, into which we can use su to run git as
+                # the user, and create the new portage tree directory owned by the user.
 
-		if portage.process.spawn_bash("mv %s %s" % (repo_path_tmp, repo_path_fin)) != os.EX_OK:
-			print("!!! Couldn't move %s into final location %s; exiting." % ( repo_path_tmp, repo_path_fin ))
-			sys.exit(1)
+                if not os.path.exists(common_path):
+                        # create common path directory, ie. /var/git, if it doesn't exist.
+                        os.makedirs(common_path)
 
-		# Clean up after ourselves:
-		portage.process.spawn_bash("rm -rf %s" % (repo_path_tmp))
-	else:
-		if not os.path.exists(myportdir+"/.git"):
-			print("!!! Portage tree at %s does not appear to be a git repository. Please move out of the way or correct your PORTDIR setting and retry." % myportdir)
-			sys.exit(1)
-		if portage.process.spawn_bash("su - %s -s /bin/sh -c 'cd %s >/dev/null 2>&1'" % ( syncuser, myportdir )) != os.EX_OK:
-			print("!!! Portage tree at %s is not reachable by user %s; please adjust permissions to correct." %  ( myportdir, syncuser ))
-			sys.exit(1)
-		print(">>> Starting git pull...")
-		exitcode = portage.process.spawn_bash( "su - %s -s /bin/sh -c 'umask %s && cd %s && exec git pull --no-stat'" % (syncuser, syncumask, portage._shell_quote(myportdir),))
-		if exitcode != os.EX_OK:
-			msg = "!!! git pull error in %s." % myportdir
-			emergelog(xterm_titles, msg)
-			writemsg_level(msg + "\n", level=logging.ERROR, noiselevel=-1)
-			return exitcode
-		msg = ">>> Git pull in %s successful" % myportdir
-		emergelog(xterm_titles, msg)
-		writemsg_level(msg + "\n")
+                if portage.process.spawn_bash("cd %s && umask %s && install -d -o %s %s" % ( common_path, syncumask, syncuser, work_path)) != os.EX_OK:
+                        print("!!! Unable to create initial sync directory %s; exiting." % work_path)
+                        sys.exit(1)
 
-	# Reload the whole config from scratch.
-	portage._sync_disabled_warnings = False
-	settings, trees, mtimedb = load_emerge_config(trees=trees)
-	adjust_configs(myopts, trees)
-	root_config = trees[settings['EROOT']]['root_config']
-	portdb = trees[settings['EROOT']]['porttree'].dbapi
+                # We've created our temporary work directory, but is the final location actually reachable - ie. readable, by SYNC_USER? We'll
+                # find out now.
 
-	# NOTE: Do this after reloading the config, in case
-	# it did not exist prior to sync, so that the config
-	# and portdb properly account for its existence.
-	exitcode = git_sync_timestamps(portdb, myportdir)
-	if exitcode == os.EX_OK:
-		updatecache_flg = True
+                if portage.process.spawn_bash("su - %s -s /bin/sh -c 'cd %s'" % ( syncuser, common_path )) != os.EX_OK:
+                        print("!!! Path %s is not reachable by user %s; please adjust permissions or SYNC_USER setting to correct." %  ( common_path, syncuser ))
+                        sys.exit(1)
 
-	if updatecache_flg and  \
-		myaction != "metadata" and \
-		"metadata-transfer" not in settings.features:
-		updatecache_flg = False
+                # Everything looks OK, so now we will clone the repository:
+                
+                print(">>> Starting initial git clone with "+syncuri+"...")
+                
+                # We cannot use 'su -c' because if you are cloning a git repo via ssh, there won't be a method
+                # to provide the password to git. the -c option doesn't give a controlling terminal thus any password prompts that git asks for
+                # will not be shown, and your clone will fail with permission denied.
 
-	if updatecache_flg and \
-		os.path.exists(os.path.join(myportdir, 'metadata', 'cache')):
+                if portage.process.spawn_bash("umask %s && cd %s && git clone %s %s && chown -R %s:%s %s" 
+                                           % (syncumask, work_path, portage._shell_quote(syncuri), repo_dir, syncuser, syncuser, work_path)) != os.EX_OK:
+                        print("!!! git clone error; exiting.")
+                        sys.exit(1)
+        
+                # Our clone should now exist in the temporary location, now move it to the final location, as root:
 
-		# Only update cache for myportdir since that's
-		# the only one that's been synced here.
-		action_metadata(settings, portdb, myopts, porttrees=[myportdir])
+                if portage.process.spawn_bash("mv %s %s" % (repo_path_tmp, repo_path_fin)) != os.EX_OK:
+                        print("!!! Couldn't move %s into final location %s; exiting." % ( repo_path_tmp, repo_path_fin ))
+                        sys.exit(1)
 
-	if myopts.get('--package-moves') != 'n' and \
-		_global_updates(trees, mtimedb["updates"], quiet=("--quiet" in myopts)):
-		mtimedb.commit()
-		# Reload the whole config from scratch.
-		settings, trees, mtimedb = load_emerge_config(trees=trees)
-		adjust_configs(myopts, trees)
-		portdb = trees[settings['EROOT']]['porttree'].dbapi
-		root_config = trees[settings['EROOT']]['root_config']
+                # Clean up after ourselves:
+                portage.process.spawn_bash("rm -rf %s" % (work_path))
+        else:
+                # If the myportdir exists but it's not a repository (or it's an empty folder)
+                # Just delete all files (including dot files in this directory) so that it doesn't complain for filesystems like zfs, that make a
+                # directory that is not unmountable (Because it is a directory under filesystem control).
 
-	mybestpv = portdb.xmatch("bestmatch-visible",
-		portage.const.PORTAGE_PACKAGE_ATOM)
-	mypvs = portage.best(
-		trees[settings['EROOT']]['vartree'].dbapi.match(
-		portage.const.PORTAGE_PACKAGE_ATOM))
+                if not os.path.exists(myportdir+"/.git"):
+                        print(">>> This is not a git repository. The folder is either empty or has other data. Removing contents inside this folder...")
 
-	chk_updated_cfg_files(settings["EROOT"],
-		portage.util.shlex_split(settings.get("CONFIG_PROTECT", "")))
+                        portage.process.spawn_bash("cd %s && rm -rf .* > /dev/null 2>&1; rm -rf * > /dev/null 2>&1" % (myportdir))
 
-	if myaction != "metadata":
-		postsync = os.path.join(settings["PORTAGE_CONFIGROOT"],
-			portage.USER_CONFIG_PATH, "bin", "post_sync")
-		if os.access(postsync, os.X_OK):
-			retval = portage.process.spawn(
-				[postsync, syncuri], env=settings.environ())
-			if retval != os.EX_OK:
-				writemsg_level(
-					" %s spawn failed of %s\n" % (bad("*"), postsync,),
-					level=logging.ERROR, noiselevel=-1)
+                        # Now that the folder is empty, we end up in the same situation as if it were going to be an initial clone
+                        # (because technically it is an initial clone. Especially for the situation with zfs where it makes an empty directory).
+                        # So we should do the same steps as if we were making an initial clone.
 
-	if(mybestpv != mypvs) and not "--quiet" in myopts:
-		print()
-		print(warn(" * ")+bold("An update to portage is available.")+" It is _highly_ recommended")
-		print(warn(" * ")+"that you update portage now, before any other packages are updated.")
-		print()
-		print(warn(" * ")+"To update portage, run 'emerge --oneshot portage' now.")
-		print()
+                        print(">>> Starting initial git clone with "+syncuri+"...")
+                        
+                        # We cannot use 'su -c' because if you are cloning a git repo via ssh, there won't be a method
+                        # to provide the password to git. the -c option doesn't give a controlling terminal thus any password prompts that git asks for
+                        # will not be shown, and your clone will fail with permission denied.
 
-	display_news_notification(root_config, myopts)
-	return os.EX_OK
+                        if portage.process.spawn_bash("umask %s && cd %s && git clone %s %s && chown -R %s:%s %s" 
+                                                   % (syncumask, repo_path_fin, portage._shell_quote(syncuri), repo_dir, syncuser, syncuser, repo_dir)) != os.EX_OK:
+                                print("!!! git clone error; exiting.")
+                                sys.exit(1)
+                        
+                        # Move the clone from the temporary location to the final location (and then delete the dir - the rmdir should be left at the end so a successful return code can be used)
+
+                        if portage.process.spawn_bash("cd %s && mv %s/* .> /dev/null 2>&1; mv %s/.* . > /dev/null 2>&1; rmdir %s" % (repo_path_fin, repo_dir, repo_dir, repo_path_tmpin)) != os.EX_OK:
+                                print("!!! Couldn't move %s into it's final location %s; exiting." % (repo_path_tmpin, repo_path_fin))
+                                sys.exit(1)
+                if portage.process.spawn_bash("su - %s -s /bin/sh -c 'cd %s >/dev/null 2>&1'" % ( syncuser, myportdir )) != os.EX_OK:
+                        print("!!! Portage tree at %s is not reachable by user %s; please adjust permissions to correct." %  ( myportdir, syncuser ))
+                        sys.exit(1)
+
+                print(">>> Starting git pull...")
+
+                # We cannot use 'su -c' because if you are cloning a git repo via ssh, there won't be a method
+                # to provide the password to git. the -c option doesn't give a controlling terminal thus any password prompts that git asks for
+                # will not be shown, and your clone will fail with permission denied.
+
+                exitcode = portage.process.spawn_bash("umask %s && cd %s && exec git pull --no-stat && chown -R %s:%s %s" % (syncumask, portage._shell_quote(myportdir), syncuser, syncuser, portage._shell_quote(myportdir),))
+                if exitcode != os.EX_OK:
+                        msg = "!!! git pull error in %s." % myportdir
+                        emergelog(xterm_titles, msg)
+                        writemsg_level(msg + "\n", level=logging.ERROR, noiselevel=-1)
+                        return exitcode
+                msg = ">>> Git pull in %s successful" % myportdir
+                emergelog(xterm_titles, msg)
+                writemsg_level(msg + "\n")
+
+        # Reload the whole config from scratch.
+        portage._sync_disabled_warnings = False
+        settings, trees, mtimedb = load_emerge_config(trees=trees)
+        adjust_configs(myopts, trees)
+        root_config = trees[settings['EROOT']]['root_config']
+        portdb = trees[settings['EROOT']]['porttree'].dbapi
+
+        # NOTE: Do this after reloading the config, in case
+        # it did not exist prior to sync, so that the config
+        # and portdb properly account for its existence.
+        exitcode = git_sync_timestamps(portdb, myportdir)
+        if exitcode == os.EX_OK:
+                updatecache_flg = True
+
+        if updatecache_flg and  \
+                myaction != "metadata" and \
+                "metadata-transfer" not in settings.features:
+                updatecache_flg = False
+
+        if updatecache_flg and \
+                os.path.exists(os.path.join(myportdir, 'metadata', 'cache')):
+
+                # Only update cache for myportdir since that's
+                # the only one that's been synced here.
+                action_metadata(settings, portdb, myopts, porttrees=[myportdir])
+
+        if myopts.get('--package-moves') != 'n' and \
+                _global_updates(trees, mtimedb["updates"], quiet=("--quiet" in myopts)):
+                mtimedb.commit()
+                # Reload the whole config from scratch.
+                settings, trees, mtimedb = load_emerge_config(trees=trees)
+                adjust_configs(myopts, trees)
+                portdb = trees[settings['EROOT']]['porttree'].dbapi
+                root_config = trees[settings['EROOT']]['root_config']
+
+        mybestpv = portdb.xmatch("bestmatch-visible",
+                portage.const.PORTAGE_PACKAGE_ATOM)
+        mypvs = portage.best(
+                trees[settings['EROOT']]['vartree'].dbapi.match(
+                portage.const.PORTAGE_PACKAGE_ATOM))
+
+        chk_updated_cfg_files(settings["EROOT"],
+                portage.util.shlex_split(settings.get("CONFIG_PROTECT", "")))
+
+        if myaction != "metadata":
+                postsync = os.path.join(settings["PORTAGE_CONFIGROOT"],
+                        portage.USER_CONFIG_PATH, "bin", "post_sync")
+                if os.access(postsync, os.X_OK):
+                        retval = portage.process.spawn(
+                                [postsync, syncuri], env=settings.environ())
+                        if retval != os.EX_OK:
+                                writemsg_level(
+                                        " %s spawn failed of %s\n" % (bad("*"), postsync,),
+                                        level=logging.ERROR, noiselevel=-1)
+
+        if(mybestpv != mypvs) and not "--quiet" in myopts:
+                print()
+                print(warn(" * ")+bold("An update to portage is available.")+" It is _highly_ recommended")
+                print(warn(" * ")+"that you update portage now, before any other packages are updated.")
+                print()
+                print(warn(" * ")+"To update portage, run 'emerge --oneshot portage' now.")
+                print()
+
+        display_news_notification(root_config, myopts)
+        return os.EX_OK
 
 def action_uninstall(settings, trees, ldpath_mtimes,
 	opts, action, files, spinner):
