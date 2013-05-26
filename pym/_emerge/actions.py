@@ -2116,7 +2116,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
                 # to provide the password to git. the -c option doesn't give a controlling terminal thus any password prompts that git asks for
                 # will not be shown, and your clone will fail with permission denied.
 
-                if portage.process.spawn_bash("umask %s && cd %s && git clone %s %s && chown -R %s:%s %s" 
+                if portage.process.spawn_bash("umask %s && cd %s && git clone --depth=1 %s %s && chown -R %s:%s %s" 
                                            % (syncumask, work_path, portage._shell_quote(syncuri), repo_dir, syncuser, syncuser, work_path)) != os.EX_OK:
                         print("!!! git clone error; exiting.")
                         sys.exit(1)
@@ -2149,7 +2149,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
                         # to provide the password to git. the -c option doesn't give a controlling terminal thus any password prompts that git asks for
                         # will not be shown, and your clone will fail with permission denied.
 
-                        if portage.process.spawn_bash("umask %s && cd %s && git clone %s %s && chown -R %s:%s %s" 
+                        if portage.process.spawn_bash("umask %s && cd %s && git clone --depth=1 %s %s && chown -R %s:%s %s" 
                                                    % (syncumask, repo_path_fin, portage._shell_quote(syncuri), repo_dir, syncuser, syncuser, repo_dir)) != os.EX_OK:
                                 print("!!! git clone error; exiting.")
                                 sys.exit(1)
