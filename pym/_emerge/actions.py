@@ -37,7 +37,8 @@ from portage import os
 from portage import shutil
 from portage import eapi_is_supported, _encodings, _unicode_decode
 from portage.cache.cache_errors import CacheError
-from portage.const import GLOBAL_CONFIG_PATH, VCS_DIRS, _DEPCLEAN_LIB_CHECK_DEFAULT
+from portage.const import GLOBAL_CONFIG_PATH
+from portage.const import _DEPCLEAN_LIB_CHECK_DEFAULT
 from portage.dbapi.dep_expand import dep_expand
 from portage.dbapi._expand_new_virt import expand_new_virt
 from portage.dep import Atom
@@ -324,7 +325,6 @@ def action_build(settings, trees, mtimedb,
 			mydepgraph.display_problems()
 			return 1
 
-	mergecount = None
 	if "--pretend" not in myopts and \
 		("--ask" in myopts or "--tree" in myopts or \
 		"--verbose" in myopts) and \
@@ -356,7 +356,6 @@ def action_build(settings, trees, mtimedb,
 				if isinstance(x, Package) and x.operation == "merge":
 					mergecount += 1
 
-			prompt = None
 			if mergecount==0:
 				sets = trees[settings['EROOT']]['root_config'].sets
 				world_candidates = None
@@ -369,11 +368,12 @@ def action_build(settings, trees, mtimedb,
 					world_candidates = [x for x in favorites \
 						if not (x.startswith(SETPREFIX) and \
 						not sets[x[1:]].world_candidate)]
-
 				if "selective" in myparams and \
 					not oneshot and world_candidates:
-					# Prompt later, inside saveNomergeFavorites.
-					prompt = None
+					print()
+					for x in world_candidates:
+						print(" %s %s" % (good("*"), x))
+					prompt="Would you like to add these packages to your world favorites?"
 				elif settings["AUTOCLEAN"] and "yes"==settings["AUTOCLEAN"]:
 					prompt="Nothing to merge; would you like to auto-clean packages?"
 				else:
@@ -386,15 +386,13 @@ def action_build(settings, trees, mtimedb,
 			else:
 				prompt="Would you like to merge these packages?"
 		print()
-		if prompt is not None and "--ask" in myopts and \
-			userquery(prompt, enter_invalid) == "No":
+		if "--ask" in myopts and userquery(prompt, enter_invalid) == "No":
 			print()
 			print("Quitting.")
 			print()
 			return 128 + signal.SIGINT
 		# Don't ask again (e.g. when auto-cleaning packages after merge)
-		if mergecount != 0:
-			myopts.pop("--ask", None)
+		myopts.pop("--ask", None)
 
 	if ("--pretend" in myopts) and not ("--fetchonly" in myopts or "--fetch-all-uri" in myopts):
 		if ("--resume" in myopts):
@@ -464,29 +462,25 @@ def action_build(settings, trees, mtimedb,
 
 			mydepgraph.saveNomergeFavorites()
 
-		if mergecount == 0:
-			retval = os.EX_OK
-		else:
-			mergetask = Scheduler(settings, trees, mtimedb, myopts,
-				spinner, favorites=favorites,
-				graph_config=mydepgraph.schedulerGraph())
+		mergetask = Scheduler(settings, trees, mtimedb, myopts,
+			spinner, favorites=favorites,
+			graph_config=mydepgraph.schedulerGraph())
 
-			del mydepgraph
-			clear_caches(trees)
+		del mydepgraph
+		clear_caches(trees)
 
-			retval = mergetask.merge()
+		retval = mergetask.merge()
 
-			if retval == os.EX_OK and \
-				not (buildpkgonly or fetchonly or pretend):
-				if "yes" == settings.get("AUTOCLEAN"):
-					portage.writemsg_stdout(">>> Auto-cleaning packages...\n")
-					unmerge(trees[settings['EROOT']]['root_config'],
-						myopts, "clean", [],
-						ldpath_mtimes, autoclean=1)
-				else:
-					portage.writemsg_stdout(colorize("WARN", "WARNING:")
-						+ " AUTOCLEAN is disabled.  This can cause serious"
-						+ " problems due to overlapping packages.\n")
+		if retval == os.EX_OK and not (buildpkgonly or fetchonly or pretend):
+			if "yes" == settings.get("AUTOCLEAN"):
+				portage.writemsg_stdout(">>> Auto-cleaning packages...\n")
+				unmerge(trees[settings['EROOT']]['root_config'],
+					myopts, "clean", [],
+					ldpath_mtimes, autoclean=1)
+			else:
+				portage.writemsg_stdout(colorize("WARN", "WARNING:")
+					+ " AUTOCLEAN is disabled.  This can cause serious"
+					+ " problems due to overlapping packages.\n")
 
 		return retval
 
@@ -987,19 +981,10 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 	cleanlist = create_cleanlist()
 	clean_set = set(cleanlist)
 
-	depclean_lib_check = cleanlist and real_vardb._linkmap is not None and \
-		myopts.get("--depclean-lib-check", _DEPCLEAN_LIB_CHECK_DEFAULT) != "n"
-	preserve_libs = "preserve-libs" in settings.features
-	preserve_libs_restrict = False
-
-	if depclean_lib_check and preserve_libs:
-		for pkg in cleanlist:
-			if "preserve-libs" in pkg.restrict:
-				preserve_libs_restrict = True
-				break
-
-	if depclean_lib_check and \
-		(preserve_libs_restrict or not preserve_libs):
+	if cleanlist and \
+		real_vardb._linkmap is not None and \
+		myopts.get("--depclean-lib-check", _DEPCLEAN_LIB_CHECK_DEFAULT) != "n" and \
+		"preserve-libs" not in settings.features:
 
 		# Check if any of these packages are the sole providers of libraries
 		# with consumers that have not been selected for removal. If so, these
@@ -1012,13 +997,6 @@ def calc_depclean(settings, trees, ldpath_mtimes,
 		writemsg_level(">>> Checking for lib consumers...\n")
 
 		for pkg in cleanlist:
-
-			if preserve_libs and "preserve-libs" not in pkg.restrict:
-				# Any needed libraries will be preserved
-				# when this package is unmerged, so there's
-				# no need to account for it here.
-				continue
-
 			pkg_dblink = real_vardb._dblink(pkg.cpv)
 			consumers = {}
 
@@ -2029,198 +2007,243 @@ def action_search(root_config, myopts, myfiles, spinner):
 			searchinstance.output()
 
 def action_sync(settings, trees, mtimedb, myopts, myaction):
-	enter_invalid = '--ask-enter-invalid' in myopts
-	xterm_titles = "notitles" not in settings.features
-	emergelog(xterm_titles, " === sync")
-	portdb = trees[settings['EROOT']]['porttree'].dbapi
-	myportdir = portdb.porttree_root
-	if not myportdir:
-		myportdir = settings.get('PORTDIR', '')
-		if myportdir and myportdir.strip():
-			myportdir = os.path.realpath(myportdir)
-		else:
-			myportdir = None
-	out = portage.output.EOutput()
-	global_config_path = GLOBAL_CONFIG_PATH
-	if settings['EPREFIX']:
-		global_config_path = os.path.join(settings['EPREFIX'],
-				GLOBAL_CONFIG_PATH.lstrip(os.sep))
-	if not myportdir:
-		sys.stderr.write("!!! PORTDIR is undefined. Is %s/make.globals missing?\n" % global_config_path)
-		sys.exit(1)
-	if myportdir[-1]=="/":
-		myportdir=myportdir[:-1]
-	try:
-		st = os.stat(myportdir)
-	except OSError:
-		st = None
+        enter_invalid = '--ask-enter-invalid' in myopts
+        xterm_titles = "notitles" not in settings.features
+        emergelog(xterm_titles, " === sync")
+        portdb = trees[settings['EROOT']]['porttree'].dbapi
+        myportdir = portdb.porttree_root
 
-	syncuri = settings.get("SYNC", "").strip()
-	syncuser = settings.get("SYNC_USER", "root").strip()
-	syncumask = settings.get("SYNC_UMASK", "022").strip()
-	updatecache_flg = False
-	git = False
-	if myaction == "metadata":
-		print("skipping sync")
-		updatecache_flg = True
-	if portage.process.find_binary("git") is None:
-		msg = ["Command not found: git", "Type \"emerge dev-vcs/git\" to enable git support."]
-		for l in msg:
-			writemsg_level("!!! %s\n" % l, level=logging.ERROR, noiselevel=-1)
-		return 1
-	updatecache_flg = True
-	if not os.path.exists(myportdir):
-		if not syncuri:
-			writemsg_level("SYNC is undefined.\nPlease set SYNC to the remote location of the Portage repository.\n", noiselevel=-1, level=logging.ERROR)
-			return 1
-		# A few tricks are required to get git cloning by a non-root user. We will create a temporary working directory called work_path
-		# (/usr/portage.sync). We will make sure this directory is owned by the SYNC_USER user, and then we will use "su" to run git clone
-		# inside this directory, so that git can create the initial repository directory with the proper user permissiosn. After git
-		# clone completes, we will move our new portage tree in repo_path_tmp to repo_path_fin, its final location. And then we will remove
-		# work_path, our temporary directory.
+        if not myportdir:
+                myportdir = settings.get('PORTDIR', '')
+                if myportdir and myportdir.strip():
+                        myportdir = os.path.realpath(myportdir)
+                else:
+                        myportdir = None
+        out = portage.output.EOutput()
+        global_config_path = GLOBAL_CONFIG_PATH
+        if settings['EPREFIX']:
+                global_config_path = os.path.join(settings['EPREFIX'],
+                                GLOBAL_CONFIG_PATH.lstrip(os.sep))
+        if not myportdir:
+                sys.stderr.write("!!! PORTDIR is undefined. Is %s/make.globals missing?\n" % global_config_path)
+                sys.exit(1)
+        if myportdir[-1]=="/":
+                myportdir=myportdir[:-1]
+        try:
+                st = os.stat(myportdir)
+        except OSError:
+                st = None
 
-		# common_path = /usr
-		# repo_dir = portage
-		# work_path = /usr/portage.sync
-		# repo_path_tmp = /usr/portage.sync/portage
-		# repo_path_fin = /usr/portage
+        syncuri = settings.get("SYNC", "").strip()
+        syncuser = settings.get("SYNC_USER", "root").strip()
+        syncumask = settings.get("SYNC_UMASK", "022").strip()
+        updatecache_flg = False
+        git = False
 
-		common_path = os.path.dirname(myportdir)
-		repo_dir = os.path.basename(myportdir)
-		work_path = os.path.join(common_path, repo_dir + ".sync")
-		repo_path_tmp = os.path.join(work_path, repo_dir)
-		repo_path_fin = os.path.join(common_path, repo_dir)
-			
-		print(">>> Using %s as temporary clone directory..." % repo_path_tmp)
+        if myaction == "metadata":
+                print("skipping sync")
+                updatecache_flg = True
+        if portage.process.find_binary("git") is None:
+                msg = ["Command not found: git", "Type \"emerge dev-vcs/git\" to enable git support."]
+                for l in msg:
+                        writemsg_level("!!! %s\n" % l, level=logging.ERROR, noiselevel=-1)
+                return 1
+        updatecache_flg = True
 
-		# if the directories we will be using exist, try to remove them, non-recursively. If that doesn't work, there are files in them
-		# and throw an error message, requesting the user remove these files so that sync can proceed.
+        # These variables have been moved here so that we don't have to redefine them again later
+        # (if a portdir exists but it's an empty directory or if it's not a git repo aka .git doesn't exist)
 
-		for checkdir in [ repo_path_tmp, work_path ]:
-			if os.path.exists(checkdir):
-				try:
-					os.rmdir(checkdir)
-				except OSError as e:
-					print("!!! %s exists and contains files. Please remove so that clone can proceed." % checkdir )
-					sys.exit(1)
+        # A few tricks are required to get git cloning by a non-root user. We will create a temporary working directory called work_path
+        # (/usr/portage.sync). We will make sure this directory is owned by the SYNC_USER user, and then we will use "su" to run git clone
+        # inside this directory, so that git can create the initial repository directory with the proper user permissiosn. After git
+        # clone completes, we will move our new portage tree in repo_path_tmp to repo_path_fin, its final location. And then we will remove
+        # work_path, our temporary directory.
 
-		# at this point, we want to create an initial portage.sync directory, owned by the user, into which we can use su to run git as
-		# the user, and create the new portage tree directory owned by the user.
+        # common_path = /usr
+        # repo_dir = portage
+        # work_path = /usr/portage.sync
+        # repo_path_tmp = /usr/portage.sync/portage
+        # repo_path_fin = /usr/portage
 
-		if not os.path.exists(common_path):
-			# create common path directory, ie. /var/git, if it doesn't exist.
-			os.makedirs(common_path)
+        common_path = os.path.dirname(myportdir)
+        repo_dir = os.path.basename(myportdir)
+        work_path = os.path.join(common_path, repo_dir + ".sync")
+        repo_path_tmp = os.path.join(work_path, repo_dir)
+        repo_path_fin = os.path.join(common_path, repo_dir)
+        repo_path_tmpin = os.path.join(repo_path_fin, repo_dir)
 
-		if portage.process.spawn_bash("cd %s && umask %s && install -d -o %s %s" % ( common_path, syncumask, syncuser, work_path)) != os.EX_OK:
-			print("!!! Unable to create initial sync directory %s; exiting." % work_path)
-			sys.exit(1)
+        if not os.path.exists(myportdir):
+                if not syncuri:
+                        writemsg_level("SYNC is undefined.\nPlease set SYNC to the remote location of the Portage repository.\n", noiselevel=-1, level=logging.ERROR)
+                        return 1
 
-		# We've created our temporary work directory, but is the final location actually reachable - ie. readable, by SYNC_USER? We'll
-		# find out now.
+                print(">>> Using %s as temporary clone directory..." % repo_path_tmp)
 
-		if portage.process.spawn_bash("su - %s -s /bin/sh -c 'cd %s'" % ( syncuser, common_path )) != os.EX_OK:
-			print("!!! Path %s is not reachable by user %s; please adjust permissions or SYNC_USER setting to correct." %  ( common_path, syncuser ))
-			sys.exit(1)
+                # if the directories we will be using exist, try to remove them, non-recursively. If that doesn't work, there are files in them
+                # and throw an error message, requesting the user remove these files so that sync can proceed.
 
-		# Everything looks OK, so now we will clone the repository:
-		
-		print(">>> Starting initial git clone with "+syncuri+"...")
-		
-		if portage.process.spawn_bash("su - %s -s /bin/sh -c 'umask %s && cd %s && exec git clone %s %s && mv '" % (syncuser, syncumask, work_path, portage._shell_quote(syncuri), repo_dir)) != os.EX_OK:
-			print("!!! git clone error; exiting.")
-			sys.exit(1)
-		
-		# Our clone should now exist in the temporary location, now move it to the final location, as root:
+                for checkdir in [ repo_path_tmp, work_path ]:
+                        if os.path.exists(checkdir):
+                                try:
+                                        os.rmdir(checkdir)
+                                except OSError as e:
+                                        print("!!! %s exists and contains files. Please remove so that clone can proceed." % checkdir )
+                                        sys.exit(1)
 
-		if portage.process.spawn_bash("mv %s %s" % (repo_path_tmp, repo_path_fin)) != os.EX_OK:
-			print("!!! Couldn't move %s into final location %s; exiting." % ( repo_path_tmp, repo_path_fin ))
-			sys.exit(1)
+                # at this point, we want to create an initial portage.sync directory, owned by the user, into which we can use su to run git as
+                # the user, and create the new portage tree directory owned by the user.
 
-		# Clean up after ourselves:
-		portage.process.spawn_bash("rm -rf %s" % (repo_path_tmp))
-	else:
-		if not os.path.exists(myportdir+"/.git"):
-			print("!!! Portage tree at %s does not appear to be a git repository. Please move out of the way or correct your PORTDIR setting and retry." % myportdir)
-			sys.exit(1)
-		if portage.process.spawn_bash("su - %s -s /bin/sh -c 'cd %s >/dev/null 2>&1'" % ( syncuser, myportdir )) != os.EX_OK:
-			print("!!! Portage tree at %s is not reachable by user %s; please adjust permissions to correct." %  ( myportdir, syncuser ))
-			sys.exit(1)
-		print(">>> Starting git pull...")
-		exitcode = portage.process.spawn_bash( "su - %s -s /bin/sh -c 'umask %s && cd %s && exec git pull --no-stat'" % (syncuser, syncumask, portage._shell_quote(myportdir),))
-		if exitcode != os.EX_OK:
-			msg = "!!! git pull error in %s." % myportdir
-			emergelog(xterm_titles, msg)
-			writemsg_level(msg + "\n", level=logging.ERROR, noiselevel=-1)
-			return exitcode
-		msg = ">>> Git pull in %s successful" % myportdir
-		emergelog(xterm_titles, msg)
-		writemsg_level(msg + "\n")
+                if not os.path.exists(common_path):
+                        # create common path directory, ie. /var/git, if it doesn't exist.
+                        os.makedirs(common_path)
 
-	# Reload the whole config from scratch.
-	portage._sync_disabled_warnings = False
-	settings, trees, mtimedb = load_emerge_config(trees=trees)
-	adjust_configs(myopts, trees)
-	root_config = trees[settings['EROOT']]['root_config']
-	portdb = trees[settings['EROOT']]['porttree'].dbapi
+                if portage.process.spawn_bash("cd %s && umask %s && install -d -o %s %s" % ( common_path, syncumask, syncuser, work_path)) != os.EX_OK:
+                        print("!!! Unable to create initial sync directory %s; exiting." % work_path)
+                        sys.exit(1)
 
-	# NOTE: Do this after reloading the config, in case
-	# it did not exist prior to sync, so that the config
-	# and portdb properly account for its existence.
-	exitcode = git_sync_timestamps(portdb, myportdir)
-	if exitcode == os.EX_OK:
-		updatecache_flg = True
+                # We've created our temporary work directory, but is the final location actually reachable - ie. readable, by SYNC_USER? We'll
+                # find out now.
 
-	if updatecache_flg and  \
-		myaction != "metadata" and \
-		"metadata-transfer" not in settings.features:
-		updatecache_flg = False
+                if portage.process.spawn_bash("su - %s -s /bin/sh -c 'cd %s'" % ( syncuser, common_path )) != os.EX_OK:
+                        print("!!! Path %s is not reachable by user %s; please adjust permissions or SYNC_USER setting to correct." %  ( common_path, syncuser ))
+                        sys.exit(1)
 
-	if updatecache_flg and \
-		os.path.exists(os.path.join(myportdir, 'metadata', 'cache')):
+                # Everything looks OK, so now we will clone the repository:
+                
+                print(">>> Starting initial git clone with "+syncuri+"...")
+                
+                # We cannot use 'su -c' because if you are cloning a git repo via ssh, there won't be a method
+                # to provide the password to git. the -c option doesn't give a controlling terminal thus any password prompts that git asks for
+                # will not be shown, and your clone will fail with permission denied.
 
-		# Only update cache for myportdir since that's
-		# the only one that's been synced here.
-		action_metadata(settings, portdb, myopts, porttrees=[myportdir])
+                if portage.process.spawn_bash("umask %s && cd %s && git clone --depth=1 %s %s && chown -R %s:%s %s" 
+                                           % (syncumask, work_path, portage._shell_quote(syncuri), repo_dir, syncuser, syncuser, work_path)) != os.EX_OK:
+                        print("!!! git clone error; exiting.")
+                        sys.exit(1)
+        
+                # Our clone should now exist in the temporary location, now move it to the final location, as root:
 
-	if myopts.get('--package-moves') != 'n' and \
-		_global_updates(trees, mtimedb["updates"], quiet=("--quiet" in myopts)):
-		mtimedb.commit()
-		# Reload the whole config from scratch.
-		settings, trees, mtimedb = load_emerge_config(trees=trees)
-		adjust_configs(myopts, trees)
-		portdb = trees[settings['EROOT']]['porttree'].dbapi
-		root_config = trees[settings['EROOT']]['root_config']
+                if portage.process.spawn_bash("mv %s %s" % (repo_path_tmp, repo_path_fin)) != os.EX_OK:
+                        print("!!! Couldn't move %s into final location %s; exiting." % ( repo_path_tmp, repo_path_fin ))
+                        sys.exit(1)
 
-	mybestpv = portdb.xmatch("bestmatch-visible",
-		portage.const.PORTAGE_PACKAGE_ATOM)
-	mypvs = portage.best(
-		trees[settings['EROOT']]['vartree'].dbapi.match(
-		portage.const.PORTAGE_PACKAGE_ATOM))
+                # Clean up after ourselves:
+                portage.process.spawn_bash("rm -rf %s" % (work_path))
+        else:
+                # If the myportdir exists but it's not a repository (or it's an empty folder)
+                # Just delete all files (including dot files in this directory) so that it doesn't complain for filesystems like zfs, that make a
+                # directory that is not unmountable (Because it is a directory under filesystem control).
 
-	chk_updated_cfg_files(settings["EROOT"],
-		portage.util.shlex_split(settings.get("CONFIG_PROTECT", "")))
+                if not os.path.exists(myportdir+"/.git"):
+                        print(">>> This is not a git repository. The folder is either empty or has other data. Removing contents inside this folder...")
 
-	if myaction != "metadata":
-		postsync = os.path.join(settings["PORTAGE_CONFIGROOT"],
-			portage.USER_CONFIG_PATH, "bin", "post_sync")
-		if os.access(postsync, os.X_OK):
-			retval = portage.process.spawn(
-				[postsync, syncuri], env=settings.environ())
-			if retval != os.EX_OK:
-				writemsg_level(
-					" %s spawn failed of %s\n" % (bad("*"), postsync,),
-					level=logging.ERROR, noiselevel=-1)
+                        portage.process.spawn_bash("cd %s && rm -rf .* > /dev/null 2>&1; rm -rf * > /dev/null 2>&1" % (myportdir))
 
-	if(mybestpv != mypvs) and not "--quiet" in myopts:
-		print()
-		print(warn(" * ")+bold("An update to portage is available.")+" It is _highly_ recommended")
-		print(warn(" * ")+"that you update portage now, before any other packages are updated.")
-		print()
-		print(warn(" * ")+"To update portage, run 'emerge --oneshot portage' now.")
-		print()
+                        # Now that the folder is empty, we end up in the same situation as if it were going to be an initial clone
+                        # (because technically it is an initial clone. Especially for the situation with zfs where it makes an empty directory).
+                        # So we should do the same steps as if we were making an initial clone.
 
-	display_news_notification(root_config, myopts)
-	return os.EX_OK
+                        print(">>> Starting initial git clone with "+syncuri+"...")
+                        
+                        # We cannot use 'su -c' because if you are cloning a git repo via ssh, there won't be a method
+                        # to provide the password to git. the -c option doesn't give a controlling terminal thus any password prompts that git asks for
+                        # will not be shown, and your clone will fail with permission denied.
+
+                        if portage.process.spawn_bash("umask %s && cd %s && git clone --depth=1 %s %s && chown -R %s:%s %s" 
+                                                   % (syncumask, repo_path_fin, portage._shell_quote(syncuri), repo_dir, syncuser, syncuser, repo_dir)) != os.EX_OK:
+                                print("!!! git clone error; exiting.")
+                                sys.exit(1)
+                        
+                        # Move the clone from the temporary location to the final location (and then delete the dir - the rmdir should be left at the end so a successful return code can be used)
+
+                        if portage.process.spawn_bash("cd %s && mv %s/* .> /dev/null 2>&1; mv %s/.* . > /dev/null 2>&1; rmdir %s" % (repo_path_fin, repo_dir, repo_dir, repo_path_tmpin)) != os.EX_OK:
+                                print("!!! Couldn't move %s into it's final location %s; exiting." % (repo_path_tmpin, repo_path_fin))
+                                sys.exit(1)
+                if portage.process.spawn_bash("su - %s -s /bin/sh -c 'cd %s >/dev/null 2>&1'" % ( syncuser, myportdir )) != os.EX_OK:
+                        print("!!! Portage tree at %s is not reachable by user %s; please adjust permissions to correct." %  ( myportdir, syncuser ))
+                        sys.exit(1)
+
+                print(">>> Starting git pull...")
+
+                # We cannot use 'su -c' because if you are cloning a git repo via ssh, there won't be a method
+                # to provide the password to git. the -c option doesn't give a controlling terminal thus any password prompts that git asks for
+                # will not be shown, and your clone will fail with permission denied.
+
+                exitcode = portage.process.spawn_bash("umask %s && cd %s && exec git pull --no-stat && chown -R %s:%s %s" % (syncumask, portage._shell_quote(myportdir), syncuser, syncuser, portage._shell_quote(myportdir),))
+                if exitcode != os.EX_OK:
+                        msg = "!!! git pull error in %s." % myportdir
+                        emergelog(xterm_titles, msg)
+                        writemsg_level(msg + "\n", level=logging.ERROR, noiselevel=-1)
+                        return exitcode
+                msg = ">>> Git pull in %s successful" % myportdir
+                emergelog(xterm_titles, msg)
+                writemsg_level(msg + "\n")
+
+        # Reload the whole config from scratch.
+        portage._sync_disabled_warnings = False
+        settings, trees, mtimedb = load_emerge_config(trees=trees)
+        adjust_configs(myopts, trees)
+        root_config = trees[settings['EROOT']]['root_config']
+        portdb = trees[settings['EROOT']]['porttree'].dbapi
+
+        # NOTE: Do this after reloading the config, in case
+        # it did not exist prior to sync, so that the config
+        # and portdb properly account for its existence.
+        exitcode = git_sync_timestamps(portdb, myportdir)
+        if exitcode == os.EX_OK:
+                updatecache_flg = True
+
+        if updatecache_flg and  \
+                myaction != "metadata" and \
+                "metadata-transfer" not in settings.features:
+                updatecache_flg = False
+
+        if updatecache_flg and \
+                os.path.exists(os.path.join(myportdir, 'metadata', 'cache')):
+
+                # Only update cache for myportdir since that's
+                # the only one that's been synced here.
+                action_metadata(settings, portdb, myopts, porttrees=[myportdir])
+
+        if myopts.get('--package-moves') != 'n' and \
+                _global_updates(trees, mtimedb["updates"], quiet=("--quiet" in myopts)):
+                mtimedb.commit()
+                # Reload the whole config from scratch.
+                settings, trees, mtimedb = load_emerge_config(trees=trees)
+                adjust_configs(myopts, trees)
+                portdb = trees[settings['EROOT']]['porttree'].dbapi
+                root_config = trees[settings['EROOT']]['root_config']
+
+        mybestpv = portdb.xmatch("bestmatch-visible",
+                portage.const.PORTAGE_PACKAGE_ATOM)
+        mypvs = portage.best(
+                trees[settings['EROOT']]['vartree'].dbapi.match(
+                portage.const.PORTAGE_PACKAGE_ATOM))
+
+        chk_updated_cfg_files(settings["EROOT"],
+                portage.util.shlex_split(settings.get("CONFIG_PROTECT", "")))
+
+        if myaction != "metadata":
+                postsync = os.path.join(settings["PORTAGE_CONFIGROOT"],
+                        portage.USER_CONFIG_PATH, "bin", "post_sync")
+                if os.access(postsync, os.X_OK):
+                        retval = portage.process.spawn(
+                                [postsync, syncuri], env=settings.environ())
+                        if retval != os.EX_OK:
+                                writemsg_level(
+                                        " %s spawn failed of %s\n" % (bad("*"), postsync,),
+                                        level=logging.ERROR, noiselevel=-1)
+
+        if(mybestpv != mypvs) and not "--quiet" in myopts:
+                print()
+                print(warn(" * ")+bold("An update to portage is available.")+" It is _highly_ recommended")
+                print(warn(" * ")+"that you update portage now, before any other packages are updated.")
+                print()
+                print(warn(" * ")+"To update portage, run 'emerge --oneshot portage' now.")
+                print()
+
+        display_news_notification(root_config, myopts)
+        return os.EX_OK
 
 def action_uninstall(settings, trees, ldpath_mtimes,
 	opts, action, files, spinner):
@@ -2854,7 +2877,7 @@ def load_emerge_config(trees=None):
 		v = os.environ.get(envvar, None)
 		if v and v.strip():
 			kwargs[k] = v
-	trees = portage.create_trees(trees=trees, **portage._native_kwargs(kwargs))
+	trees = portage.create_trees(trees=trees, **kwargs)
 
 	for root_trees in trees.values():
 		settings = root_trees["vartree"].settings
@@ -3058,7 +3081,7 @@ def expand_set_arguments(myfiles, myaction, root_config):
 	# world file, the depgraph performs set expansion later. It will get
 	# confused about where the atoms came from if it's not allowed to
 	# expand them itself.
-	do_not_expand = myaction is None
+	do_not_expand = (None, )
 	newargs = []
 	for a in myfiles:
 		if a in ("system", "world"):
@@ -3124,14 +3147,6 @@ def expand_set_arguments(myfiles, myaction, root_config):
 					for line in textwrap.wrap(msg, 50):
 						out.ewarn(line)
 				setconfig.active.append(s)
-
-				if do_not_expand:
-					# Loading sets can be slow, so skip it here, in order
-					# to allow the depgraph to indicate progress with the
-					# spinner while sets are loading (bug #461412).
-					newargs.append(a)
-					continue
-
 				try:
 					set_atoms = setconfig.getSetAtoms(s)
 				except portage.exception.PackageSetNotFound as e:
@@ -3147,18 +3162,17 @@ def expand_set_arguments(myfiles, myaction, root_config):
 					return (None, 1)
 				if myaction in unmerge_actions and \
 						not sets[s].supportsOperation("unmerge"):
-					writemsg_level("emerge: the given set '%s' does " % s + \
-						"not support unmerge operations\n",
-						level=logging.ERROR, noiselevel=-1)
+					sys.stderr.write("emerge: the given set '%s' does " % s + \
+						"not support unmerge operations\n")
 					retval = 1
 				elif not set_atoms:
-					writemsg_level("emerge: '%s' is an empty set\n" % s,
-						level=logging.INFO, noiselevel=-1)
-				else:
+					print("emerge: '%s' is an empty set" % s)
+				elif myaction not in do_not_expand:
 					newargs.extend(set_atoms)
-				for error_msg in sets[s].errors:
-					writemsg_level("%s\n" % (error_msg,),
-						level=logging.ERROR, noiselevel=-1)
+				else:
+					newargs.append(SETPREFIX+s)
+				for e in sets[s].errors:
+					print(e)
 		else:
 			newargs.append(a)
 	return (newargs, retval)
@@ -3323,7 +3337,8 @@ def run_action(settings, trees, mtimedb, myaction, myopts, myfiles,
 	del mytrees, mydb
 
 	for x in myfiles:
-		if x.endswith((".ebuild", ".tbz2")) and \
+		ext = os.path.splitext(x)[1]
+		if (ext == ".ebuild" or ext == ".tbz2") and \
 			os.path.exists(os.path.abspath(x)):
 			print(colorize("BAD", "\n*** emerging by path is broken "
 				"and may not always work!!!\n"))
