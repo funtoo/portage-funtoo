@@ -336,7 +336,7 @@ def action_build(settings, trees, mtimedb,
 				return os.EX_OK
 			favorites = mtimedb["resume"]["favorites"]
 			retval = mydepgraph.display(
-				mydepgraph.altlist(reversed=tree),
+				mydepgraph.altlist(),
 				favorites=favorites)
 			mydepgraph.display_problems()
 			mergelist_shown = True
@@ -345,7 +345,7 @@ def action_build(settings, trees, mtimedb,
 			prompt="Would you like to resume merging these packages?"
 		else:
 			retval = mydepgraph.display(
-				mydepgraph.altlist(reversed=("--tree" in myopts)),
+				mydepgraph.altlist(),
 				favorites=favorites)
 			mydepgraph.display_problems()
 			mergelist_shown = True
@@ -402,7 +402,7 @@ def action_build(settings, trees, mtimedb,
 				return os.EX_OK
 			favorites = mtimedb["resume"]["favorites"]
 			retval = mydepgraph.display(
-				mydepgraph.altlist(reversed=tree),
+				mydepgraph.altlist(),
 				favorites=favorites)
 			mydepgraph.display_problems()
 			mergelist_shown = True
@@ -410,39 +410,14 @@ def action_build(settings, trees, mtimedb,
 				return retval
 		else:
 			retval = mydepgraph.display(
-				mydepgraph.altlist(reversed=("--tree" in myopts)),
+				mydepgraph.altlist(),
 				favorites=favorites)
 			mydepgraph.display_problems()
 			mergelist_shown = True
 			if retval != os.EX_OK:
 				return retval
-			if "--buildpkgonly" in myopts:
-				graph_copy = mydepgraph._dynamic_config.digraph.copy()
-				removed_nodes = set()
-				for node in graph_copy:
-					if not isinstance(node, Package) or \
-						node.operation == "nomerge":
-						removed_nodes.add(node)
-				graph_copy.difference_update(removed_nodes)
-				if not graph_copy.hasallzeros(ignore_priority = \
-					DepPrioritySatisfiedRange.ignore_medium):
-					print("\n!!! --buildpkgonly requires all dependencies to be merged.")
-					print("!!! You have to merge the dependencies before you can build this package.\n")
-					return 1
+
 	else:
-		if "--buildpkgonly" in myopts:
-			graph_copy = mydepgraph._dynamic_config.digraph.copy()
-			removed_nodes = set()
-			for node in graph_copy:
-				if not isinstance(node, Package) or \
-					node.operation == "nomerge":
-					removed_nodes.add(node)
-			graph_copy.difference_update(removed_nodes)
-			if not graph_copy.hasallzeros(ignore_priority = \
-				DepPrioritySatisfiedRange.ignore_medium):
-				print("\n!!! --buildpkgonly requires all dependencies to be merged.")
-				print("!!! Cannot merge requested packages. Merge deps and try again.\n")
-				return 1
 
 		if not mergelist_shown:
 			# If we haven't already shown the merge list above, at
