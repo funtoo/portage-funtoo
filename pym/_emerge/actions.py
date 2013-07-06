@@ -2089,12 +2089,11 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
                 
                 print(">>> Starting initial git clone with "+syncuri+"...")
                 
-                # We cannot use 'su -c' because if you are cloning a git repo via ssh, there won't be a method
-                # to provide the password to git. the -c option doesn't give a controlling terminal thus any password prompts that git asks for
-                # will not be shown, and your clone will fail with permission denied.
+                # 2013-07-05 Ryan Harris <rh1@funtoo.org>
+                # Reverting this back to using 'su' so it doesn't ignore the SYNC_USER setting. Cloning with ssh should still be
+                # possible using keys.
 
-                if portage.process.spawn_bash("umask %s && cd %s && git clone --depth=1 %s %s && chown -R %s:%s %s" 
-                                           % (syncumask, work_path, portage._shell_quote(syncuri), repo_dir, syncuser, syncuser, work_path)) != os.EX_OK:
+                if portage.process.spawn_bash("su - %s -s /bin/sh -c 'umask %s && cd %s && exec git clone --depth=1 %s %s'" % (syncuser, syncumask, work_path, portage._shell_quote(syncuri), repo_dir)) != os.EX_OK:
                         print("!!! git clone error; exiting.")
                         sys.exit(1)
         
@@ -2122,12 +2121,11 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 
                         print(">>> Starting initial git clone with "+syncuri+"...")
                         
-                        # We cannot use 'su -c' because if you are cloning a git repo via ssh, there won't be a method
-                        # to provide the password to git. the -c option doesn't give a controlling terminal thus any password prompts that git asks for
-                        # will not be shown, and your clone will fail with permission denied.
+                        # 2013-07-05 Ryan Harris <rh1@funtoo.org>
+                        # Reverting this back to using 'su' so it doesn't ignore the SYNC_USER setting. Cloning with ssh should still be
+                        # possible using keys.
 
-                        if portage.process.spawn_bash("umask %s && cd %s && git clone --depth=1 %s %s && chown -R %s:%s %s" 
-                                                   % (syncumask, repo_path_fin, portage._shell_quote(syncuri), repo_dir, syncuser, syncuser, repo_dir)) != os.EX_OK:
+                        if portage.process.spawn_bash("su - %s -s /bin/sh -c 'umask %s && cd %s && exec git clone --depth=1 %s %s'" % (syncuser, syncumask, repo_path_fin, portage._shell_quote(syncuri), repo_dir)) != os.EX_OK:
                                 print("!!! git clone error; exiting.")
                                 sys.exit(1)
                         
@@ -2142,11 +2140,11 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 
                 print(">>> Starting git pull...")
 
-                # We cannot use 'su -c' because if you are cloning a git repo via ssh, there won't be a method
-                # to provide the password to git. the -c option doesn't give a controlling terminal thus any password prompts that git asks for
-                # will not be shown, and your clone will fail with permission denied.
+                # 2013-07-05 Ryan Harris <rh1@funtoo.org>
+                # Reverting this back to using 'su' so it doesn't ignore the SYNC_USER setting. Cloning with ssh should still be
+                # possible using keys.
 
-                exitcode = portage.process.spawn_bash("umask %s && cd %s && exec git pull --no-stat && chown -R %s:%s %s" % (syncumask, portage._shell_quote(myportdir), syncuser, syncuser, portage._shell_quote(myportdir),))
+                exitcode = portage.process.spawn_bash("su - %s -s /bin/sh -c 'umask %s && cd %s && exec git pull --no-stat'" % (syncuser, syncumask, portage._shell_quote(myportdir)))
                 if exitcode != os.EX_OK:
                         msg = "!!! git pull error in %s." % myportdir
                         emergelog(xterm_titles, msg)
