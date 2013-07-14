@@ -2119,7 +2119,7 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 
 			print(">>> Starting initial git clone with "+syncuri+"...")
 
-			if portage.process.spawn_bash("umask {mask} && cd {path} && exec git clone --depth=1 {uri} {dir}".format(mask = syncumask, path = work_path, uri = portage._shell_quote(syncuri), dir = repo_dir), uid = syncuser_uid, gid = syncuser_gid) != os.EX_OK:
+			if portage.process.spawn_bash("umask {mask} && cd {path} && exec git clone --depth=1 {uri} {dir}".format(mask = syncumask, path = repo_path_fin, uri = portage._shell_quote(syncuri), dir = repo_dir), uid = syncuser_uid, gid = syncuser_gid) != os.EX_OK:
 				print("!!! git clone error; exiting.")
 				sys.exit(1)
 
@@ -2128,22 +2128,23 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 			if portage.process.spawn_bash("cd %s && mv %s/* .> /dev/null 2>&1; mv %s/.* . > /dev/null 2>&1; rmdir %s" % (repo_path_fin, repo_dir, repo_dir, repo_path_tmpin)) != os.EX_OK:
 				print("!!! Couldn't move %s into it's final location %s; exiting." % (repo_path_tmpin, repo_path_fin))
 				sys.exit(1)
-		if portage.process.spawn_bash("cd {path} >/dev/null 2>&1".format(path = myportdir), uid = syncuser_uid, gid = syncuser_gid) != os.EX_OK:
-			print("!!! Portage tree at %s is not reachable by user %s; please adjust permissions to correct." %  ( myportdir, syncuser ))
-			sys.exit(1)
+		else:
+			if portage.process.spawn_bash("cd {path} >/dev/null 2>&1".format(path = myportdir), uid = syncuser_uid, gid = syncuser_gid) != os.EX_OK:
+				print("!!! Portage tree at %s is not reachable by user %s; please adjust permissions to correct." %  ( myportdir, syncuser ))
+				sys.exit(1)
 
 
-		print(">>> Starting git pull...")
+			print(">>> Starting git pull...")
 
-		exitcode = portage.process.spawn_bash("umask {mask} && cd {dir} && exec git pull --no-stat".format(mask = syncumask, dir = portage._shell_quote(myportdir)), uid = syncuser_uid, gid = syncuser_gid)
-		if exitcode != os.EX_OK:
-			msg = "!!! git pull error in %s." % myportdir
+			exitcode = portage.process.spawn_bash("umask {mask} && cd {dir} && exec git pull --no-stat".format(mask = syncumask, dir = portage._shell_quote(myportdir)), uid = syncuser_uid, gid = syncuser_gid)
+			if exitcode != os.EX_OK:
+				msg = "!!! git pull error in %s." % myportdir
+				emergelog(xterm_titles, msg)
+				writemsg_level(msg + "\n", level=logging.ERROR, noiselevel=-1)
+				return exitcode
+			msg = ">>> Git pull in %s successful" % myportdir
 			emergelog(xterm_titles, msg)
-			writemsg_level(msg + "\n", level=logging.ERROR, noiselevel=-1)
-			return exitcode
-		msg = ">>> Git pull in %s successful" % myportdir
-		emergelog(xterm_titles, msg)
-		writemsg_level(msg + "\n")
+			writemsg_level(msg + "\n")
 
 	# Reload the whole config from scratch.
 	portage._sync_disabled_warnings = False
