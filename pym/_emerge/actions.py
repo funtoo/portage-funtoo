@@ -2011,140 +2011,147 @@ def action_sync(settings, trees, mtimedb, myopts, myaction):
 	except OSError:
 		st = None
 
+	# Get syncuser settings
 	syncuri = settings.get("SYNC", "").strip()
 	syncuser = settings.get("SYNC_USER", "root").strip()
 	syncumask = settings.get("SYNC_UMASK", "022").strip()
-	updatecache_flg = False
-	git = False
-	syncuser_uid = pwd.getpwnam(syncuser).pw_uid
-	syncuser_gid = pwd.getpwnam(syncuser).pw_gid
 
+	# We need uid, gid, and HOME for syncuser. Default to root is we don't find it.
+	syncuser_uid = 0
+	syncuser_gid = 0
+	sync_env = settings.environ()
+	try:
+		syncuser_uid = pwd.getpwnam(syncuser).pw_uid
+	except KeyError:
+		pass
+	try:
+		syncuser_gid = pwd.getpwnam(syncuser).pw_gid
+	except KeyError:
+		pass
+	try:
+		homedir = pwd.getpwuid(syncuser_uid).pw_dir
+	except KeyError:
+		pass
+	else:
+		sync_env["HOME"] = homedir
+
+	updatecache_flg = False
+
+	# Skip sync if metadata is requested
 	if myaction == "metadata":
 		print("skipping sync")
 		updatecache_flg = True
-	if portage.process.find_binary("git") is None:
-		msg = ["Command not found: git", "Type \"emerge dev-vcs/git\" to enable git support."]
-		for l in msg:
-			writemsg_level("!!! %s\n" % l, level=logging.ERROR, noiselevel=-1)
-		return 1
-	updatecache_flg = True
-
-	# These variables have been moved here so that we don't have to redefine them again later
-	# (if a portdir exists but it's an empty directory or if it's not a git repo aka .git doesn't exist)
-
-	# A few tricks are required to get git cloning by a non-root user. We will create a temporary working directory called work_path
-	# (/usr/portage.sync). We will make sure this directory is owned by the SYNC_USER user, and then we will use "su" to run git clone
-	# inside this directory, so that git can create the initial repository directory with the proper user permissiosn. After git
-	# clone completes, we will move our new portage tree in repo_path_tmp to repo_path_fin, its final location. And then we will remove
-	# work_path, our temporary directory.
-
-	# common_path = /usr
-	# repo_dir = portage
-	# work_path = /usr/portage.sync
-	# repo_path_tmp = /usr/portage.sync/portage
-	# repo_path_fin = /usr/portage
-
-	common_path = os.path.dirname(myportdir)
-	repo_dir = os.path.basename(myportdir)
-	work_path = os.path.join(common_path, repo_dir + ".sync")
-	repo_path_tmp = os.path.join(work_path, repo_dir)
-	repo_path_fin = os.path.join(common_path, repo_dir)
-	repo_path_tmpin = os.path.join(repo_path_fin, repo_dir)
-
-	if not os.path.exists(myportdir):
-		if not syncuri:
-			writemsg_level("SYNC is undefined.\nPlease set SYNC to the remote location of the Portage repository.\n", noiselevel=-1, level=logging.ERROR)
+	else:
+		if portage.process.find_binary("git") is None:
+			msg = ["Command not found: git", "Type \"emerge dev-vcs/git\" to enable git support."]
+			for l in msg:
+				writemsg_level("!!! %s\n" % l, level=logging.ERROR, noiselevel=-1)
 			return 1
 
-		print(">>> Using %s as temporary clone directory..." % repo_path_tmp)
+		updatecache_flg = True
 
-		# if the directories we will be using exist, try to remove them, non-recursively. If that doesn't work, there are files in them
-		# and throw an error message, requesting the user remove these files so that sync can proceed.
+		# These variables have been moved here so that we don't have to redefine them again later
+		# (if a portdir exists but it's an empty directory or if it's not a git repo aka .git doesn't exist)
 
-		for checkdir in [ repo_path_tmp, work_path ]:
-			if os.path.exists(checkdir):
-				try:
-					os.rmdir(checkdir)
-				except OSError as e:
-					print("!!! %s exists and contains files. Please remove so that clone can proceed." % checkdir )
-					sys.exit(1)
+		# A few tricks are required to get git cloning by a non-root user. We will create a temporary working directory called work_path
+		# (/usr/portage.sync). We will make sure this directory is owned by the SYNC_USER user, and then we will use "su" to run git clone
+		# inside this directory, so that git can create the initial repository directory with the proper user permissiosn. After git
+		# clone completes, we will move our new portage tree in repo_path_tmp to repo_path_fin, its final location. And then we will remove
+		# work_path, our temporary directory.
 
-		# at this point, we want to create an initial portage.sync directory, owned by the user, into which we can use su to run git as
-		# the user, and create the new portage tree directory owned by the user.
+		# common_path = /usr
+		# repo_dir = portage
+		# work_path = /usr/portage.sync
+		# repo_path_tmp = /usr/portage.sync/portage
+		# repo_path_fin = /usr/portage
 
-		if not os.path.exists(common_path):
-			# create common path directory, ie. /var/git, if it doesn't exist.
-			os.makedirs(common_path)
+		common_path = os.path.dirname(myportdir)
+		repo_dir = os.path.basename(myportdir)
+		work_path = os.path.join(common_path, repo_dir + ".sync")
+		repo_path_tmp = os.path.join(work_path, repo_dir)
+		repo_path_fin = os.path.join(common_path, repo_dir)
+		repo_path_tmpin = os.path.join(repo_path_fin, repo_dir)
 
-		if portage.process.spawn_bash("cd %s && umask %s && install -d -o %s -g %s %s" % ( common_path, syncumask, syncuser, syncuser_gid, work_path)) != os.EX_OK:
-			print("!!! Unable to create initial sync directory %s; exiting." % work_path)
-			sys.exit(1)
+		if not os.path.exists(myportdir):
+			if not syncuri:
+				writemsg_level("SYNC is undefined.\nPlease set SYNC to the remote location of the Portage repository.\n", noiselevel=-1, level=logging.ERROR)
+				return 1
 
-		# We've created our temporary work directory, but is the final location actually reachable - ie. readable, by SYNC_USER? We'll
-		# find out now.
+			print(">>> Using %s as temporary clone directory..." % repo_path_tmp)
 
-		if portage.process.spawn_bash("cd {path} >/dev/null 2>&1".format(path = common_path), uid=syncuser_uid, gid = syncuser_gid) != os.EX_OK:
-			print("!!! Path %s is not reachable by user %s; please adjust permissions or SYNC_USER setting to correct." %  ( common_path, syncuser ))
-			sys.exit(1)
+			# if the directories we will be using exist, try to remove them, non-recursively. If that doesn't work, there are files in them
+			# and throw an error message, requesting the user remove these files so that sync can proceed.
+			for checkdir in [ repo_path_tmp, work_path ]:
+				if os.path.exists(checkdir):
+					try:
+						os.rmdir(checkdir)
+					except OSError as e:
+						print("!!! %s exists and contains files. Please remove so that clone can proceed." % checkdir )
+						sys.exit(1)
 
-		# Everything looks OK, so now we will clone the repository:
+			# at this point, we want to create an initial portage.sync directory, owned by the user, into which we can use su to run git as
+			# the user, and create the new portage tree directory owned by the user.
+			if not os.path.exists(common_path):
+				# create common path directory, ie. /var/git, if it doesn't exist.
+				os.makedirs(common_path)
+			if portage.process.spawn_bash("umask {mask} && cd {path} && install -d -o {user} -g {group} {w_path}".format(mask = syncumask, path = common_path, user = syncuser, group = syncuser_gid, w_path = work_path)) != os.EX_OK:
+				print("!!! Unable to create initial sync directory %s; exiting." % work_path)
+				sys.exit(1)
 
-		print(">>> Starting initial git clone with "+syncuri+"...")
+			# We've created our temporary work directory, but is the final location actually reachable - ie. readable, by SYNC_USER? We'll
+			# find out now.
+			if portage.process.spawn_bash("cd {path} >/dev/null 2>&1".format(path = common_path), uid = syncuser_uid, gid = syncuser_gid, env = sync_env) != os.EX_OK:
+				print("!!! Path %s is not reachable by user %s; please adjust permissions or SYNC_USER setting to correct." %  ( common_path, syncuser ))
+				sys.exit(1)
 
-		if portage.process.spawn_bash("umask {mask} && cd {path} && exec git clone --depth=1 {uri} {dir}".format(mask = syncumask, path = work_path, uri = portage._shell_quote(syncuri), dir = repo_dir), uid = syncuser_uid, gid = syncuser_gid) != os.EX_OK:
-			print("!!! git clone error; exiting.")
-			sys.exit(1)
-
-		# Our clone should now exist in the temporary location, now move it to the final location, as root:
-
-		if portage.process.spawn_bash("mv %s %s" % (repo_path_tmp, repo_path_fin)) != os.EX_OK:
-			print("!!! Couldn't move %s into final location %s; exiting." % ( repo_path_tmp, repo_path_fin ))
-			sys.exit(1)
-
-		# Clean up after ourselves:
-		portage.process.spawn_bash("rm -rf %s" % (work_path))
-	else:
-		# If the myportdir exists but it's not a repository (or it's an empty folder)
-		# Just delete all files (including dot files in this directory) so that it doesn't complain for filesystems like zfs, that make a
-		# directory that is not unmountable (Because it is a directory under filesystem control).
-
-		if not os.path.exists(myportdir+"/.git"):
-			print(">>> This is not a git repository. The folder is either empty or has other data. Removing contents inside this folder...")
-
-			portage.process.spawn_bash("cd %s && rm -rf .* > /dev/null 2>&1; rm -rf * > /dev/null 2>&1" % (myportdir))
-
-			# Now that the folder is empty, we end up in the same situation as if it were going to be an initial clone
-			# (because technically it is an initial clone. Especially for the situation with zfs where it makes an empty directory).
-			# So we should do the same steps as if we were making an initial clone.
-
+			# Everything looks OK, so now we will clone the repository:
 			print(">>> Starting initial git clone with "+syncuri+"...")
-
-			if portage.process.spawn_bash("umask {mask} && cd {path} && exec git clone --depth=1 {uri} {dir}".format(mask = syncumask, path = repo_path_fin, uri = portage._shell_quote(syncuri), dir = repo_dir), uid = syncuser_uid, gid = syncuser_gid) != os.EX_OK:
+			if portage.process.spawn_bash("umask {mask} && cd {path} && exec git clone --depth=1 {uri} {dir}".format(mask = syncumask, path = work_path, uri = portage._shell_quote(syncuri), dir = repo_dir), uid = syncuser_uid, gid = syncuser_gid, env = sync_env) != os.EX_OK:
 				print("!!! git clone error; exiting.")
 				sys.exit(1)
 
-			# Move the clone from the temporary location to the final location (and then delete the dir - the rmdir should be left at the end so a successful return code can be used)
-
-			if portage.process.spawn_bash("cd %s && mv %s/* .> /dev/null 2>&1; mv %s/.* . > /dev/null 2>&1; rmdir %s" % (repo_path_fin, repo_dir, repo_dir, repo_path_tmpin)) != os.EX_OK:
-				print("!!! Couldn't move %s into it's final location %s; exiting." % (repo_path_tmpin, repo_path_fin))
+			# Our clone should now exist in the temporary location, now move it to the final location, as root:
+			if portage.process.spawn_bash("mv %s %s" % (repo_path_tmp, repo_path_fin)) != os.EX_OK:
+				print("!!! Couldn't move %s into final location %s; exiting." % ( repo_path_tmp, repo_path_fin ))
 				sys.exit(1)
+
+			# Clean up after ourselves:
+			portage.process.spawn_bash("rm -rf %s" % (work_path))
 		else:
-			if portage.process.spawn_bash("cd {path} >/dev/null 2>&1".format(path = myportdir), uid = syncuser_uid, gid = syncuser_gid) != os.EX_OK:
-				print("!!! Portage tree at %s is not reachable by user %s; please adjust permissions to correct." %  ( myportdir, syncuser ))
-				sys.exit(1)
+			# If the myportdir exists but it's not a repository (or it's an empty folder)
+			# Just delete all files (including dot files in this directory) so that it doesn't complain for filesystems like zfs, that make a
+			# directory that is not unmountable (Because it is a directory under filesystem control).
+			if not os.path.exists(myportdir+"/.git"):
+				print(">>> This is not a git repository. The folder is either empty or has other data. Removing contents inside this folder...")
+				portage.process.spawn_bash("cd %s && rm -rf .* > /dev/null 2>&1; rm -rf * > /dev/null 2>&1" % (myportdir))
 
+				# Now that the folder is empty, we end up in the same situation as if it were going to be an initial clone
+				# (because technically it is an initial clone. Especially for the situation with zfs where it makes an empty directory).
+				# So we should do the same steps as if we were making an initial clone.
+				print(">>> Starting initial git clone with "+syncuri+"...")
+				if portage.process.spawn_bash("umask {mask} && cd {path} && exec git clone --depth=1 {uri} {dir}".format(mask = syncumask, path = repo_path_fin, uri = portage._shell_quote(syncuri), dir = repo_dir), uid = syncuser_uid, gid = syncuser_gid, env = sync_env) != os.EX_OK:
+					print("!!! git clone error; exiting.")
+					sys.exit(1)
 
-			print(">>> Starting git pull...")
+				# Move the clone from the temporary location to the final location (and then delete the dir - the rmdir should be left at the end so a successful return code can be used)
+				if portage.process.spawn_bash("cd %s && mv %s/* .> /dev/null 2>&1; mv %s/.* . > /dev/null 2>&1; rmdir %s" % (repo_path_fin, repo_dir, repo_dir, repo_path_tmpin)) != os.EX_OK:
+					print("!!! Couldn't move %s into it's final location %s; exiting." % (repo_path_tmpin, repo_path_fin))
+					sys.exit(1)
+			else:
+				if portage.process.spawn_bash("cd {path} >/dev/null 2>&1".format(path = myportdir), uid = syncuser_uid, gid = syncuser_gid, env = sync_env) != os.EX_OK:
+					print("!!! Portage tree at %s is not reachable by user %s; please adjust permissions to correct." %  ( myportdir, syncuser ))
+					sys.exit(1)
 
-			exitcode = portage.process.spawn_bash("umask {mask} && cd {dir} && exec git pull --no-stat".format(mask = syncumask, dir = portage._shell_quote(myportdir)), uid = syncuser_uid, gid = syncuser_gid)
-			if exitcode != os.EX_OK:
-				msg = "!!! git pull error in %s." % myportdir
+				print(">>> Starting git pull...")
+				exitcode = portage.process.spawn_bash("umask {mask} && cd {dir} && exec git pull --no-stat".format(mask = syncumask, dir = portage._shell_quote(myportdir)), uid = syncuser_uid, gid = syncuser_gid, env = sync_env)
+				if exitcode != os.EX_OK:
+					msg = "!!! git pull error in %s." % myportdir
+					emergelog(xterm_titles, msg)
+					writemsg_level(msg + "\n", level=logging.ERROR, noiselevel=-1)
+					return exitcode
+				msg = ">>> Git pull in %s successful" % myportdir
 				emergelog(xterm_titles, msg)
-				writemsg_level(msg + "\n", level=logging.ERROR, noiselevel=-1)
-				return exitcode
-			msg = ">>> Git pull in %s successful" % myportdir
-			emergelog(xterm_titles, msg)
-			writemsg_level(msg + "\n")
+				writemsg_level(msg + "\n")
 
 	# Reload the whole config from scratch.
 	portage._sync_disabled_warnings = False
