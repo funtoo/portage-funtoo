@@ -1,14 +1,18 @@
 # portage.py -- core Portage functionality
-# Copyright 1998-2013 Gentoo Foundation
+# Copyright 1998-2014 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
 
 
 import atexit
 import errno
+import fcntl
 import platform
 import signal
+import socket
+import struct
 import sys
 import traceback
+import os as _os
 
 from portage import os
 from portage import _encodings
@@ -20,6 +24,7 @@ portage.proxy.lazyimport.lazyimport(globals(),
 
 from portage.const import BASH_BINARY, SANDBOX_BINARY, FAKEROOT_BINARY
 from portage.exception import CommandNotFound
+from portage.util._ctypes import find_library, LoadLibrary, ctypes
 
 try:
 	import resource
@@ -28,13 +33,31 @@ except ImportError:
 	max_fd_limit = 256
 
 if sys.hexversion >= 0x3000000:
+	# pylint: disable=W0622
 	basestring = str
 
-for _fd_dir in ("/dev/fd", "/proc/self/fd"):
+# Support PEP 446 for Python >=3.4
+try:
+	_set_inheritable = _os.set_inheritable
+except AttributeError:
+	_set_inheritable = None
+
+try:
+	_FD_CLOEXEC = fcntl.FD_CLOEXEC
+except AttributeError:
+	_FD_CLOEXEC = None
+
+# Prefer /proc/self/fd if available (/dev/fd
+# doesn't work on solaris, see bug #474536).
+for _fd_dir in ("/proc/self/fd", "/dev/fd"):
 	if os.path.isdir(_fd_dir):
 		break
 	else:
 		_fd_dir = None
+
+# /dev/fd does not work on FreeBSD, see bug #478446
+if platform.system() in ('FreeBSD',) and _fd_dir == '/dev/fd':
+	_fd_dir = None
 
 if _fd_dir is not None:
 	def get_open_fds():
@@ -50,6 +73,13 @@ if _fd_dir is not None:
 				if e.errno != errno.EAGAIN:
 					raise
 				return range(max_fd_limit)
+
+elif os.path.isdir("/proc/%s/fd" % os.getpid()):
+	# In order for this function to work in forked subprocesses,
+	# os.getpid() must be called from inside the function.
+	def get_open_fds():
+		return (int(fd) for fd in os.listdir("/proc/%s/fd" % os.getpid())
+			if fd.isdigit())
 
 else:
 	def get_open_fds():
@@ -88,14 +118,14 @@ def spawn_bash(mycommand, debug=False, opt_name=None, **keywords):
 def spawn_sandbox(mycommand, opt_name=None, **keywords):
 	if not sandbox_capable:
 		return spawn_bash(mycommand, opt_name=opt_name, **keywords)
-	args=[SANDBOX_BINARY]
+	args = [SANDBOX_BINARY]
 	if not opt_name:
 		opt_name = os.path.basename(mycommand.split()[0])
 	args.append(mycommand)
 	return spawn(args, opt_name=opt_name, **keywords)
 
 def spawn_fakeroot(mycommand, fakeroot_state=None, opt_name=None, **keywords):
-	args=[FAKEROOT_BINARY]
+	args = [FAKEROOT_BINARY]
 	if not opt_name:
 		opt_name = os.path.basename(mycommand.split()[0])
 	if fakeroot_state:
@@ -146,30 +176,28 @@ def run_exitfuncs():
 
 atexit.register(run_exitfuncs)
 
-# We need to make sure that any processes spawned are killed off when
-# we exit. spawn() takes care of adding and removing pids to this list
-# as it creates and cleans up processes.
-spawned_pids = []
-def cleanup():
-	while spawned_pids:
-		pid = spawned_pids.pop()
+# It used to be necessary for API consumers to remove pids from spawned_pids,
+# since otherwise it would accumulate a pids endlessly. Now, spawned_pids is
+# just an empty dummy list, so for backward compatibility, ignore ValueError
+# for removal on non-existent items.
+class _dummy_list(list):
+	def remove(self, item):
+		# TODO: Trigger a DeprecationWarning here, after stable portage
+		# has dummy spawned_pids.
 		try:
-			# With waitpid and WNOHANG, only check the
-			# first element of the tuple since the second
-			# element may vary (bug #337465).
-			if os.waitpid(pid, os.WNOHANG)[0] == 0:
-				os.kill(pid, signal.SIGTERM)
-				os.waitpid(pid, 0)
-		except OSError:
-			# This pid has been cleaned up outside
-			# of spawn().
+			list.remove(self, item)
+		except ValueError:
 			pass
 
-atexit_register(cleanup)
+spawned_pids = _dummy_list()
+
+def cleanup():
+	pass
 
 def spawn(mycommand, env={}, opt_name=None, fd_pipes=None, returnpid=False,
           uid=None, gid=None, groups=None, umask=None, logfile=None,
-          path_lookup=True, pre_exec=None, close_fds=True):
+          path_lookup=True, pre_exec=None, close_fds=True, unshare_net=False,
+          unshare_ipc=False, cgroup=None):
 	"""
 	Spawns a given command.
 	
@@ -202,7 +230,13 @@ def spawn(mycommand, env={}, opt_name=None, fd_pipes=None, returnpid=False,
 	@param close_fds: If True, then close all file descriptors except those
 		referenced by fd_pipes (default is True).
 	@type close_fds: Boolean
-	
+	@param unshare_net: If True, networking will be unshared from the spawned process
+	@type unshare_net: Boolean
+	@param unshare_ipc: If True, IPC will be unshared from the spawned process
+	@type unshare_ipc: Boolean
+	@param cgroup: CGroup path to bind the process to
+	@type cgroup: String
+
 	logfile requires stdout and stderr to be assigned to this process (ie not pointed
 	   somewhere else.)
 	
@@ -265,6 +299,12 @@ def spawn(mycommand, env={}, opt_name=None, fd_pipes=None, returnpid=False,
 		fd_pipes[1] = pw
 		fd_pipes[2] = pw
 
+	# This caches the libc library lookup in the current
+	# process, so that it's only done once rather than
+	# for each child process.
+	if unshare_net or unshare_ipc:
+		find_library("c")
+
 	parent_pid = os.getpid()
 	pid = None
 	try:
@@ -273,7 +313,8 @@ def spawn(mycommand, env={}, opt_name=None, fd_pipes=None, returnpid=False,
 		if pid == 0:
 			try:
 				_exec(binary, mycommand, opt_name, fd_pipes,
-					env, gid, groups, uid, umask, pre_exec, close_fds)
+					env, gid, groups, uid, umask, pre_exec, close_fds,
+					unshare_net, unshare_ipc, cgroup)
 			except SystemExit:
 				raise
 			except Exception as e:
@@ -299,7 +340,6 @@ def spawn(mycommand, env={}, opt_name=None, fd_pipes=None, returnpid=False,
 
 	# Add the pid to our local and the global pid lists.
 	mypids.append(pid)
-	spawned_pids.append(pid)
 
 	# If we started a tee process the write side of the pipe is no
 	# longer needed, so close it.
@@ -322,10 +362,6 @@ def spawn(mycommand, env={}, opt_name=None, fd_pipes=None, returnpid=False,
 		# and wait for it.
 		retval = os.waitpid(pid, 0)[1]
 
-		# When it's done, we can remove it from the
-		# global pid list as well.
-		spawned_pids.remove(pid)
-
 		if retval:
 			# If it failed, kill off anything else that
 			# isn't dead yet.
@@ -336,7 +372,6 @@ def spawn(mycommand, env={}, opt_name=None, fd_pipes=None, returnpid=False,
 				if os.waitpid(pid, os.WNOHANG)[0] == 0:
 					os.kill(pid, signal.SIGTERM)
 					os.waitpid(pid, 0)
-				spawned_pids.remove(pid)
 
 			# If it got a signal, return the signal that was sent.
 			if (retval & 0xff):
@@ -349,7 +384,7 @@ def spawn(mycommand, env={}, opt_name=None, fd_pipes=None, returnpid=False,
 	return 0
 
 def _exec(binary, mycommand, opt_name, fd_pipes, env, gid, groups, uid, umask,
-	pre_exec, close_fds):
+	pre_exec, close_fds, unshare_net, unshare_ipc, cgroup):
 
 	"""
 	Execute a given binary with options
@@ -374,10 +409,16 @@ def _exec(binary, mycommand, opt_name, fd_pipes, env, gid, groups, uid, umask,
 	@type umask: Integer
 	@param pre_exec: A function to be called with no arguments just prior to the exec call.
 	@type pre_exec: callable
+	@param unshare_net: If True, networking will be unshared from the spawned process
+	@type unshare_net: Boolean
+	@param unshare_ipc: If True, IPC will be unshared from the spawned process
+	@type unshare_ipc: Boolean
+	@param cgroup: CGroup path to bind the process to
+	@type cgroup: String
 	@rtype: None
 	@return: Never returns (calls os.execve)
 	"""
-	
+
 	# If the process we're creating hasn't been given a name
 	# assign it the name of the executable.
 	if not opt_name:
@@ -408,7 +449,53 @@ def _exec(binary, mycommand, opt_name, fd_pipes, env, gid, groups, uid, umask,
 	# the parent process (see bug #289486).
 	signal.signal(signal.SIGQUIT, signal.SIG_DFL)
 
-	_setup_pipes(fd_pipes, close_fds=close_fds)
+	_setup_pipes(fd_pipes, close_fds=close_fds, inheritable=True)
+
+	# Add to cgroup
+	# it's better to do it from the child since we can guarantee
+	# it is done before we start forking children
+	if cgroup:
+		with open(os.path.join(cgroup, 'cgroup.procs'), 'a') as f:
+			f.write('%d\n' % os.getpid())
+
+	# Unshare (while still uid==0)
+	if unshare_net or unshare_ipc:
+		filename = find_library("c")
+		if filename is not None:
+			libc = LoadLibrary(filename)
+			if libc is not None:
+				CLONE_NEWIPC = 0x08000000
+				CLONE_NEWNET = 0x40000000
+
+				flags = 0
+				if unshare_net:
+					flags |= CLONE_NEWNET
+				if unshare_ipc:
+					flags |= CLONE_NEWIPC
+
+				try:
+					if libc.unshare(flags) != 0:
+						writemsg("Unable to unshare: %s\n" % (
+							errno.errorcode.get(ctypes.get_errno(), '?')),
+							noiselevel=-1)
+					else:
+						if unshare_net:
+							# 'up' the loopback
+							IFF_UP = 0x1
+							ifreq = struct.pack('16sh', b'lo', IFF_UP)
+							SIOCSIFFLAGS = 0x8914
+
+							sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, 0)
+							try:
+								fcntl.ioctl(sock, SIOCSIFFLAGS, ifreq)
+							except IOError as e:
+								writemsg("Unable to enable loopback interface: %s\n" % (
+									errno.errorcode.get(e.errno, '?')),
+									noiselevel=-1)
+							sock.close()
+				except AttributeError:
+					# unshare() not supported by libc
+					pass
 
 	# Set requested process permissions.
 	if gid:
@@ -427,7 +514,7 @@ def _exec(binary, mycommand, opt_name, fd_pipes, env, gid, groups, uid, umask,
 	# And switch to the new process.
 	os.execve(binary, myargs, env)
 
-def _setup_pipes(fd_pipes, close_fds=True):
+def _setup_pipes(fd_pipes, close_fds=True, inheritable=None):
 	"""Setup pipes for a forked process.
 
 	Even when close_fds is False, file descriptors referenced as
@@ -463,6 +550,7 @@ def _setup_pipes(fd_pipes, close_fds=True):
 	actually does nothing in this case), which avoids possible
 	interference.
 	"""
+
 	reverse_map = {}
 	# To protect from cases where direct assignment could
 	# clobber needed fds ({1:2, 2:1}) we create a reverse map
@@ -482,6 +570,7 @@ def _setup_pipes(fd_pipes, close_fds=True):
 	while reverse_map:
 
 		oldfd, newfds = reverse_map.popitem()
+		old_fdflags = None
 
 		for newfd in newfds:
 			if newfd in reverse_map:
@@ -492,8 +581,31 @@ def _setup_pipes(fd_pipes, close_fds=True):
 				# unused file discriptors).
 				backup_fd = os.dup(newfd)
 				reverse_map[backup_fd] = reverse_map.pop(newfd)
+
 			if oldfd != newfd:
 				os.dup2(oldfd, newfd)
+				if _set_inheritable is not None:
+					# Don't do this unless _set_inheritable is available,
+					# since it's used below to ensure correct state, and
+					# otherwise /dev/null stdin fails to inherit (at least
+					# with Python versions from 3.1 to 3.3).
+					if old_fdflags is None:
+						old_fdflags = fcntl.fcntl(oldfd, fcntl.F_GETFD)
+					fcntl.fcntl(newfd, fcntl.F_SETFD, old_fdflags)
+
+			if _set_inheritable is not None:
+
+				inheritable_state = None
+				if not (old_fdflags is None or _FD_CLOEXEC is None):
+					inheritable_state = not bool(old_fdflags & _FD_CLOEXEC)
+
+				if inheritable is not None:
+					if inheritable_state is not inheritable:
+						_set_inheritable(newfd, inheritable)
+
+				elif newfd in (0, 1, 2):
+					if inheritable_state is not True:
+						_set_inheritable(newfd, True)
 
 		if oldfd not in fd_pipes:
 			# If oldfd is not a key in fd_pipes, then it's safe
@@ -522,8 +634,16 @@ def find_binary(binary):
 	@rtype: None or string
 	@return: full path to binary or None if the binary could not be located.
 	"""
-	for path in os.environ.get("PATH", "").split(":"):
-		filename = "%s/%s" % (path, binary)
-		if os.access(filename, os.X_OK) and os.path.isfile(filename):
+	paths = os.environ.get("PATH", "")
+	if sys.hexversion >= 0x3000000 and isinstance(binary, bytes):
+		# return bytes when input is bytes
+		paths = paths.encode(sys.getfilesystemencoding(), 'surrogateescape')
+		paths = paths.split(b':')
+	else:
+		paths = paths.split(':')
+
+	for path in paths:
+		filename = _os.path.join(path, binary)
+		if _os.access(filename, os.X_OK) and _os.path.isfile(filename):
 			return filename
 	return None
