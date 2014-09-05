@@ -192,10 +192,13 @@ class SyncRepos(object):
 		msgs.extend(self._check_updates())
 		display_news_notification(self.emerge_config.target_config,
 			self.emerge_config.opts)
+		rcode = sync_manager.perform_post_sync_hook('PORTAGE_SYNC_HOOK_FINAL')
 		if retvals:
 			msgs.extend(self.rmessage(retvals, 'sync'))
 		else:
 			msgs.append(self.rmessage(('None', os.EX_OK), 'sync'))
+		if rcode:
+			msgs.append(self.rmessage('None', rcode), 'post-sync')
 		if return_messages:
 			return msgs
 		return
