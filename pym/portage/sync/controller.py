@@ -186,7 +186,7 @@ class SyncManager(object):
 		if st is None:
 			writemsg_level(">>> '%s' not found, creating it." % repo.location)
 			portage.util.ensure_dirs(repo.location, mode=0o755,
-					uid=self.sync_user_pw.uid, gid=self.sync_user_pw.gid)
+					uid=self.sync_user_pw.pw_uid, gid=self.sync_user_pw.pw_gid)
 			st = os.stat(repo.location)
 
 		self.usersync_uid = None
