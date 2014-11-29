@@ -1731,7 +1731,7 @@ def action_info(settings, trees, myopts, myfiles):
 		          'PORTAGE_BZIP2_COMMAND',
 		          'USE', 'CHOST', 'CFLAGS', 'CXXFLAGS',
 		          'ACCEPT_KEYWORDS', 'ACCEPT_LICENSE', 'FEATURES',
-		          'EMERGE_DEFAULT_OPTS']
+		          'EMERGE_DEFAULT_OPTS', 'SYNC_USER', 'SYNC_UMASK']
 
 		myvars.extend(portage.util.grabfile(settings["PORTDIR"]+"/profiles/info_vars"))
 

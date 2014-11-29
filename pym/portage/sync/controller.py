@@ -83,7 +83,10 @@ class SyncManager(object):
 		self.logger = logger
 		# Similar to emerge, sync needs a default umask so that created
 		# files have sane permissions.
-		os.umask(0o22)
+		self.sync_umask_set = "SYNC_UMASK" in settings
+		self.sync_umask = int(settings.get("SYNC_UMASK", "022").strip(), base=10)
+		self.sync_user_pw = pwd.getpwnam(settings.get("SYNC_USER", "root").strip())
+		os.umask(self.sync_umask)
 
 		self.module_controller = portage.sync.module_controller
 		self.module_names = self.module_controller.module_names
@@ -204,10 +207,21 @@ class SyncManager(object):
 				spawn_kwargs["gid"]    = st.st_gid
 				spawn_kwargs["groups"] = [st.st_gid]
 				spawn_kwargs["env"]["HOME"] = homedir
-				umask = 0o002
-				if not st.st_mode & 0o020:
-					umask = umask | 0o020
-				spawn_kwargs["umask"] = umask
+				if self.sync_umask_set:
+					spawn_kwargs["umask"] = self.sync_umask
+				else:
+					umask = 0o002
+					if not st.st_mode & 0o020:
+						umask = umask | 0o020
+					spawn_kwargs["umask"] = umask
+		else:
+			pw = self.sync_user_pw
+			spawn_kwargs["uid"] = pw.pw_uid
+			spawn_kwargs["gid"] = pw.pw_gid
+			spawn_kwargs["groups"] = [pw.pw_gid]
+			spawn_kwargs["env"]["HOME"] = pw.pw_dir
+			spawn_kwargs["umask"] = self.sync_umask
+
 		self.spawn_kwargs = spawn_kwargs
 
 		if self.usersync_uid is not None:
@@ -217,7 +231,7 @@ class SyncManager(object):
 			if rval != os.EX_OK:
 				return rval
 
-		os.umask(0o022)
+		os.umask(self.sync_umask)
 		return os.EX_OK
 
 
