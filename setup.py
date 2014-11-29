@@ -651,11 +651,10 @@ class select_plugins(Command):
 
 
 setup(
-	name = 'portage',
-	version = '2.2.17',
-	url = 'https://wiki.gentoo.org/wiki/Project:Portage',
-	author = 'Gentoo Portage Development Team',
-	author_email = 'dev-portage@gentoo.org',
+	name = 'portage-funtoo',
+	version = '2.3.8',
+	url = 'http://www.funtoo.org/Portage',
+	author = 'Funtoo Portage Development Team',
 
 	package_dir = {'': 'pym'},
 	packages = PACKAGES,
