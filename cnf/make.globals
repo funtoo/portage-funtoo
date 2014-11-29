@@ -19,7 +19,6 @@ LDFLAGS=""
 FFLAGS=""
 FCFLAGS=""
 
-SYNC="git://github.com/funtoo/portage-mini-2011.git"
 SYNC_USER="root"
 
 # Default distfiles mirrors. This rotation has multiple hosts and is reliable.
@@ -65,7 +64,8 @@ FEATURES="assume-digests binpkg-logs
 # Ignore file collisions for unowned *.pyo and *.pyc files, this helps during
 # transition from compiling python modules in live file system to compiling
 # them in src_install() function.
-COLLISION_IGNORE="/lib/modules/* /lib/firmware/* *.py[co] *\$py.class"
+COLLISION_IGNORE="/lib/modules/* *.py[co] *\$py.class"
+COLLISION_IGNORE="${COLLISION_IGNORE} /lib/firmware/*"
 UNINSTALL_IGNORE="/lib/modules/*"
 
 # Enable preserve-libs for testing with portage versions that support it.
