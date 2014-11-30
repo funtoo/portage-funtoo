@@ -612,7 +612,7 @@ def get_manpages():
 setup(
 	name = 'portage-funtoo',
 	version = '2.3.7',
-	url = 'http://www.funtoo.org/Package:Portage_%28Funtoo%29',
+	url = 'http://www.funtoo.org/Portage',
 	author = 'Funtoo Portage Development Team',
 
 	package_dir = {'': 'pym'},
