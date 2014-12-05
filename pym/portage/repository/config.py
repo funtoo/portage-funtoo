@@ -827,6 +827,19 @@ class RepoConfigLoader(object):
 					"!!! %s\n" % _("Set 'masters = %s' in this file for future compatibility") %
 					self.mainRepo().name, level=logging.WARNING, noiselevel=-1)
 
+		# respect SYNC_UMASK and SYNC_USER whenever not overriden
+		fallback_umask = settings.get('SYNC_UMASK')
+		fallback_user = settings.get('SYNC_USER')
+		if fallback_umask is not None or fallback_user is not None:
+			for repo_name, repo in prepos.items():
+				if repo_name == "DEFAULT":
+					continue
+
+				if repo.sync_umask is None and fallback_umask is not None:
+					repo.sync_umask = fallback_umask
+				if repo.sync_user is None and fallback_user is not None:
+					repo.sync_user = fallback_user
+
 		self._prepos_changed = True
 		self._repo_location_list = []
 
