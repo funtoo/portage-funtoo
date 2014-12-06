@@ -499,6 +499,8 @@ class config(object):
 			portdir = ""
 			portdir_overlay = ""
 			portdir_sync = None
+			sync_umask = None
+			sync_user = None
 			for confs in [make_globals, make_conf, self.configdict["env"]]:
 				v = confs.get("PORTDIR")
 				if v is not None:
@@ -511,11 +513,21 @@ class config(object):
 				v = confs.get("SYNC")
 				if v is not None:
 					portdir_sync = v
+				v = confs.get("SYNC_UMASK")
+				if v is not None:
+					sync_umask = v
+				v = confs.get("SYNC_USER")
+				if v is not None:
+					sync_user = v
 
 			self["PORTDIR"] = portdir
 			self["PORTDIR_OVERLAY"] = portdir_overlay
 			if portdir_sync:
 				self["SYNC"] = portdir_sync
+			if sync_umask:
+				self["SYNC_UMASK"] = sync_umask
+			if sync_user:
+				self["SYNC_USER"] = sync_user
 			self.lookuplist = [self.configdict["env"]]
 			if repositories is None:
 				self.repositories = load_repository_config(self)
