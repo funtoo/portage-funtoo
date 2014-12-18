@@ -63,7 +63,7 @@ class GitSync(SyncBase):
 		sync_uri = self.repo.sync_uri
 		if sync_uri.startswith("file://"):
 			sync_uri = sync_uri[6:]
-		exitcode = portage.process.spawn_bash("cd %s ; %s clone %s ." % \
+		exitcode = portage.process.spawn_bash("cd %s ; %s clone --depth=1 %s ." % \
 			(portage._shell_quote(self.repo.location),
 			self.bin_command,
 			portage._shell_quote(sync_uri)),
